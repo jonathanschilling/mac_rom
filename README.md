@@ -1,6 +1,6 @@
 # Macintosh ROM Source Tree
 
-This directory is the publication snapshot of a fully commented,
+This repository contains a fully commented,
 buildable 68000 assembly source tree for five classic-era Macintosh
 ROMs. The same source tree assembles into bit-identical copies of
 each ROM via `--defsym ROM_TARGET={1..5}`.
@@ -92,8 +92,8 @@ file-boundary placement reflects subsystem grouping where possible.
 ## Acknowledgements
 
 This repo builds on the massive amount of the work of others,
-last but not least the team at Apple Computer Inc., who originally
-build the Macintosh ROM.
+last but not least by the team at Apple Computer Inc.,
+who designed and implemented the Macintosh ROM.
 
 A list of information sources that went into this project is provided below.
 It is likely incomplete - please open an issue if you find that a given
