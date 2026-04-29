@@ -99,6 +99,7 @@ A list of information sources that went into this project is provided below.
 It is likely incomplete - please open an issue if you find that a given
 resource missing.
 
+* Inside Macintosh I-V
 * https://www.gryphel.com/c/minivmac/index.html
 * https://www.gryphel.com/c/minivmac/extras/fdisasm/c/index.html
 * https://www.gryphel.com/c/minivmac/extras/fdisasm/c/roms.html
