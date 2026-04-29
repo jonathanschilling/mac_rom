@@ -1,0 +1,113 @@
+| Macintosh Plus ROM master file (128 KB)
+|
+| Entry point for all three Plus variants. The --defsym ROM_TARGET on
+| the assembler command line distinguishes:
+| ROM_TARGET = 3 -> MAC_PLUS_V1 (1986-01)
+| 4 -> MAC_PLUS_V2 (1986-03, branch-condition fixes)
+| 5 -> MAC_PLUS_V3 (1986-03, SCSI patch; default)
+|
+| Assembles with:
+| m68k-linux-gnu-as -m68000 --register-prefix-optional -Iinclude \
+| --defsym ROM_TARGET={3|4|5} -o rom.o src/plus/rom_plus.s
+|
+| All intra-variant byte differences (v1 vs v2 vs v3) are wrapped
+| inline as `.if ROM_TARGET == MAC_PLUS_V*` blocks in the subsystem
+| files. There is no cross-generation switching here -- this tree is
+| exclusively Plus.
+
+  .include "rom_target.inc"
+  .include "traps.inc"
+  .include "lowmem.inc"
+  .include "hwregs.inc"
+  .include "sysequ.inc"
+  .include "fsequ.inc"
+  .include "toolequ.inc"
+  .include "sonyequ.inc"
+  .include "private.inc"
+  .include "macros.inc"
+
+  .org 0x0                                      | ROM base address
+
+| === Boot + OS ===
+  .include "plus/boot/vectors.s"
+  .include "plus/boot/boot_install.s"
+  .include "plus/boot/boot_load.s"
+  .include "plus/boot/memtest.s"
+  .include "plus/boot/sad_mac.s"
+  .include "plus/debugger/debugger.s"
+  .include "plus/os/sys_error.s"
+  .include "plus/debugger/microbug.s"
+  .include "plus/hw/queue.s"
+  .include "plus/hw/interrupts.s"
+  .include "plus/os/trap_dispatch.s"
+  .include "plus/os/device_mgr.s"
+  .include "plus/os/event_mgr.s"
+  .include "plus/os/fs_queue.s"
+  .include "plus/os/file_mgr.s"
+  .include "plus/os/file_mgr_io.s"
+  .include "plus/os/file_mgr_catalog.s"
+  .include "plus/os/file_mgr_btree.s"
+  .include "plus/os/file_mgr_cache.s"
+  .include "plus/toolbox/quickdraw/GrafTypes.s"
+  .include "plus/toolbox/quickdraw/LCursor.s"
+  .include "plus/toolbox/quickdraw/Util.s"
+  .include "plus/toolbox/quickdraw/GrafAsm.s"
+  .include "plus/toolbox/quickdraw/Text.s"
+  .include "plus/toolbox/quickdraw/DrawText.s"
+  .include "plus/toolbox/quickdraw/Lines.s"
+  .include "plus/toolbox/quickdraw/DrawLine.s"
+  .include "plus/toolbox/quickdraw/PutLine.s"
+  .include "plus/toolbox/quickdraw/Rects.s"
+  .include "plus/toolbox/quickdraw/BitBlt.s"
+  .include "plus/toolbox/quickdraw/RgnBlt.s"
+  .include "plus/toolbox/quickdraw/RRects.s"
+  .include "plus/toolbox/quickdraw/Ovals.s"
+  .include "plus/toolbox/quickdraw/PutOval.s"
+  .include "plus/toolbox/quickdraw/Arcs.s"
+  .include "plus/toolbox/quickdraw/DrawArc.s"
+  .include "plus/toolbox/quickdraw/Angles.s"
+  .include "plus/toolbox/quickdraw/Polygons.s"
+  .include "plus/toolbox/quickdraw/Regions.s"
+  .include "plus/toolbox/quickdraw/SeekRgn.s"
+  .include "plus/toolbox/quickdraw/RgnOp.s"
+  .include "plus/toolbox/quickdraw/SortPoints.s"
+  .include "plus/toolbox/quickdraw/PackRgn.s"
+  .include "plus/toolbox/quickdraw/PutRgn.s"
+  .include "plus/toolbox/quickdraw/Bitmaps.s"
+  .include "plus/toolbox/quickdraw/Stretch.s"
+  .include "plus/toolbox/quickdraw/Pictures.s"
+  .include "plus/toolbox/font_mgr.s"
+  .include "plus/toolbox/segment_loader.s"
+  .include "plus/toolbox/os_utilities.s"
+  .include "plus/hw/rtc.s"
+  .include "plus/os/memory_mgr.s"
+  .include "plus/toolbox/toolbox_event.s"
+  .include "plus/toolbox/window_mgr.s"
+  .include "plus/toolbox/menu_mgr.s"
+  .include "plus/toolbox/control_mgr.s"
+  .include "plus/toolbox/resource_mgr_files.s"
+  .include "plus/toolbox/resource_mgr.s"
+  .include "plus/toolbox/dialog_mgr_publics.s"
+  .include "plus/toolbox/dialog_mgr.s"
+  .include "plus/toolbox/toolbox_utils.s"
+  .include "plus/toolbox/fixmath.s"
+  .include "plus/toolbox/textedit.s"
+  .include "plus/toolbox/qd_colorfill.s"
+  .include "plus/toolbox/scrap_mgr.s"
+  .include "plus/toolbox/package_mgr.s"
+  .include "plus/toolbox/scsi_mgr.s"
+  .include "plus/hw/time_mgr.s"
+  .include "plus/resources/res_map.s"
+  .include "plus/resources/res_drvr_print.s"
+  .include "plus/resources/res_drvr_sound.s"
+  .include "plus/resources/res_drvr_sony.s"
+  .include "plus/resources/res_drvr_atp.s"
+  .include "plus/resources/res_drvr_mpp.s"
+  .include "plus/resources/res_serd.s"
+  .include "plus/resources/res_mdef.s"
+  .include "plus/resources/res_wdef.s"
+  .include "plus/resources/res_pack_7.s"
+  .include "plus/resources/res_pack_5.s"
+  .include "plus/resources/res_pack_4.s"
+  .include "plus/resources/res_curs_font.s"
+  .include "plus/extra/extra.s"
