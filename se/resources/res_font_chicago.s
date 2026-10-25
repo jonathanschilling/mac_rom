@@ -11,8 +11,8 @@
 Resource_FONT_000C:
 | FONT 12 resource header.
 Resource_FONT_000C_Header:
-    .long	0xC0000DEA                            | ROM resource header: tag $C0, physical size $DEA (8 + $DE2)
-    .long	0x000000B0                            | relative handle: master pointer at ROM zone + $B0
+    .long       0xC0000DEA                      | ROM resource header: tag $C0, physical size $DEA (8 + $DE2)
+    .long       0x000000B0                      | relative handle: master pointer at ROM zone + $B0
 | FONT 12 resource body.
 _FONT_12_:
     .byte 0x90,0x01,0x00,0x00
@@ -916,8 +916,8 @@ YFg:
 Resource_FONT_0000_Chicago:
 | FONT 0 resource header.
 Resource_FONT_0000_Chicago_Header:
-    .long	0xC0000008                            | ROM resource header: tag $C0, physical size $8 (8 + $0)
-    .long	0x000000B4                            | relative handle: master pointer at ROM zone + $B4
+    .long       0xC0000008                      | ROM resource header: tag $C0, physical size $8 (8 + $0)
+    .long       0x000000B4                      | relative handle: master pointer at ROM zone + $B4
 
 | FONT 0 resource body.
 _FONT_0_Chicago:

@@ -11,8 +11,8 @@ Resource_bbmc_0000:
 Resource_bbmc_0_Header:
 | Bbmc 0 resource header.
 Resource_bbmc_0000_Header:
-    .long	0xC001428A                            | ROM resource header: tag $C0, physical size $1428A (8 + $14282)
-    .long	0x00000064                            | relative handle: master pointer at ROM zone + $64
+    .long       0xC001428A                      | ROM resource header: tag $C0, physical size $1428A (8 + $14282)
+    .long       0x00000064                      | relative handle: master pointer at ROM zone + $64
 
 bbmc_team_photos:
 | Relative offsets of hidden PackBits frames.

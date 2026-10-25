@@ -8,8 +8,8 @@
 Resource_FONT_0189:
 | FONT 393 resource header.
 Resource_FONT_0189_Header:
-    .long	0xC0000A2A                            | ROM resource header: tag $C0, physical size $A2A (8 + $A22)
-    .long	0x000000B8                            | relative handle: master pointer at ROM zone + $B8
+    .long       0xC0000A2A                      | ROM resource header: tag $C0, physical size $A2A (8 + $A22)
+    .long       0x000000B8                      | relative handle: master pointer at ROM zone + $B8
 | FONT 393 resource body.
 _FONT_393_:
     .byte 0x90,0x01
@@ -672,8 +672,8 @@ _FONT_393_:
 Resource_FONT_018C:
 | FONT 396 resource header.
 Resource_FONT_018C_Header:
-    .long	0xC0000C70                            | ROM resource header: tag $C0, physical size $C70 (8 + $C68)
-    .long	0x000000BC                            | relative handle: master pointer at ROM zone + $BC
+    .long       0xC0000C70                      | ROM resource header: tag $C0, physical size $C70 (8 + $C68)
+    .long       0x000000BC                      | relative handle: master pointer at ROM zone + $BC
 | FONT 396 resource body.
 _FONT_396_:
     .byte 0x90,0x01,0x00,0x00

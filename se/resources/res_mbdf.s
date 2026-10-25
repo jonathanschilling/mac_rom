@@ -133,64 +133,64 @@ Resource_MBDF_0000:
 | master pointer in the ROM zone (INITRESOURCES_CONT_2): 0x54 + 4 *
 | its index in the ROM map's reference lists.
 Resource_MBDF_0000_Header:
-    .long	0xC00005AE                            | ROM resource header: tag $C0, physical size $5AE (8 + $5A6)
-    .long	0x00000090                            | relative handle: master pointer at ROM zone + $90
+    .long       0xC00005AE                      | ROM resource header: tag $C0, physical size $5AE (8 + $5A6)
+    .long       0x00000090                      | relative handle: master pointer at ROM zone + $90
 | ----------------------------------------------------------
 | _MBDF_0_ -- entry point and standard defproc header
 | ----------------------------------------------------------
 _MBDF_0_:
-    BRA.B	MBDF0_START                           | skip the header
-    .short	0x0000                               | flags word
-    .long	0x4D424446                            | resource type 'MBDF'
-    .short	0x0000                               | resource ID 0
-    .short	0x0000                               | version 0
+    BRA.B       MBDF0_START                     | skip the header
+    .short      0x0000                          | flags word
+    .long       0x4D424446                      | resource type 'MBDF'
+    .short      0x0000                          | resource ID 0
+    .short      0x0000                          | version 0
 | StartMBDF: save registers and the caller's port, set up the
 | WMgrPort and lock the MenuList, then dispatch on the message.
 MBDF0_START:
-    LINK	A6,#MBDF0_FRAMESIZE                    | frame for menuRect and saveD3
-    MOVEM.L	D3-D5/A2-A4,-(SP)                   | save the work registers
-    MOVEA.L	(A5),A0                             | A0 = QuickDraw globals
-    MOVE.L	(A0),-(SP)                           | save thePort (restored by _SetPort below)
-    MOVEA.L	(WMgrPort).W,A2                     | A2 = the Window Manager port
-    MOVE.L	A2,-(SP)                             | draw in the WMgrPort
+    LINK        A6,#MBDF0_FRAMESIZE             | frame for menuRect and saveD3
+    MOVEM.L     D3-D5/A2-A4,-(SP)               | save the work registers
+    MOVEA.L     (A5),A0                         | A0 = QuickDraw globals
+    MOVE.L      (A0),-(SP)                      | save thePort (restored by _SetPort below)
+    MOVEA.L     (WMgrPort).W,A2                 | A2 = the Window Manager port
+    MOVE.L      A2,-(SP)                        | draw in the WMgrPort
     _SetPort                                    | thePort := WMgrPort
-    PEA.L	0x10(A2)                              | WMgrPort.portRect (the whole screen)
+    PEA.L       0x10(A2)                        | WMgrPort.portRect (the whole screen)
     _ClipRect                                   | clip wide open
-    CLR.L	-(SP)                                 | font 0 and style [] for the next two calls
+    CLR.L       -(SP)                           | font 0 and style [] for the next two calls
     _TextFont                                   | system font (A278: always)
     _TextFace                                   | plain style
-    MOVEA.L	(MenuList).W,A0                     | A0 = MenuList handle
-    TST.L	(A0)                                  | has the list been purged?
-    BNE.B	MBDF0_MENULISTOK                      | no -> go on
-    MOVEQ.L	#0x54,D0                            | menuPrgErr (84): MenuList purged
+    MOVEA.L     (MenuList).W,A0                 | A0 = MenuList handle
+    TST.L       (A0)                            | has the list been purged?
+    BNE.B       MBDF0_MENULISTOK                | no -> go on
+    MOVEQ.L     #0x54,D0                        | menuPrgErr (84): MenuList purged
     _SysError                                   | fatal system error (does not return)
 MBDF0_MENULISTOK:
     _HLock                                      | lock the MenuList while A3 points into it
-    MOVEA.L	(A0),A3                             | A3 = MenuList pointer
-    LEA.L	MBDF0_GOBARPROC(PC),A0                | A0 = dispatch table
-    MOVE.W	MBDF0_MESSAGE(A6),D0                 | D0 = message number
-    ADD.W	D0,D0                                 | word index
-    ADDA.W	MBDF0_GOBARPROC(PC,D0.W),A0          | A0 = handler address (table + offset)
-    JSR	(A0)                                    | call the message handler
+    MOVEA.L     (A0),A3                         | A3 = MenuList pointer
+    LEA.L       MBDF0_GOBARPROC(PC),A0          | A0 = dispatch table
+    MOVE.W      MBDF0_MESSAGE(A6),D0            | D0 = message number
+    ADD.W       D0,D0                           | word index
+    ADDA.W      MBDF0_GOBARPROC(PC,D0.W),A0     | A0 = handler address (table + offset)
+    JSR         (A0)                            | call the message handler
     _SetPort                                    | restore the caller's port
-    MOVEA.L	(MenuList).W,A0                     | MenuList handle
+    MOVEA.L     (MenuList).W,A0                 | MenuList handle
     _HUnlock                                    | unlock it again
-    MOVEM.L	(SP)+,D3-D5/A2-A4                   | restore the work registers
-    UNLK	A6                                     | drop the frame
-    MOVEA.L	(SP)+,A0                            | A0 = return address
-    ADDQ.W	#0x8,SP                              | strip selector, message, parameter
-    JMP	(A0)                                    | return to the Menu Manager, result on the stack
+    MOVEM.L     (SP)+,D3-D5/A2-A4               | restore the work registers
+    UNLK        A6                              | drop the frame
+    MOVEA.L     (SP)+,A0                        | A0 = return address
+    ADDQ.W      #0x8,SP                         | strip selector, message, parameter
+    JMP         (A0)                            | return to the Menu Manager, result on the stack
 | GoBarProc: message dispatch table, offsets from the table
 MBDF0_GOBARPROC:
-    .short	MBDF0_DRAWBAR-MBDF0_GOBARPROC        | 0 Draw
-    .short	MBDF0_HITBAR-MBDF0_GOBARPROC         | 1 Hit
-    .short	MBDF0_CALCBAR-MBDF0_GOBARPROC        | 2 Calc
-    .short	MBDF0_INITBAR-MBDF0_GOBARPROC        | 3 Init
-    .short	MBDF0_DISPOSEBAR-MBDF0_GOBARPROC     | 4 Dispose
-    .short	MBDF0_HILITEBAR-MBDF0_GOBARPROC      | 5 Hilite
-    .short	MBDF0_HEIGHTBAR-MBDF0_GOBARPROC      | 6 Height
-    .short	MBDF0_SAVEBITSBAR-MBDF0_GOBARPROC    | 7 Save
-    .short	MBDF0_RESTOREBITSBAR-MBDF0_GOBARPROC | 8 Restore
+    .short      MBDF0_DRAWBAR-MBDF0_GOBARPROC   | 0 Draw
+    .short      MBDF0_HITBAR-MBDF0_GOBARPROC    | 1 Hit
+    .short      MBDF0_CALCBAR-MBDF0_GOBARPROC   | 2 Calc
+    .short      MBDF0_INITBAR-MBDF0_GOBARPROC   | 3 Init
+    .short      MBDF0_DISPOSEBAR-MBDF0_GOBARPROC | 4 Dispose
+    .short      MBDF0_HILITEBAR-MBDF0_GOBARPROC | 5 Hilite
+    .short      MBDF0_HEIGHTBAR-MBDF0_GOBARPROC | 6 Height
+    .short      MBDF0_SAVEBITSBAR-MBDF0_GOBARPROC | 7 Save
+    .short      MBDF0_RESTOREBITSBAR-MBDF0_GOBARPROC | 8 Restore
 | ----------------------------------------------------------
 | Msg 3 -- InitBar: this version keeps no private data, so there
 | is nothing to allocate (the later version allocates its save
@@ -209,12 +209,12 @@ MBDF0_DISPOSEBAR:
 | the Menu Manager's CALCMBHEIGHT, which InitWindows calls.
 | ----------------------------------------------------------
 MBDF0_HEIGHTBAR:
-    BSR.B	MBDF0_GETMENUINFO                     | D0 = ascent (high word) / descent (low word)
-    MOVEQ.L	#0x5,D1                             | 5 pixels of white space
-    ADD.W	D0,D1                                 | + descent
-    SWAP.W	D0                                   | D0.W = ascent
-    ADD.W	D0,D1                                 | + ascent
-    MOVE.W	D1,(MBarHeight).W                    | store the menu bar height
+    BSR.B       MBDF0_GETMENUINFO               | D0 = ascent (high word) / descent (low word)
+    MOVEQ.L     #0x5,D1                         | 5 pixels of white space
+    ADD.W       D0,D1                           | + descent
+    SWAP.W      D0                              | D0.W = ascent
+    ADD.W       D0,D1                           | + ascent
+    MOVE.W      D1,(MBarHeight).W               | store the menu bar height
     RTS                                         | return from MBDF0_HEIGHTBAR
 | ----------------------------------------------------------
 | GetMenuInfo -- font metrics of the current (system) font.
@@ -223,11 +223,11 @@ MBDF0_HEIGHTBAR:
 | Called by: MBDF0_HEIGHTBAR, MBDF0_GETMENUASCENT
 | ----------------------------------------------------------
 MBDF0_GETMENUINFO:
-    SUBQ.W	#0x8,SP                              | room for a FontInfo record
-    MOVE.L	SP,-(SP)                             | point to it
+    SUBQ.W      #0x8,SP                         | room for a FontInfo record
+    MOVE.L      SP,-(SP)                        | point to it
     _GetFontInfo                                | ascent, descent, widMax, leading
-    MOVE.L	(SP)+,D0                             | D0 = ascent / descent
-    ADDQ.W	#0x4,SP                              | drop widMax and leading
+    MOVE.L      (SP)+,D0                        | D0 = ascent / descent
+    ADDQ.W      #0x4,SP                         | drop widMax and leading
     RTS                                         | return from MBDF0_GETMENUINFO
 | ----------------------------------------------------------
 | GetMenuAscent -- the baseline of the menu titles.
@@ -236,11 +236,11 @@ MBDF0_GETMENUINFO:
 | Called by: MBDF0_DRAW1TITLE
 | ----------------------------------------------------------
 MBDF0_GETMENUASCENT:
-    BSR.B	MBDF0_GETMENUINFO                     | D0 = ascent / descent
-    SWAP.W	D0                                   | D0.W = ascent
-    MOVEQ.L	#0x0,D4                             | clear the high word
-    MOVE.W	D0,D4                                | D4 = ascent
-    ADDQ.W	#0x2,D4                              | + 2 = baseline
+    BSR.B       MBDF0_GETMENUINFO               | D0 = ascent / descent
+    SWAP.W      D0                              | D0.W = ascent
+    MOVEQ.L     #0x0,D4                         | clear the high word
+    MOVE.W      D0,D4                           | D4 = ascent
+    ADDQ.W      #0x2,D4                         | + 2 = baseline
     RTS                                         | return from MBDF0_GETMENUASCENT
 | ----------------------------------------------------------
 | Msg 0 -- DrawBar: clear the menu bar to white and draw the line
@@ -250,56 +250,56 @@ MBDF0_GETMENUASCENT:
 | bar (Inside Macintosh V-251; InitWindows' DRAWMBAR).
 | ----------------------------------------------------------
 MBDF0_DRAWBAR:
-    MOVE.L	0x1C(A2),-(SP)                       | WMgrPort.clipRgn
-    CLR.L	-(SP)                                 | left = 0, top = 0
-    MOVE.W	0x16(A2),-(SP)                       | right = portRect.right (screen width)
-    MOVE.W	(MBarHeight).W,-(SP)                 | bottom = MBarHeight
+    MOVE.L      0x1C(A2),-(SP)                  | WMgrPort.clipRgn
+    CLR.L       -(SP)                           | left = 0, top = 0
+    MOVE.W      0x16(A2),-(SP)                  | right = portRect.right (screen width)
+    MOVE.W      (MBarHeight).W,-(SP)            | bottom = MBarHeight
     _SetRectRgn                                 | ClipMBar: clip to the menu bar
-    PEA.L	0x10(A2)                              | WMgrPort.portRect
-    MOVE.L	#0x100010,-(SP)                      | screenRadius (16,16)
+    PEA.L       0x10(A2)                        | WMgrPort.portRect
+    MOVE.L      #0x100010,-(SP)                 | screenRadius (16,16)
     _EraseRoundRect                             | clear the bar inside the round screen corners
-    MOVE.W	0x16(A2),-(SP)                       | LineTo h = screen right
-    MOVEQ.L	#0x0,D0                             | D0 = 0 (h of MoveTo in the high word)
-    MOVE.W	(MBarHeight).W,D0                    | bar height
-    SUBQ.W	#0x1,D0                              | its last row
-    MOVE.W	D0,-(SP)                             | LineTo v = MBarHeight-1
-    SWAP.W	D0                                   | D0 = point (v = MBarHeight-1, h = 0)
-    MOVE.L	D0,-(SP)                             | MoveTo point
+    MOVE.W      0x16(A2),-(SP)                  | LineTo h = screen right
+    MOVEQ.L     #0x0,D0                         | D0 = 0 (h of MoveTo in the high word)
+    MOVE.W      (MBarHeight).W,D0               | bar height
+    SUBQ.W      #0x1,D0                         | its last row
+    MOVE.W      D0,-(SP)                        | LineTo v = MBarHeight-1
+    SWAP.W      D0                              | D0 = point (v = MBarHeight-1, h = 0)
+    MOVE.L      D0,-(SP)                        | MoveTo point
     _MoveTo                                     | pen to the left end of the bottom row
     _LineTo                                     | draw the line under the menu bar
-    CMPI.L	#-1,MBDF0_PARAM(A6)                  | param = -1 (just clear)?
-    BEQ.B	MBDF0_DRAWDONE                        | yes -> done, clip stays on the bar
-    PEA.L	0x10(A2)                              | WMgrPort.portRect
+    CMPI.L      #-1,MBDF0_PARAM(A6)             | param = -1 (just clear)?
+    BEQ.B       MBDF0_DRAWDONE                  | yes -> done, clip stays on the bar
+    PEA.L       0x10(A2)                        | WMgrPort.portRect
     _ClipRect                                   | clip wide open again
-    TST.W	lastMenu(A3)                          | any menus in the list?
-    BEQ.B	MBDF0_DRAWDONE                        | no -> done
-    CLR.W	MBDF0_SAVED3(A6)                      | no hilited title found yet
-    MOVEQ.L	#0x6,D3                             | D3 = offset of the first (leftmost) menu
+    TST.W       lastMenu(A3)                    | any menus in the list?
+    BEQ.B       MBDF0_DRAWDONE                  | no -> done
+    CLR.W       MBDF0_SAVED3(A6)                | no hilited title found yet
+    MOVEQ.L     #0x6,D3                         | D3 = offset of the first (leftmost) menu
 | main drawing loop: D3 = MenuList offset of the title to draw
 MBDF0_DRAWMLOOP:
-    MOVE.W	D3,D0                                | this title
-    BSR.W	MBDF0_GETTITLERECT                    | TempRect = its hilite rect
-    BSR.W	MBDF0_DRAW1TITLE                      | draw the title (gray if disabled)
-    MOVE.W	(TheMenu).W,D0                       | menuID of the hilited menu
-    MOVEA.L	menuoH(A3,D3.W),A4                  | this menu's handle
-    MOVEA.L	(A4),A4                             | A4 = its menu record
-    CMP.W	menuID(A4),D0                         | is it the hilited one?
-    BNE.B	MBDF0_NEXTDRAW                        | no ->
-    MOVE.W	D3,MBDF0_SAVED3(A6)                  | remember it for after the loop
+    MOVE.W      D3,D0                           | this title
+    BSR.W       MBDF0_GETTITLERECT              | TempRect = its hilite rect
+    BSR.W       MBDF0_DRAW1TITLE                | draw the title (gray if disabled)
+    MOVE.W      (TheMenu).W,D0                  | menuID of the hilited menu
+    MOVEA.L     menuoH(A3,D3.W),A4              | this menu's handle
+    MOVEA.L     (A4),A4                         | A4 = its menu record
+    CMP.W       menuID(A4),D0                   | is it the hilited one?
+    BNE.B       MBDF0_NEXTDRAW                  | no ->
+    MOVE.W      D3,MBDF0_SAVED3(A6)             | remember it for after the loop
 MBDF0_NEXTDRAW:
-    ADDQ.W	#0x6,D3                              | next entry
-    CMP.W	lastMenu(A3),D3                       | past the last one?
-    BLE.B	MBDF0_DRAWMLOOP                       | no -> draw it
+    ADDQ.W      #0x6,D3                         | next entry
+    CMP.W       lastMenu(A3),D3                 | past the last one?
+    BLE.B       MBDF0_DRAWMLOOP                 | no -> draw it
 | hilite the selected title now that all titles are drawn (A428)
-    MOVE.W	MBDF0_SAVED3(A6),D0                  | offset of the hilited title
-    BEQ.B	MBDF0_DRAWDONE                        | none -> done
-    MOVE.W	D0,D3                                | D3 = its offset
-    BSR.W	MBDF0_GETTITLERECT                    | TempRect = its hilite rect
-    MOVEA.L	menuoH(A3,D3.W),A0                  | its menu handle
+    MOVE.W      MBDF0_SAVED3(A6),D0             | offset of the hilited title
+    BEQ.B       MBDF0_DRAWDONE                  | none -> done
+    MOVE.W      D0,D3                           | D3 = its offset
+    BSR.W       MBDF0_GETTITLERECT              | TempRect = its hilite rect
+    MOVEA.L     menuoH(A3,D3.W),A0              | its menu handle
     _HLock                                      | lock it
-    MOVEA.L	(A0),A4                             | A4 = menu record
-    BSR.W	MBDF0_DOSELECTED                      | invert the title (also unlocks)
-    MOVEA.L	menuoH(A3,D3.W),A0                  | menu handle again
+    MOVEA.L     (A0),A4                         | A4 = menu record
+    BSR.W       MBDF0_DOSELECTED                | invert the title (also unlocks)
+    MOVEA.L     menuoH(A3,D3.W),A0              | menu handle again
     _HUnlock                                    | unlock it
 MBDF0_DRAWDONE:
     RTS                                         | return from MBDF0_DRAWBAR
@@ -313,32 +313,32 @@ MBDF0_DRAWDONE:
 | later excluded it, CXXX), points above the screen too.
 | ----------------------------------------------------------
 MBDF0_HITBAR:
-    MOVE.L	MBDF0_PARAM(A6),D1                   | D1 = mouse point (v / h)
-    SWAP.W	D1                                   | D1.W = v
-    CMP.W	(MBarHeight).W,D1                     | below the bar?
-    BGT.B	MBDF0_NOTINBAR                        | yes -> -1
-    SWAP.W	D1                                   | D1.W = h
-    CMP.W	lastRight(A3),D1                      | right of the last title?
-    BGE.B	MBDF0_NOTITLE                         | yes -> 0
-    CMPI.W	#0xA,D1                              | left of the first title (mbMenu1Loc)?
-    BLT.B	MBDF0_NOTITLE                         | yes -> 0
-    MOVEQ.L	#0x0,D0                             | clear the high word of the result
-    MOVE.W	lastMenu(A3),D0                      | start with the last (rightmost) menu
+    MOVE.L      MBDF0_PARAM(A6),D1              | D1 = mouse point (v / h)
+    SWAP.W      D1                              | D1.W = v
+    CMP.W       (MBarHeight).W,D1               | below the bar?
+    BGT.B       MBDF0_NOTINBAR                  | yes -> -1
+    SWAP.W      D1                              | D1.W = h
+    CMP.W       lastRight(A3),D1                | right of the last title?
+    BGE.B       MBDF0_NOTITLE                   | yes -> 0
+    CMPI.W      #0xA,D1                         | left of the first title (mbMenu1Loc)?
+    BLT.B       MBDF0_NOTITLE                   | yes -> 0
+    MOVEQ.L     #0x0,D0                         | clear the high word of the result
+    MOVE.W      lastMenu(A3),D0                 | start with the last (rightmost) menu
 MBDF0_HITLOOP:
-    CMP.W	menuLeft(A3,D0.W),D1                  | h >= this title's left edge?
-    BGE.B	MBDF0_HITTHISONE                      | yes -> it is this title
-    SUBQ.W	#0x6,D0                              | previous entry
-    BRA.B	MBDF0_HITLOOP                         | (the first title's menuLeft is 10 <= h)
+    CMP.W       menuLeft(A3,D0.W),D1            | h >= this title's left edge?
+    BGE.B       MBDF0_HITTHISONE                | yes -> it is this title
+    SUBQ.W      #0x6,D0                         | previous entry
+    BRA.B       MBDF0_HITLOOP                   | (the first title's menuLeft is 10 <= h)
 MBDF0_HITTHISONE:
-    MOVE.L	D0,MBDF0_RESULT(A6)                  | result = MenuList offset of the title
+    MOVE.L      D0,MBDF0_RESULT(A6)             | result = MenuList offset of the title
 MBDF0_HITDONE:
     RTS                                         | return from MBDF0_HITBAR
 MBDF0_NOTITLE:
-    CLR.L	MBDF0_RESULT(A6)                      | in the bar, but not in a title
-    BRA.B	MBDF0_HITDONE                         | return
+    CLR.L       MBDF0_RESULT(A6)                | in the bar, but not in a title
+    BRA.B       MBDF0_HITDONE                   | return
 MBDF0_NOTINBAR:
-    MOVE.L	#-1,MBDF0_RESULT(A6)                 | not in the bar
-    BRA.B	MBDF0_HITDONE                         | return
+    MOVE.L      #-1,MBDF0_RESULT(A6)            | not in the bar
+    BRA.B       MBDF0_HITDONE                   | return
 | ----------------------------------------------------------
 | Msg 2 -- CalcBar: lay out the titles. param 0: from the first
 | title at 10; param = MenuList offset: from that title on. Each
@@ -352,33 +352,33 @@ MBDF0_NOTINBAR:
 | initialization)". The ROM's Menu Manager always passes 0.
 | ----------------------------------------------------------
 MBDF0_CALCBAR:
-    MOVE.L	MBDF0_PARAM(A6),D0                   | D0 = MenuList offset to start at
-    TST.W	D0                                    | (a long, treated as a word)
-    BEQ.B	MBDF0_ENTIREBAR                       | 0 -> the whole bar
-    CMP.W	lastMenu(A3),D0                       | beyond the last entry?
-    BGT.B	MBDF0_CALCDONE                        | yes -> nothing to do
-    MOVE.W	menuLeft(A3,D0.W),D3                 | D3 = left edge of the starting title
-    BRA.B	MBDF0_CALCLOOP                        | (BUG: D4 is not set to D0)
+    MOVE.L      MBDF0_PARAM(A6),D0              | D0 = MenuList offset to start at
+    TST.W       D0                              | (a long, treated as a word)
+    BEQ.B       MBDF0_ENTIREBAR                 | 0 -> the whole bar
+    CMP.W       lastMenu(A3),D0                 | beyond the last entry?
+    BGT.B       MBDF0_CALCDONE                  | yes -> nothing to do
+    MOVE.W      menuLeft(A3,D0.W),D3            | D3 = left edge of the starting title
+    BRA.B       MBDF0_CALCLOOP                  | (BUG: D4 is not set to D0)
 MBDF0_ENTIREBAR:
-    MOVEQ.L	#0xA,D3                             | the first title starts 10 pixels in
-    MOVEQ.L	#0x6,D4                             | D4 = offset of the first entry
-    MOVE.W	D3,menuLeft(A3,D4.W)                 | its menuLeft = 10
+    MOVEQ.L     #0xA,D3                         | the first title starts 10 pixels in
+    MOVEQ.L     #0x6,D4                         | D4 = offset of the first entry
+    MOVE.W      D3,menuLeft(A3,D4.W)            | its menuLeft = 10
 | measure the title of entry D4; D3 = its left edge
 MBDF0_CALCLOOP:
-    MOVEA.L	menuoH(A3,D4.W),A0                  | menu handle
-    MOVEA.L	(A0),A0                             | menu record
-    CLR.W	-(SP)                                 | room for the width
-    PEA.L	menuData(A0)                          | the menu title
+    MOVEA.L     menuoH(A3,D4.W),A0              | menu handle
+    MOVEA.L     (A0),A0                         | menu record
+    CLR.W       -(SP)                           | room for the width
+    PEA.L       menuData(A0)                    | the menu title
     _StringWidth                                | width in the system font
-    ADD.W	(SP)+,D3                              | + title width
-    ADDI.W	#0xD,D3                              | + 13 (mTitleSpace) = left of the next title
-    ADDQ.W	#0x6,D4                              | next entry
-    CMP.W	lastMenu(A3),D4                       | past the last one?
-    BGT.B	MBDF0_CALCLOOPDONE                    | yes -> done
-    MOVE.W	D3,menuLeft(A3,D4.W)                 | its menuLeft
-    BRA.B	MBDF0_CALCLOOP                        | measure it
+    ADD.W       (SP)+,D3                        | + title width
+    ADDI.W      #0xD,D3                         | + 13 (mTitleSpace) = left of the next title
+    ADDQ.W      #0x6,D4                         | next entry
+    CMP.W       lastMenu(A3),D4                 | past the last one?
+    BGT.B       MBDF0_CALCLOOPDONE              | yes -> done
+    MOVE.W      D3,menuLeft(A3,D4.W)            | its menuLeft
+    BRA.B       MBDF0_CALCLOOP                  | measure it
 MBDF0_CALCLOOPDONE:
-    MOVE.W	D3,lastRight(A3)                     | lastRight = end of the last title
+    MOVE.W      D3,lastRight(A3)                | lastRight = end of the last title
 MBDF0_CALCDONE:
     RTS                                         | return from MBDF0_CALCBAR
 | ----------------------------------------------------------
@@ -394,31 +394,31 @@ MBDF0_CALCDONE:
 | (Apple fixed this in 1990: "<10>(lastRight->lastMenu)").
 | ----------------------------------------------------------
 MBDF0_HILITEBAR:
-    MOVE.L	MBDF0_PARAM(A6),D0                   | D0 = state / MenuList offset
-    CMPI.W	#0x0,D0                              | offset 0?
-    BEQ.W	MBDF0_FLIPBAR                         | yes -> invert the whole bar
-    CMP.W	lastRight(A3),D0                      | "legal title?" (should be lastMenu)
-    BGT.W	MBDF0_DONEHILITE                      | no -> ignore
-    MOVE.L	D0,-(SP)                             | save state / offset
-    BSR.W	MBDF0_GETTITLERECT                    | TempRect = the title's hilite rect
-    MOVE.L	(SP)+,D0                             | state / offset again
-    MOVEQ.L	#0x0,D3                             | clear the high word
-    MOVE.W	D0,D3                                | D3 = MenuList offset
-    SWAP.W	D0                                   | D0.W = state
-    CMPI.W	#0x3,D0                              | state > 3?
-    BGT.W	MBDF0_DONEHILITE                      | yes -> ignore
-    BEQ.B	MBDF0_PAINTBUSY                       | 3 = busy -> stripes
-    CMPI.W	#0x2,D0                              | 2 = disabled?
-    BEQ.B	MBDF0_PAINTDISABLED                   | yes -> gray
-    CMPI.W	#0x1,D0                              | 1 = selected?
-    BEQ.B	MBDF0_DOSELECTED                      | yes -> invert
-    PEA.L	(TempRect).W                          | 0 = normal: the title rect
+    MOVE.L      MBDF0_PARAM(A6),D0              | D0 = state / MenuList offset
+    CMPI.W      #0x0,D0                         | offset 0?
+    BEQ.W       MBDF0_FLIPBAR                   | yes -> invert the whole bar
+    CMP.W       lastRight(A3),D0                | "legal title?" (should be lastMenu)
+    BGT.W       MBDF0_DONEHILITE                | no -> ignore
+    MOVE.L      D0,-(SP)                        | save state / offset
+    BSR.W       MBDF0_GETTITLERECT              | TempRect = the title's hilite rect
+    MOVE.L      (SP)+,D0                        | state / offset again
+    MOVEQ.L     #0x0,D3                         | clear the high word
+    MOVE.W      D0,D3                           | D3 = MenuList offset
+    SWAP.W      D0                              | D0.W = state
+    CMPI.W      #0x3,D0                         | state > 3?
+    BGT.W       MBDF0_DONEHILITE                | yes -> ignore
+    BEQ.B       MBDF0_PAINTBUSY                 | 3 = busy -> stripes
+    CMPI.W      #0x2,D0                         | 2 = disabled?
+    BEQ.B       MBDF0_PAINTDISABLED             | yes -> gray
+    CMPI.W      #0x1,D0                         | 1 = selected?
+    BEQ.B       MBDF0_DOSELECTED                | yes -> invert
+    PEA.L       (TempRect).W                    | 0 = normal: the title rect
     _InvertRect                                 | invert it back
-    BRA.W	MBDF0_DONEHILITE                      | done
+    BRA.W       MBDF0_DONEHILITE                | done
 | unreachable: in the Mac II version the normal state erases the
 | title rect here and falls into Draw1Title to redraw the title;
 | the A278 invert-back above branches around it.
-    PEA.L	(TempRect).W                          | (unreachable) the title rect
+    PEA.L       (TempRect).W                    | (unreachable) the title rect
     _EraseRect                                  | (unreachable) erase it
 | ----------------------------------------------------------
 | Draw1Title -- draw one menu title.
@@ -431,21 +431,21 @@ MBDF0_HILITEBAR:
 | Called by: MBDF0_DRAWBAR
 | ----------------------------------------------------------
 MBDF0_DRAW1TITLE:
-    MOVEA.L	menuoH(A3,D3.W),A0                  | the menu handle
+    MOVEA.L     menuoH(A3,D3.W),A0              | the menu handle
     _HLock                                      | lock it while drawing its title
-    MOVEA.L	(A0),A4                             | A4 = menu record
-    BSR.W	MBDF0_GETMENUASCENT                   | D4 = baseline
-    MOVE.W	menuLeft(A3,D3.W),-(SP)              | h = menuLeft
-    ADDQ.W	#0x8,(SP)                            | + 8 (indent)
-    MOVE.W	D4,-(SP)                             | v = baseline
+    MOVEA.L     (A0),A4                         | A4 = menu record
+    BSR.W       MBDF0_GETMENUASCENT             | D4 = baseline
+    MOVE.W      menuLeft(A3,D3.W),-(SP)         | h = menuLeft
+    ADDQ.W      #0x8,(SP)                       | + 8 (indent)
+    MOVE.W      D4,-(SP)                        | v = baseline
     _MoveTo                                     | pen to the title's start
-    PEA.L	menuData(A4)                          | the title string
+    PEA.L       menuData(A4)                    | the title string
     _DrawString                                 | draw it
-    MOVEA.L	menuoH(A3,D3.W),A4                  | menu handle again
-    MOVEA.L	(A4),A4                             | menu record
-    BTST	#0x0,menuEnable+3(A4)                  | menu enabled (menuEnable bit 0)?
-    BEQ.B	MBDF0_PAINTDISABLED                   | no -> gray the title
-    BRA.B	MBDF0_UNLOCKTITLE                     | yes -> unlock and return
+    MOVEA.L     menuoH(A3,D3.W),A4              | menu handle again
+    MOVEA.L     (A4),A4                         | menu record
+    BTST        #0x0,menuEnable+3(A4)           | menu enabled (menuEnable bit 0)?
+    BEQ.B       MBDF0_PAINTDISABLED             | no -> gray the title
+    BRA.B       MBDF0_UNLOCKTITLE               | yes -> unlock and return
 | ----------------------------------------------------------
 | DoSelected -- show a title as selected: invert TempRect, then
 | unlock the title's menu handle (MBDF0_UNLOCKTITLE).
@@ -454,44 +454,44 @@ MBDF0_DRAW1TITLE:
 | MBDF0_HILITEBAR (state 1), where the RTS ends the message.
 | ----------------------------------------------------------
 MBDF0_DOSELECTED:
-    PEA.L	(TempRect).W                          | the title rect
+    PEA.L       (TempRect).W                    | the title rect
     _InvertRect                                 | invert it
-    BRA.B	MBDF0_UNLOCKTITLE                     | unlock and return
+    BRA.B       MBDF0_UNLOCKTITLE               | unlock and return
 | Hilite states 3 (busy) and 2 (disabled), and Draw1Title's gray
 | (PaintTitleDisable): paint TempRect with a pattern in patBic
 | mode, clearing every pixel where the pattern has a 1.
 MBDF0_PAINTBUSY:
-    LEA.L	MBDF0_BUSYPAT(PC),A0                  | A0 = striped pattern (busy)
-    BRA.B	MBDF0_PAINTTITLE                      | paint with it
+    LEA.L       MBDF0_BUSYPAT(PC),A0            | A0 = striped pattern (busy)
+    BRA.B       MBDF0_PAINTTITLE                | paint with it
 MBDF0_PAINTDISABLED:
-    LEA.L	MBDF0_GRAYPAT(PC),A0                  | A0 = gray pattern (disabled)
+    LEA.L       MBDF0_GRAYPAT(PC),A0            | A0 = gray pattern (disabled)
 MBDF0_PAINTTITLE:
-    MOVE.L	A0,-(SP)                             | the pattern, for PenPat
-    MOVE.W	#0xB,-(SP)                           | patBic (11)
+    MOVE.L      A0,-(SP)                        | the pattern, for PenPat
+    MOVE.W      #0xB,-(SP)                      | patBic (11)
     _PenMode                                    | pen mode patBic
     _PenPat                                     | pen pattern
-    PEA.L	(TempRect).W                          | the title rect
+    PEA.L       (TempRect).W                    | the title rect
     _PaintRect                                  | clear the pattern's pixels
     _PenNormal                                  | pen back to normal
 | unlock the menu handle of title D3 and return
 MBDF0_UNLOCKTITLE:
-    MOVEA.L	menuoH(A3,D3.W),A0                  | the menu handle
+    MOVEA.L     menuoH(A3,D3.W),A0              | the menu handle
     _HUnlock                                    | unlock it
 MBDF0_DONEHILITE:
     RTS                                         | return
 | FlipBar (hilite offset 0, used by FlashMenuBar(0)): invert the
 | whole menu bar inside the round screen corners.
 MBDF0_FLIPBAR:
-    MOVEQ.L	#0x0,D0                             | title 0 = the whole bar
-    BSR.W	MBDF0_GETTITLERECT                    | TempRect = (0,0)-(MBarHeight, screen right)
-    PEA.L	(TempRect).W                          | the bar rect
+    MOVEQ.L     #0x0,D0                         | title 0 = the whole bar
+    BSR.W       MBDF0_GETTITLERECT              | TempRect = (0,0)-(MBarHeight, screen right)
+    PEA.L       (TempRect).W                    | the bar rect
     _ClipRect                                   | clip to the bar
-    PEA.L	0x10(A2)                              | WMgrPort.portRect
-    MOVE.L	#0x100010,-(SP)                      | screenRadius (16,16)
+    PEA.L       0x10(A2)                        | WMgrPort.portRect
+    MOVE.L      #0x100010,-(SP)                 | screenRadius (16,16)
     _InvertRoundRect                            | invert the bar (corners stay)
-    PEA.L	0x10(A2)                              | WMgrPort.portRect
+    PEA.L       0x10(A2)                        | WMgrPort.portRect
     _ClipRect                                   | clip wide open again
-    BRA.B	MBDF0_DONEHILITE                      | done
+    BRA.B       MBDF0_DONEHILITE                | done
 | ----------------------------------------------------------
 | GetTitleRect -- the rect of a title that hiliting inverts.
 | In:  D0.W = MenuList offset of the title; 0 = the whole bar.
@@ -502,31 +502,31 @@ MBDF0_FLIPBAR:
 | Called by: MBDF0_DRAWBAR (2), MBDF0_HILITEBAR, MBDF0_FLIPBAR
 | ----------------------------------------------------------
 MBDF0_GETTITLERECT:
-    TST.W	D0                                    | title 0?
-    BEQ.B	MBDF0_WHOLEBAR                        | yes -> the whole bar
-    LEA.L	(TempRect).W,A0                       | A0 = TempRect
-    MOVE.W	#0x1,(A0)+                           | top = 1 (below the screen's top row)
-    MOVE.W	menuLeft(A3,D0.W),(A0)               | left = menuLeft
-    SUBQ.W	#0x1,(A0)+                           | - 1
-    MOVE.W	(MBarHeight).W,(A0)                  | bottom = MBarHeight
-    SUBQ.W	#0x1,(A0)+                           | - 1 (above the line under the bar)
-    CMP.W	lastMenu(A3),D0                       | the last title?
-    BEQ.B	MBDF0_GTLASTMENU                      | yes -> right = lastRight
-    ADDQ.W	#0x6,D0                              | next entry
-    MOVE.W	menuLeft(A3,D0.W),(A0)               | right = next title's left edge
-    BRA.B	MBDF0_GTMARGIN                        | + margin
+    TST.W       D0                              | title 0?
+    BEQ.B       MBDF0_WHOLEBAR                  | yes -> the whole bar
+    LEA.L       (TempRect).W,A0                 | A0 = TempRect
+    MOVE.W      #0x1,(A0)+                      | top = 1 (below the screen's top row)
+    MOVE.W      menuLeft(A3,D0.W),(A0)          | left = menuLeft
+    SUBQ.W      #0x1,(A0)+                      | - 1
+    MOVE.W      (MBarHeight).W,(A0)             | bottom = MBarHeight
+    SUBQ.W      #0x1,(A0)+                      | - 1 (above the line under the bar)
+    CMP.W       lastMenu(A3),D0                 | the last title?
+    BEQ.B       MBDF0_GTLASTMENU                | yes -> right = lastRight
+    ADDQ.W      #0x6,D0                         | next entry
+    MOVE.W      menuLeft(A3,D0.W),(A0)          | right = next title's left edge
+    BRA.B       MBDF0_GTMARGIN                  | + margin
 MBDF0_GTLASTMENU:
-    MOVE.W	lastRight(A3),(A0)                   | right = end of the last title
+    MOVE.W      lastRight(A3),(A0)              | right = end of the last title
 MBDF0_GTMARGIN:
-    ADDQ.W	#0x4,(A0)                            | + 4 pixels of margin
+    ADDQ.W      #0x4,(A0)                       | + 4 pixels of margin
 MBDF0_GTDONE:
     RTS                                         | return from MBDF0_GETTITLERECT
 MBDF0_WHOLEBAR:
-    LEA.L	(TempRect).W,A0                       | A0 = TempRect
-    CLR.L	(A0)+                                 | top = left = 0
-    MOVE.W	(MBarHeight).W,(A0)+                 | bottom = MBarHeight
-    MOVE.W	0x16(A2),(A0)                        | right = portRect.right (screen width)
-    BRA.B	MBDF0_GTDONE                          | return
+    LEA.L       (TempRect).W,A0                 | A0 = TempRect
+    CLR.L       (A0)+                           | top = left = 0
+    MOVE.W      (MBarHeight).W,(A0)+            | bottom = MBarHeight
+    MOVE.W      0x16(A2),(A0)                   | right = portRect.right (screen width)
+    BRA.B       MBDF0_GTDONE                    | return
 | ----------------------------------------------------------
 | Msg 7 -- SaveBitsBar: param = MenuList offset of the menu that
 | is being pulled down. Computes its rect (MBDF0_MAKEMRECT),
@@ -540,97 +540,97 @@ MBDF0_WHOLEBAR:
 | InsetRect on; the dispatcher no longer needs them.
 | ----------------------------------------------------------
 MBDF0_SAVEBITSBAR:
-    MOVE.L	MBDF0_PARAM(A6),D0                   | D0 = MenuList offset of the menu
-    MOVEA.L	menuoH(A3,D0.W),A1                  | A1 = menu handle
-    MOVE.W	menuLeft(A3,D0.W),D3                 | D3 = its title's left edge
-    MOVEA.L	(A1),A0                             | A0 = menu record
-    TST.L	menuWidth(A0)                         | menuWidth/menuHeight valid (not -1)?
-    BPL.B	MBDF0_SKIPCALCSIZE                    | yes ->
-    MOVE.L	A1,-(SP)                             | save the menu handle
-    MOVE.L	A1,-(SP)                             | menu handle for CalcMenuSize
+    MOVE.L      MBDF0_PARAM(A6),D0              | D0 = MenuList offset of the menu
+    MOVEA.L     menuoH(A3,D0.W),A1              | A1 = menu handle
+    MOVE.W      menuLeft(A3,D0.W),D3            | D3 = its title's left edge
+    MOVEA.L     (A1),A0                         | A0 = menu record
+    TST.L       menuWidth(A0)                   | menuWidth/menuHeight valid (not -1)?
+    BPL.B       MBDF0_SKIPCALCSIZE              | yes ->
+    MOVE.L      A1,-(SP)                        | save the menu handle
+    MOVE.L      A1,-(SP)                        | menu handle for CalcMenuSize
     _CalcMenuSize                               | have the MDEF compute width and height
-    MOVEA.L	(SP)+,A0                            | menu handle again
-    MOVEA.L	(A0),A0                             | A0 = menu record
+    MOVEA.L     (SP)+,A0                        | menu handle again
+    MOVEA.L     (A0),A0                         | A0 = menu record
 MBDF0_SKIPCALCSIZE:
-    BSR.W	MBDF0_MAKEMRECT                       | menuRect(A6) = the menu's rect
-    LEA.L	(TempRect).W,A3                       | A3 = TempRect (A3 reused!)
-    LEA.L	MBDF0_MENURECT(A6),A4                 | A4 = menuRect
-    MOVEA.L	A4,A2                               | A2 = menuRect (A2 reused!)
-    MOVE.L	A3,-(SP)                             | TempRect, for InsetRect
-    MOVE.W	(A2)+,(A3)                           | TempRect.top = menuRect.top
-    ADDQ.W	#0x4,(A3)+                           | + 4: the inset below keeps the top row
-    MOVE.W	(A2)+,(A3)+                          | left
-    MOVE.L	(A2),(A3)+                           | bottom, right
-    MOVE.L	#0xFFFCFFFC,-(SP)                    | grow by 4 pixels
+    BSR.W       MBDF0_MAKEMRECT                 | menuRect(A6) = the menu's rect
+    LEA.L       (TempRect).W,A3                 | A3 = TempRect (A3 reused!)
+    LEA.L       MBDF0_MENURECT(A6),A4           | A4 = menuRect
+    MOVEA.L     A4,A2                           | A2 = menuRect (A2 reused!)
+    MOVE.L      A3,-(SP)                        | TempRect, for InsetRect
+    MOVE.W      (A2)+,(A3)                      | TempRect.top = menuRect.top
+    ADDQ.W      #0x4,(A3)+                      | + 4: the inset below keeps the top row
+    MOVE.W      (A2)+,(A3)+                     | left
+    MOVE.L      (A2),(A3)+                      | bottom, right
+    MOVE.L      #0xFFFCFFFC,-(SP)               | grow by 4 pixels
     _InsetRect                                  | TempRect = area to save (incl. frame, shadow)
 | SaveDemBits: a BitMap record followed by its bits
-    MOVEQ.L	#0xF,D3                             | 15 (round up to whole words)
-    ADD.W	-(A3),D3                              | + right
-    MOVE.W	-(A3),D4                             | D4 = bottom
-    SUB.W	-(A3),D3                              | - left
-    SUB.W	-(A3),D4                              | D4 = height; A3 = TempRect again
-    LSR.W	#0x4,D3                               | words per row
-    ADD.W	D3,D3                                 | D3 = rowBytes
-    MOVE.W	D3,D0                                | rowBytes
-    MULU.W	D4,D0                                | * height = size of the bits
-    ADDI.W	#0xE,D0                              | + 14 for the BitMap record
+    MOVEQ.L     #0xF,D3                         | 15 (round up to whole words)
+    ADD.W       -(A3),D3                        | + right
+    MOVE.W      -(A3),D4                        | D4 = bottom
+    SUB.W       -(A3),D3                        | - left
+    SUB.W       -(A3),D4                        | D4 = height; A3 = TempRect again
+    LSR.W       #0x4,D3                         | words per row
+    ADD.W       D3,D3                           | D3 = rowBytes
+    MOVE.W      D3,D0                           | rowBytes
+    MULU.W      D4,D0                           | * height = size of the bits
+    ADDI.W      #0xE,D0                         | + 14 for the BitMap record
     _NewHandle                                  | allocate (in the current heap)
-    BNE.W	MBDF0_NOSAVEMEM                       | no memory -> draw without saving
+    BNE.W       MBDF0_NOSAVEMEM                 | no memory -> draw without saving
     _HLock                                      | lock it (A428)
-    MOVE.L	A0,(SavedHandle).W                   | SavedHandle = the saved bits
-    MOVEA.L	(A0),A0                             | A0 = the BitMap record
-    MOVE.W	D3,0x4(A0)                           | rowBytes
-    MOVE.L	A0,(A0)                              | baseAddr = the record ...
-    ADDI.L	#0xE,(A0)                            | ... + 14: the bits that follow it
-    MOVE.L	(A3),0x6(A0)                         | bounds.topLeft = TempRect.topLeft
-    MOVE.L	0x4(A3),0xA(A0)                      | bounds.botRight = TempRect.botRight
-    MOVEA.L	(WMgrPort).W,A1                     | A1 = WMgrPort
-    PEA.L	0x2(A1)                               | srcBits = WMgrPort.portBits (the screen)
-    MOVE.L	A0,-(SP)                             | dstBits = the saved BitMap
-    BSR.W	MBDF0_COPYSAVED                       | copy the screen area into it
+    MOVE.L      A0,(SavedHandle).W              | SavedHandle = the saved bits
+    MOVEA.L     (A0),A0                         | A0 = the BitMap record
+    MOVE.W      D3,0x4(A0)                      | rowBytes
+    MOVE.L      A0,(A0)                         | baseAddr = the record ...
+    ADDI.L      #0xE,(A0)                       | ... + 14: the bits that follow it
+    MOVE.L      (A3),0x6(A0)                    | bounds.topLeft = TempRect.topLeft
+    MOVE.L      0x4(A3),0xA(A0)                 | bounds.botRight = TempRect.botRight
+    MOVEA.L     (WMgrPort).W,A1                 | A1 = WMgrPort
+    PEA.L       0x2(A1)                         | srcBits = WMgrPort.portBits (the screen)
+    MOVE.L      A0,-(SP)                        | dstBits = the saved BitMap
+    BSR.W       MBDF0_COPYSAVED                 | copy the screen area into it
 | DrawStruct: erase the menu and frame it
 MBDF0_DRAWSTRUCT:
-    LEA.L	MBDF0_MENURECT(A6),A4                 | A4 = menuRect
-    MOVE.L	A4,-(SP)                             | the menu rect
+    LEA.L       MBDF0_MENURECT(A6),A4           | A4 = menuRect
+    MOVE.L      A4,-(SP)                        | the menu rect
     _EraseRect                                  | erase it (white)
-    SUBQ.W	#0x2,SP                              | room for the result
-    MOVE.L	A4,-(SP)                             | the menu rect
+    SUBQ.W      #0x2,SP                         | room for the result
+    MOVE.L      A4,-(SP)                        | the menu rect
     _EmptyRect                                  | empty menu?
-    TST.B	(SP)+                                 | (an empty menu casts no shadow)
-    BNE.B	MBDF0_SAVEBITSDONE                    | yes -> no frame
+    TST.B       (SP)+                           | (an empty menu casts no shadow)
+    BNE.B       MBDF0_SAVEBITSDONE              | yes -> no frame
     _PenNormal                                  | 1x1 black pen
-    MOVE.L	0x4(A4),-(SP)                        | (bottom, right): last LineTo is (right, top) ...
-    MOVE.L	(SP),-(SP)                           | (bottom, right): LineTo(right, bottom)
-    MOVE.L	(A4),-(SP)                           | (top, left) ...
-    SUBQ.W	#0x1,0x2(SP)                         | ... -> (top, left-1) ...
-    MOVE.L	(SP),-(SP)                           | (top, left-1): MoveTo(left-1, top)
-    MOVE.W	0x4(A4),0x4(SP)                      | (bottom, left-1): LineTo(left-1, bottom)
-    MOVE.W	(A4),0xC(SP)                         | (top, right) for the last LineTo
+    MOVE.L      0x4(A4),-(SP)                   | (bottom, right): last LineTo is (right, top) ...
+    MOVE.L      (SP),-(SP)                      | (bottom, right): LineTo(right, bottom)
+    MOVE.L      (A4),-(SP)                      | (top, left) ...
+    SUBQ.W      #0x1,0x2(SP)                    | ... -> (top, left-1) ...
+    MOVE.L      (SP),-(SP)                      | (top, left-1): MoveTo(left-1, top)
+    MOVE.W      0x4(A4),0x4(SP)                 | (bottom, left-1): LineTo(left-1, bottom)
+    MOVE.W      (A4),0xC(SP)                    | (top, right) for the last LineTo
     _MoveTo                                     | MoveTo(left-1, top)
     _LineTo                                     | left edge down to (left-1, bottom)
     _LineTo                                     | bottom edge to (right, bottom)
     _LineTo                                     | right edge up to (right, top)
-    MOVE.L	#0x20002,-(SP)                       | 2x2 pen for the shadow
+    MOVE.L      #0x20002,-(SP)                  | 2x2 pen for the shadow
     _PenSize                                    | pen size (2,2)
-    MOVE.W	0x6(A4),D0                           | D0 = right
-    MOVE.W	D0,-(SP)                             | 2nd LineTo h = right
-    MOVE.W	(A4),-(SP)                           | 2nd LineTo v = top ...
-    ADDQ.W	#0x2,(SP)                            | ... + 2
-    MOVE.W	D0,-(SP)                             | 1st LineTo h = right
-    MOVE.W	0x4(A4),D0                           | D0 = bottom
-    MOVE.W	D0,-(SP)                             | 1st LineTo v = bottom
-    MOVE.W	0x2(A4),-(SP)                        | MoveTo h = left ...
-    ADDQ.W	#0x2,(SP)                            | ... + 2
-    MOVE.W	D0,-(SP)                             | MoveTo v = bottom
+    MOVE.W      0x6(A4),D0                      | D0 = right
+    MOVE.W      D0,-(SP)                        | 2nd LineTo h = right
+    MOVE.W      (A4),-(SP)                      | 2nd LineTo v = top ...
+    ADDQ.W      #0x2,(SP)                       | ... + 2
+    MOVE.W      D0,-(SP)                        | 1st LineTo h = right
+    MOVE.W      0x4(A4),D0                      | D0 = bottom
+    MOVE.W      D0,-(SP)                        | 1st LineTo v = bottom
+    MOVE.W      0x2(A4),-(SP)                   | MoveTo h = left ...
+    ADDQ.W      #0x2,(SP)                       | ... + 2
+    MOVE.W      D0,-(SP)                        | MoveTo v = bottom
     _MoveTo                                     | MoveTo(left+2, bottom)
     _LineTo                                     | shadow under the menu to (right, bottom)
     _LineTo                                     | shadow right of it up to (right, top+2)
     _PenNormal                                  | pen back to normal
 MBDF0_SAVEBITSDONE:
-    MOVE.L	MBDF0_MENURECT(A6),(MBSaveLoc).W     | MBSaveLoc = menuRect.topLeft
-    MOVE.L	MBDF0_MENURECT+4(A6),(MBSaveLoc+4).W | menuRect.botRight ($D5C, overlaps MBFlash)
-    LEA.L	(MBSaveLoc).W,A0                      | A0 = the saved menu rect
-    MOVE.L	A0,MBDF0_RESULT(A6)                  | result = pointer to the menu rect
+    MOVE.L      MBDF0_MENURECT(A6),(MBSaveLoc).W | MBSaveLoc = menuRect.topLeft
+    MOVE.L      MBDF0_MENURECT+4(A6),(MBSaveLoc+4).W | menuRect.botRight ($D5C, overlaps MBFlash)
+    LEA.L       (MBSaveLoc).W,A0                | A0 = the saved menu rect
+    MOVE.L      A0,MBDF0_RESULT(A6)             | result = pointer to the menu rect
     RTS                                         | return from MBDF0_SAVEBITSBAR
 | ----------------------------------------------------------
 | MakeMRect -- the rect of a pulled-down menu.
@@ -643,23 +643,23 @@ MBDF0_SAVEBITSDONE:
 | Called by: MBDF0_SAVEBITSBAR, MBDF0_MAKEUPDATE
 | ----------------------------------------------------------
 MBDF0_MAKEMRECT:
-    MOVE.W	D3,D0                                | menuLeft
-    ADD.W	menuWidth(A0),D0                      | + menuWidth = right edge
-    ADDQ.W	#0x8,D0                              | + 8 pixels of margin
-    CMP.W	0x16(A2),D0                           | still on the screen (portRect.right)?
-    BLE.B	MBDF0_STORERECT                       | yes ->
-    MOVE.W	0x16(A2),D3                          | no: screen right
-    SUBQ.W	#0x8,D3                              | - 8
-    SUB.W	menuWidth(A0),D3                      | - menuWidth = new left edge
+    MOVE.W      D3,D0                           | menuLeft
+    ADD.W       menuWidth(A0),D0                | + menuWidth = right edge
+    ADDQ.W      #0x8,D0                         | + 8 pixels of margin
+    CMP.W       0x16(A2),D0                     | still on the screen (portRect.right)?
+    BLE.B       MBDF0_STORERECT                 | yes ->
+    MOVE.W      0x16(A2),D3                     | no: screen right
+    SUBQ.W      #0x8,D3                         | - 8
+    SUB.W       menuWidth(A0),D3                | - menuWidth = new left edge
 MBDF0_STORERECT:
-    LEA.L	MBDF0_MENURECT(A6),A1                 | A1 = menuRect
-    MOVE.W	(MBarHeight).W,D1                    | D1 = MBarHeight
-    MOVE.W	D1,(A1)+                             | top = MBarHeight
-    MOVE.W	D3,(A1)+                             | left
-    ADD.W	menuHeight(A0),D1                     | + menuHeight
-    MOVE.W	D1,(A1)+                             | bottom
-    ADD.W	menuWidth(A0),D3                      | left + menuWidth
-    MOVE.W	D3,(A1)                              | right
+    LEA.L       MBDF0_MENURECT(A6),A1           | A1 = menuRect
+    MOVE.W      (MBarHeight).W,D1               | D1 = MBarHeight
+    MOVE.W      D1,(A1)+                        | top = MBarHeight
+    MOVE.W      D3,(A1)+                        | left
+    ADD.W       menuHeight(A0),D1               | + menuHeight
+    MOVE.W      D1,(A1)+                        | bottom
+    ADD.W       menuWidth(A0),D3                | left + menuWidth
+    MOVE.W      D3,(A1)                         | right
     RTS                                         | return from MBDF0_MAKEMRECT
 | ----------------------------------------------------------
 | CopySaved -- copy between the screen and the saved bits.
@@ -672,69 +672,69 @@ MBDF0_STORERECT:
 | Called by: MBDF0_SAVEBITSBAR, MBDF0_RESTOREBITSBAR
 | ----------------------------------------------------------
 MBDF0_COPYSAVED:
-    MOVE.L	(SP)+,D4                             | D4 = return address
-    PEA.L	0x6(A0)                               | srcRect = saved BitMap's bounds
-    MOVE.L	(SP),-(SP)                           | dstRect = the same rect
-    CLR.W	-(SP)                                 | mode srcCopy
-    CLR.L	-(SP)                                 | no mask region
+    MOVE.L      (SP)+,D4                        | D4 = return address
+    PEA.L       0x6(A0)                         | srcRect = saved BitMap's bounds
+    MOVE.L      (SP),-(SP)                      | dstRect = the same rect
+    CLR.W       -(SP)                           | mode srcCopy
+    CLR.L       -(SP)                           | no mask region
     _CopyBits                                   | copy the bits
-    MOVE.L	D4,-(SP)                             | return address back
+    MOVE.L      D4,-(SP)                        | return address back
     RTS                                         | return from MBDF0_COPYSAVED
 | unreachable: the Mac II version disposes of its pixmap here before
 | clearing SavedHandle; _DisposPixMap ($AA04) is a Color QuickDraw
 | trap, not implemented on the SE.
-    MOVEA.L	(SavedHandle).W,A0                  | (unreachable) the saved pixmap
-    MOVE.L	A0,-(SP)                             | (unreachable) push it
-    .short	0xAA04                               | (unreachable) _DisposPixMap
+    MOVEA.L     (SavedHandle).W,A0              | (unreachable) the saved pixmap
+    MOVE.L      A0,-(SP)                        | (unreachable) push it
+    .short      0xAA04                          | (unreachable) _DisposPixMap
 | no memory for the saved bits: draw the menu anyway; the Restore
 | message will then repaint the windows behind it
 MBDF0_NOSAVEMEM:
-    CLR.L	(SavedHandle).W                       | no bits saved
-    BRA.W	MBDF0_DRAWSTRUCT                      | erase and frame the menu
+    CLR.L       (SavedHandle).W                 | no bits saved
+    BRA.W       MBDF0_DRAWSTRUCT                | erase and frame the menu
 | ----------------------------------------------------------
 | Msg 8 -- RestoreBitsBar: the menu is closed. If its bits were
 | saved, copy them back and dispose of them; otherwise (param =
 | its MenuList offset) let the windows behind it redraw it.
 | ----------------------------------------------------------
 MBDF0_RESTOREBITSBAR:
-    MOVE.L	(SavedHandle).W,D0                   | the saved bits
-    BEQ.B	MBDF0_MAKEUPDATE                      | none -> repaint instead
-    MOVEA.L	D0,A0                               | the handle
-    MOVEA.L	(A0),A0                             | A0 = the saved BitMap record
-    MOVE.L	A0,-(SP)                             | srcBits = the saved bits
-    PEA.L	0x2(A2)                               | dstBits = WMgrPort.portBits (the screen)
-    BSR.B	MBDF0_COPYSAVED                       | copy them back to the screen
-    MOVEA.L	(SavedHandle).W,A0                  | the handle
+    MOVE.L      (SavedHandle).W,D0              | the saved bits
+    BEQ.B       MBDF0_MAKEUPDATE                | none -> repaint instead
+    MOVEA.L     D0,A0                           | the handle
+    MOVEA.L     (A0),A0                         | A0 = the saved BitMap record
+    MOVE.L      A0,-(SP)                        | srcBits = the saved bits
+    PEA.L       0x2(A2)                         | dstBits = WMgrPort.portBits (the screen)
+    BSR.B       MBDF0_COPYSAVED                 | copy them back to the screen
+    MOVEA.L     (SavedHandle).W,A0              | the handle
     _DisposeHandle                              | free it
-    CLR.L	(SavedHandle).W                       | no saved bits any more
+    CLR.L       (SavedHandle).W                 | no saved bits any more
     RTS                                         | return from MBDF0_RESTOREBITSBAR
 | MakeUpdate: rebuild the menu's rect, grow it by the frame and the
 | shadow and repaint everything behind the front window there
 MBDF0_MAKEUPDATE:
-    MOVE.L	MBDF0_PARAM(A6),D0                   | D0 = MenuList offset of the menu
-    MOVE.W	menuLeft(A3,D0.W),D3                 | D3 = its title's left edge
-    MOVEA.L	menuoH(A3,D0.W),A4                  | A4 = menu handle
-    MOVEA.L	(A4),A0                             | A0 = menu record
-    TST.L	menuWidth(A0)                         | size valid?
-    BPL.B	MBDF0_UPDSIZEOK                       | yes ->
-    MOVE.L	A4,-(SP)                             | menu handle
+    MOVE.L      MBDF0_PARAM(A6),D0              | D0 = MenuList offset of the menu
+    MOVE.W      menuLeft(A3,D0.W),D3            | D3 = its title's left edge
+    MOVEA.L     menuoH(A3,D0.W),A4              | A4 = menu handle
+    MOVEA.L     (A4),A0                         | A0 = menu record
+    TST.L       menuWidth(A0)                   | size valid?
+    BPL.B       MBDF0_UPDSIZEOK                 | yes ->
+    MOVE.L      A4,-(SP)                        | menu handle
     _CalcMenuSize                               | compute width and height
-    MOVEA.L	(A4),A0                             | A0 = menu record again
+    MOVEA.L     (A4),A0                         | A0 = menu record again
 MBDF0_UPDSIZEOK:
-    BSR.W	MBDF0_MAKEMRECT                       | menuRect = the menu's rect
-    LEA.L	MBDF0_MENURECT(A6),A1                 | A1 = menuRect
-    ADDQ.W	#0x2,A1                              | -> left
-    SUBQ.W	#0x1,(A1)+                           | left - 1 (the frame)
-    ADDQ.W	#0x2,(A1)+                           | bottom + 2 (frame and shadow)
-    ADDQ.W	#0x2,(A1)                            | right + 2 (frame and shadow)
-    SUBQ.W	#0x4,SP                              | room for the region
+    BSR.W       MBDF0_MAKEMRECT                 | menuRect = the menu's rect
+    LEA.L       MBDF0_MENURECT(A6),A1           | A1 = menuRect
+    ADDQ.W      #0x2,A1                         | -> left
+    SUBQ.W      #0x1,(A1)+                      | left - 1 (the frame)
+    ADDQ.W      #0x2,(A1)+                      | bottom + 2 (frame and shadow)
+    ADDQ.W      #0x2,(A1)                       | right + 2 (frame and shadow)
+    SUBQ.W      #0x4,SP                         | room for the region
     _NewRgn                                     | a new region (stays on the stack)
-    MOVE.L	(SP),-(SP)                           | the region
-    PEA.L	MBDF0_MENURECT(A6)                    | the grown menu rect
+    MOVE.L      (SP),-(SP)                      | the region
+    PEA.L       MBDF0_MENURECT(A6)              | the grown menu rect
     _RectRgn                                    | region = that rect
-    SUBQ.W	#0x4,SP                              | room for the window
+    SUBQ.W      #0x4,SP                         | room for the window
     _FrontWindow                                | startWindow = the front window
-    MOVE.L	0x4(SP),-(SP)                        | clobberedRgn = the region
+    MOVE.L      0x4(SP),-(SP)                   | clobberedRgn = the region
     _PaintBehind                                | repaint it (desk, frames, update events)
     _DisposeRgn                                 | dispose of the region (still on the stack)
     RTS                                         | return from MBDF0_RESTOREBITSBAR
@@ -743,86 +743,86 @@ MBDF0_UPDSIZEOK:
 | ----------------------------------------------------------
 | hilite state 3 (busy): horizontal stripes
 MBDF0_BUSYPAT:
-    .long	0xFF00FF00                            | rows 0-3: black, white, black, white
-    .long	0xFF00FF00                            | rows 4-7: black, white, black, white
+    .long       0xFF00FF00                      | rows 0-3: black, white, black, white
+    .long       0xFF00FF00                      | rows 4-7: black, white, black, white
 | hilite state 2 / disabled title: 50% gray
 MBDF0_GRAYPAT:
-    .long	0xAA55AA55                            | rows 0-3: gray
-    .long	0xAA55AA55                            | rows 4-7: gray
+    .long       0xAA55AA55                      | rows 0-3: gray
+    .long       0xAA55AA55                      | rows 4-7: gray
 | Unused here: the color Apple menu title of the Mac II version (C175
 | "Added 4-bit color apple"): a 16x16 image at 4 bits per pixel, 8
 | bytes per row, background 0, the logo's six color bands drawn with
 | pixel values 6, 2, 11, 10, 8, 12 (green to blue; the color table
 | is not part of this resource) ...
 MBDF0_APPLE4BIT:
-    .long	0x00000000,0x00000000                 | row  0: ................
-    .long	0x00000000,0x06600000                 | row  1: .........66.....
-    .long	0x00000000,0x66000000                 | row  2: ........66......
-    .long	0x00000000,0x60000000                 | row  3: ........6.......
-    .long	0x00006666,0x06666000                 | row  4: ....6666.6666...
-    .long	0x00066666,0x66666600                 | row  5: ...66666666666..
-    .long	0x00022222,0x22220000                 | row  6: ...222222222....
-    .long	0x000BBBBB,0xBBBB0000                 | row  7: ...BBBBBBBBB....
-    .long	0x000BBBBB,0xBBBB0000                 | row  8: ...BBBBBBBBB....
-    .long	0x000AAAAA,0xAAAAAA00                 | row  9: ...AAAAAAAAAAA..
-    .long	0x0000AAAA,0xAAAAA000                 | row 10: ....AAAAAAAAA...
-    .long	0x00008888,0x88888000                 | row 11: ....888888888...
-    .long	0x00000CCC,0xCCCC0000                 | row 12: .....CCCCCCC....
-    .long	0x000000CC,0x0CC00000                 | row 13: ......CC.CC.....
-    .long	0x00000000,0x00000000                 | row 14: ................
-    .long	0x00000000,0x00000000                 | row 15: ................
+    .long       0x00000000,0x00000000           | row  0: ................
+    .long       0x00000000,0x06600000           | row  1: .........66.....
+    .long       0x00000000,0x66000000           | row  2: ........66......
+    .long       0x00000000,0x60000000           | row  3: ........6.......
+    .long       0x00006666,0x06666000           | row  4: ....6666.6666...
+    .long       0x00066666,0x66666600           | row  5: ...66666666666..
+    .long       0x00022222,0x22220000           | row  6: ...222222222....
+    .long       0x000BBBBB,0xBBBB0000           | row  7: ...BBBBBBBBB....
+    .long       0x000BBBBB,0xBBBB0000           | row  8: ...BBBBBBBBB....
+    .long       0x000AAAAA,0xAAAAAA00           | row  9: ...AAAAAAAAAAA..
+    .long       0x0000AAAA,0xAAAAA000           | row 10: ....AAAAAAAAA...
+    .long       0x00008888,0x88888000           | row 11: ....888888888...
+    .long       0x00000CCC,0xCCCC0000           | row 12: .....CCCCCCC....
+    .long       0x000000CC,0x0CC00000           | row 13: ......CC.CC.....
+    .long       0x00000000,0x00000000           | row 14: ................
+    .long       0x00000000,0x00000000           | row 15: ................
 | ... the same image with background 15 (for the inverted title) ...
 MBDF0_APPLE4BITINV:
-    .long	0xFFFFFFFF,0xFFFFFFFF                 | row  0: ................
-    .long	0xFFFFFFFF,0xF66FFFFF                 | row  1: .........66.....
-    .long	0xFFFFFFFF,0x66FFFFFF                 | row  2: ........66......
-    .long	0xFFFFFFFF,0x6FFFFFFF                 | row  3: ........6.......
-    .long	0xFFFF6666,0xF6666FFF                 | row  4: ....6666.6666...
-    .long	0xFFF66666,0x666666FF                 | row  5: ...66666666666..
-    .long	0xFFF22222,0x2222FFFF                 | row  6: ...222222222....
-    .long	0xFFFBBBBB,0xBBBBFFFF                 | row  7: ...BBBBBBBBB....
-    .long	0xFFFBBBBB,0xBBBBFFFF                 | row  8: ...BBBBBBBBB....
-    .long	0xFFFAAAAA,0xAAAAAAFF                 | row  9: ...AAAAAAAAAAA..
-    .long	0xFFFFAAAA,0xAAAAAFFF                 | row 10: ....AAAAAAAAA...
-    .long	0xFFFF8888,0x88888FFF                 | row 11: ....888888888...
-    .long	0xFFFFFCCC,0xCCCCFFFF                 | row 12: .....CCCCCCC....
-    .long	0xFFFFFFCC,0xFCCFFFFF                 | row 13: ......CC.CC.....
-    .long	0xFFFFFFFF,0xFFFFFFFF                 | row 14: ................
-    .long	0xFFFFFFFF,0xFFFFFFFF                 | row 15: ................
+    .long       0xFFFFFFFF,0xFFFFFFFF           | row  0: ................
+    .long       0xFFFFFFFF,0xF66FFFFF           | row  1: .........66.....
+    .long       0xFFFFFFFF,0x66FFFFFF           | row  2: ........66......
+    .long       0xFFFFFFFF,0x6FFFFFFF           | row  3: ........6.......
+    .long       0xFFFF6666,0xF6666FFF           | row  4: ....6666.6666...
+    .long       0xFFF66666,0x666666FF           | row  5: ...66666666666..
+    .long       0xFFF22222,0x2222FFFF           | row  6: ...222222222....
+    .long       0xFFFBBBBB,0xBBBBFFFF           | row  7: ...BBBBBBBBB....
+    .long       0xFFFBBBBB,0xBBBBFFFF           | row  8: ...BBBBBBBBB....
+    .long       0xFFFAAAAA,0xAAAAAAFF           | row  9: ...AAAAAAAAAAA..
+    .long       0xFFFFAAAA,0xAAAAAFFF           | row 10: ....AAAAAAAAA...
+    .long       0xFFFF8888,0x88888FFF           | row 11: ....888888888...
+    .long       0xFFFFFCCC,0xCCCCFFFF           | row 12: .....CCCCCCC....
+    .long       0xFFFFFFCC,0xFCCFFFFF           | row 13: ......CC.CC.....
+    .long       0xFFFFFFFF,0xFFFFFFFF           | row 14: ................
+    .long       0xFFFFFFFF,0xFFFFFFFF           | row 15: ................
 | ... and the logo at 1 bit per pixel, black on white ...
 MBDF0_APPLE1BIT:
-    .short	0x0000                               | ................
-    .short	0x0060                               | .........##.....
-    .short	0x00C0                               | ........##......
-    .short	0x0080                               | ........#.......
-    .short	0x0F78                               | ....####.####...
-    .short	0x1FFC                               | ...###########..
-    .short	0x1FF0                               | ...#########....
-    .short	0x1FF0                               | ...#########....
-    .short	0x1FF0                               | ...#########....
-    .short	0x1FFC                               | ...###########..
-    .short	0x0FF8                               | ....#########...
-    .short	0x0FF8                               | ....#########...
-    .short	0x07F0                               | .....#######....
-    .short	0x0360                               | ......##.##.....
-    .short	0x0000                               | ................
-    .short	0x0000                               | ................
+    .short      0x0000                          | ................
+    .short      0x0060                          | .........##.....
+    .short      0x00C0                          | ........##......
+    .short      0x0080                          | ........#.......
+    .short      0x0F78                          | ....####.####...
+    .short      0x1FFC                          | ...###########..
+    .short      0x1FF0                          | ...#########....
+    .short      0x1FF0                          | ...#########....
+    .short      0x1FF0                          | ...#########....
+    .short      0x1FFC                          | ...###########..
+    .short      0x0FF8                          | ....#########...
+    .short      0x0FF8                          | ....#########...
+    .short      0x07F0                          | .....#######....
+    .short      0x0360                          | ......##.##.....
+    .short      0x0000                          | ................
+    .short      0x0000                          | ................
 | ... and white on black
 MBDF0_APPLE1BITINV:
-    .short	0xFFFF                               | ################
-    .short	0xFF9F                               | #########..#####
-    .short	0xFF3F                               | ########..######
-    .short	0xFF7F                               | ########.#######
-    .short	0xF087                               | ####....#....###
-    .short	0xE003                               | ###...........##
-    .short	0xE00F                               | ###.........####
-    .short	0xE00F                               | ###.........####
-    .short	0xE00F                               | ###.........####
-    .short	0xE003                               | ###...........##
-    .short	0xF007                               | ####.........###
-    .short	0xF007                               | ####.........###
-    .short	0xF80F                               | #####.......####
-    .short	0xFC9F                               | ######..#..#####
-    .short	0xFFFF                               | ################
-    .short	0xFFFF                               | ################
+    .short      0xFFFF                          | ################
+    .short      0xFF9F                          | #########..#####
+    .short      0xFF3F                          | ########..######
+    .short      0xFF7F                          | ########.#######
+    .short      0xF087                          | ####....#....###
+    .short      0xE003                          | ###...........##
+    .short      0xE00F                          | ###.........####
+    .short      0xE00F                          | ###.........####
+    .short      0xE00F                          | ###.........####
+    .short      0xE003                          | ###...........##
+    .short      0xF007                          | ####.........###
+    .short      0xF007                          | ####.........###
+    .short      0xF80F                          | #####.......####
+    .short      0xFC9F                          | ######..#..#####
+    .short      0xFFFF                          | ################
+    .short      0xFFFF                          | ################
 

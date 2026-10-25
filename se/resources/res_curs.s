@@ -9,8 +9,8 @@
 Resource_CURS_0004:
 | CURS 4 resource header.
 Resource_CURS_0004_Header:
-    .long	0xC000004C                            | ROM resource header: tag $C0, physical size $4C (8 + $44)
-    .long	0x000000A0                            | relative handle: master pointer at ROM zone + $A0
+    .long       0xC000004C                      | ROM resource header: tag $C0, physical size $4C (8 + $44)
+    .long       0x000000A0                      | relative handle: master pointer at ROM zone + $A0
 | resource : 'CURS' 4
 | WatchCursor (wristwatch for busy/wait state)
 | Standard cursor ID 4: watchCursor
@@ -41,8 +41,8 @@ _CURS_4_:
 Resource_CURS_0001:
 | CURS 1 resource header.
 Resource_CURS_0001_Header:
-    .long	0xC000004C                            | ROM resource header: tag $C0, physical size $4C (8 + $44)
-    .long	0x000000A4                            | relative handle: master pointer at ROM zone + $A4
+    .long       0xC000004C                      | ROM resource header: tag $C0, physical size $4C (8 + $44)
+    .long       0x000000A4                      | relative handle: master pointer at ROM zone + $A4
 | resource : 'CURS' 1
 | IBeamCursor (I-beam text insertion cursor)
 | Standard cursor ID 1: iBeamCursor
@@ -73,8 +73,8 @@ _CURS_1_:
 Resource_CURS_0003:
 | CURS 3 resource header.
 Resource_CURS_0003_Header:
-    .long	0xC000004C                            | ROM resource header: tag $C0, physical size $4C (8 + $44)
-    .long	0x000000A8                            | relative handle: master pointer at ROM zone + $A8
+    .long       0xC000004C                      | ROM resource header: tag $C0, physical size $4C (8 + $44)
+    .long       0x000000A8                      | relative handle: master pointer at ROM zone + $A8
 | resource : 'CURS' 3
 | PlusCursor (3D plus sign for precision positioning)
 | Standard cursor ID 3: plusCursor
@@ -105,8 +105,8 @@ _CURS_3_:
 Resource_CURS_0002:
 | CURS 2 resource header.
 Resource_CURS_0002_Header:
-    .long	0xC000004C                            | ROM resource header: tag $C0, physical size $4C (8 + $44)
-    .long	0x000000AC                            | relative handle: master pointer at ROM zone + $AC
+    .long       0xC000004C                      | ROM resource header: tag $C0, physical size $4C (8 + $44)
+    .long       0x000000AC                      | relative handle: master pointer at ROM zone + $AC
 | resource : 'CURS' 2
 | CrossCursor (cross-hair for drawing tools)
 | Standard cursor ID 2: crossCursor

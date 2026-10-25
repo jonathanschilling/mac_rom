@@ -16,20 +16,20 @@
 | Reason: the SE FDHD put its patch code into the free tail space
 .if ROM_TARGET == MAC_SE
 ROMTail_Initials_SE:
-    .rept	278
-    .ascii	"LWRLBBMABOEMTDAHJTCFJLMBKCRCLAKEHBRDCDAFSHFT JCS"
+    .rept       278
+    .ascii      "LWRLBBMABOEMTDAHJTCFJLMBKCRCLAKEHBRDCDAFSHFT JCS"
     .endr
-    .ascii	"LWRLBBMABOEMTDAHJTCFJLMBKCRCLAKEHBRDCD"
+    .ascii      "LWRLBBMABOEMTDAHJTCFJLMBKCRCLAKEHBRDCD"
 ROMTail_BuildDate_Thu_Nov_20_1986:
-    .ascii	"Thu, Nov 20, 1986"                  | build date
-    .byte	0x11                                  | last ROM byte
+    .ascii      "Thu, Nov 20, 1986"             | build date
+    .byte       0x11                            | last ROM byte
 .else
 | SE FDHD: the initials string from $3CBA8 up to the patch code at $3D000
 ROMTail_Initials_FDHD:
-    .rept	92
-    .ascii	"SWC JSP GGD "
+    .rept       92
+    .ascii      "SWC JSP GGD "
     .endr
-    .ascii	"SWC JSP "
+    .ascii      "SWC JSP "
 
 FDHD_ResourceTailPatchCode:
 | =========================================================================
@@ -1555,15 +1555,15 @@ FDHD_RAMTESTPATCH_LOOP:
 | the initials string again from $3DD52 (in phase with the copy at
 | $3CBA8: the patch code was written over the filled tail) up to $3FFED
 ROMTail_Initials_FDHD_2:
-    .ascii	"D "
-    .rept	738
-    .ascii	"SWC JSP GGD "
+    .ascii      "D "
+    .rept       738
+    .ascii      "SWC JSP GGD "
     .endr
-    .ascii	"SW"
+    .ascii      "SW"
 
 ROMTail_BuildDate_Tue_Oct_11_1988:
-    .ascii	"Tue, Oct 11, 1988"                  | build date
-    .byte	0x11                                  | last ROM byte
+    .ascii      "Tue, Oct 11, 1988"             | build date
+    .byte       0x11                            | last ROM byte
 
 .endif
 MacSEFDHD_ROM_End:

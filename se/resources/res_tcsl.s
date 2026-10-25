@@ -47,43 +47,43 @@ Resource_tcsl_0000:
 | master pointer in the ROM zone (INITRESOURCES_CONT_2): 0x54 + 4 *
 | its index in the ROM map's reference lists.
 Resource_tcsl_0000_Header:
-    .long	0xC000008E                            | ROM resource header: tag $C0, physical size $8E (8 + $86)
-    .long	0x00000060                            | relative handle: master pointer at ROM zone + $60
+    .long       0xC000008E                      | ROM resource header: tag $C0, physical size $8E (8 + $86)
+    .long       0x00000060                      | relative handle: master pointer at ROM zone + $60
 | ----------------------------------------------------------
 | _tcsl_0_ -- two words of unknown meaning (as an instruction:
 | ORI.B #1,D0), then the code
 | ----------------------------------------------------------
 _tcsl_0_:
-    .short	0x0000                               | (unknown; ORI.B #1,D0 if executed)
-    .short	0x0001                               | (the ORI's immediate byte)
+    .short      0x0000                          | (unknown; ORI.B #1,D0 if executed)
+    .short      0x0001                          | (the ORI's immediate byte)
 | TCSL_SLIDESHOW -- the entry point at $41D89A (debugger: G 41D89A).
 | Loads 'bbmc' 0, then shows its frames forever.
 TCSL_SLIDESHOW:
-    JSR	TCSL_LOADBBMC(PC)                       | ApplScratch = 'bbmc' data, D7 = 0
+    JSR         TCSL_LOADBBMC(PC)               | ApplScratch = 'bbmc' data, D7 = 0
 | show the next picture, wait 3 seconds, repeat
 TCSL_NEXTFRAME:
-    ADDQ.W	#0x4,D7                              | next table entry ...
-    ANDI.L	#0xC,D7                              | ... of the four: D7 = 0, 4, 8 or 12
-    BSR.W	TCSL_DRAWFRAME                        | unpack that picture to the screen
-    MOVEA.W	#0xB5,A0                            | 181 ticks (about 3 seconds)
+    ADDQ.W      #0x4,D7                         | next table entry ...
+    ANDI.L      #0xC,D7                         | ... of the four: D7 = 0, 4, 8 or 12
+    BSR.W       TCSL_DRAWFRAME                  | unpack that picture to the screen
+    MOVEA.W     #0xB5,A0                        | 181 ticks (about 3 seconds)
     _Delay                                      | wait
-    JMP	TCSL_NEXTFRAME(PC)                      | and on to the next picture (forever)
+    JMP         TCSL_NEXTFRAME(PC)              | and on to the next picture (forever)
 | ----------------------------------------------------------
 | TCSL_LOADBBMC -- get 'bbmc' 0 from the ROM resource map.
 | Out: ApplScratch = pointer to its data (the frame offset table),
 |      D7 = 0. Breaks into the debugger if it is not found.
 | ----------------------------------------------------------
 TCSL_LOADBBMC:
-    MOVE.W	#0xFFFF,(ROMMapInsert).W             | look in the ROM map
-    SUBQ.W	#0x4,SP                              | room for the handle
-    MOVE.L	#0x62626D63,-(SP)                    | resource type 'bbmc'
-    CLR.W	-(SP)                                 | resource ID 0
+    MOVE.W      #0xFFFF,(ROMMapInsert).W        | look in the ROM map
+    SUBQ.W      #0x4,SP                         | room for the handle
+    MOVE.L      #0x62626D63,-(SP)               | resource type 'bbmc'
+    CLR.W       -(SP)                           | resource ID 0
     _GetResource                                | get the pictures
-    MOVE.L	(SP)+,D0                             | D0 = handle
-    BEQ.W	TCSL_NOBBMC                           | not found -> debugger
-    MOVEA.L	D0,A0                               | the handle
-    MOVE.L	(A0),(ApplScratch).W                 | ApplScratch = pointer to the data (in ROM)
-    MOVEQ.L	#0x0,D7                             | frame index 0
+    MOVE.L      (SP)+,D0                        | D0 = handle
+    BEQ.W       TCSL_NOBBMC                     | not found -> debugger
+    MOVEA.L     D0,A0                           | the handle
+    MOVE.L      (A0),(ApplScratch).W            | ApplScratch = pointer to the data (in ROM)
+    MOVEQ.L     #0x0,D7                         | frame index 0
     RTS                                         | return from TCSL_LOADBBMC
 | ----------------------------------------------------------
 | TCSL_DRAWFRAME -- unpack frame D7/4 of 'bbmc' 0 onto the screen.
@@ -94,23 +94,23 @@ TCSL_LOADBBMC:
 | Called by: TCSL_NEXTFRAME
 | ----------------------------------------------------------
 TCSL_DRAWFRAME:
-    MOVEA.L	(ApplScratch).W,A0                  | A0 = the frame table
-    ADDA.W	D7,A0                                | -> entry D7/4
-    MOVE.L	(A0),D3                              | D3 = offset of the frame
-    MOVE.L	(ApplScratch).W,(ApplScratch_4).W    | source = 'bbmc' data ...
-    ADD.L	D3,(ApplScratch_4).W                  | ... + offset = the frame's packed rows
-    MOVE.L	(ScrnBase).W,(ApplScratch_8).W       | destination = top left of the screen
-    MOVE.L	#0x154,D3                            | 341 rows in the loop (DBF)
+    MOVEA.L     (ApplScratch).W,A0              | A0 = the frame table
+    ADDA.W      D7,A0                           | -> entry D7/4
+    MOVE.L      (A0),D3                         | D3 = offset of the frame
+    MOVE.L      (ApplScratch).W,(ApplScratch_4).W | source = 'bbmc' data ...
+    ADD.L       D3,(ApplScratch_4).W            | ... + offset = the frame's packed rows
+    MOVE.L      (ScrnBase).W,(ApplScratch_8).W  | destination = top left of the screen
+    MOVE.L      #0x154,D3                       | 341 rows in the loop (DBF)
 TCSL_ROWLOOP:
-    PEA.L	(ApplScratch_4).W                     | VAR srcPtr
-    PEA.L	(ApplScratch_8).W                     | VAR dstPtr
-    MOVE.W	#0x48,-(SP)                          | dstBytes = 72 (a 576-pixel row)
+    PEA.L       (ApplScratch_4).W               | VAR srcPtr
+    PEA.L       (ApplScratch_8).W               | VAR dstPtr
+    MOVE.W      #0x48,-(SP)                     | dstBytes = 72 (a 576-pixel row)
     _UnpackBits                                 | unpack one row; advances both pointers
-    SUBQ.L	#0x8,(ApplScratch_8).W               | back by 8: next screen row (64 bytes on)
-    DBF.W	D3,TCSL_ROWLOOP                       | next row
-    PEA.L	(ApplScratch_4).W                     | VAR srcPtr
-    PEA.L	(ApplScratch_8).W                     | VAR dstPtr
-    MOVE.W	#0x40,-(SP)                          | dstBytes = 64: the last row ends the screen
+    SUBQ.L      #0x8,(ApplScratch_8).W          | back by 8: next screen row (64 bytes on)
+    DBF.W       D3,TCSL_ROWLOOP                 | next row
+    PEA.L       (ApplScratch_4).W               | VAR srcPtr
+    PEA.L       (ApplScratch_8).W               | VAR dstPtr
+    MOVE.W      #0x40,-(SP)                     | dstBytes = 64: the last row ends the screen
     _UnpackBits                                 | unpack row 342
     RTS                                         | return from TCSL_DRAWFRAME
 | 'bbmc' 0 not found: stop in the debugger (continuing would run into

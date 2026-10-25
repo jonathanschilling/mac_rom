@@ -305,6 +305,6 @@ DISPTABLE:
 | InitResources reads the number of ROM resources (one master pointer each
 | in the ROM zone) and the size of the map that follows (resources/res_map.s).
 ROM_Resource_Area_Header:
-    .short	0x001C                               | 28 ROM resources
-    .short	0x01FA                               | resource map size: $1FA bytes
+    .short      0x001C                          | 28 ROM resources
+    .short      0x01FA                          | resource map size: $1FA bytes
 
