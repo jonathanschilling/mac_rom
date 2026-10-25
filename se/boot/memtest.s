@@ -3,7 +3,8 @@
 | Apple sources: the startup test code (System 7.1: USTStartUp.a,
 | USTTestMgr.a and their includes; MacSEROM.lst lists these routines in
 | the SYSTEMERROR module, as it starts no new module for them). In ROM
-| order: the MEMTEST table, STARTTEST1 (cold/warm start continuation, ROM
+| order: the MEMTEST exception vector table and its handlers (BUSERROR
+| ... EXCEPTIONHANDLER), STARTTEST1 (cold/warm start continuation, ROM
 | checksum, RAM sizing and testing), RAMTEST, the manufacturing Test
 | Manager (TESTMANAGER, TMRESTART ...), SYSTEMBEEP (the _SysBeep trap,
 | $A9C8), BOOTBEEP and the ERRORBEEP return stubs.
@@ -19,7 +20,8 @@
 |   8. Run address line stuck-at test
 |   9. With the loopback jumper: enter the diagnostic Test Manager
 |      (serial port)
-|  10. Otherwise: copy MEMTEST to low RAM, continue boot
+|  10. Otherwise: install MEMTEST as the exception vector table
+|      (copy it to address 0), continue boot
 |
 | The Test Manager (TESTMANAGER/TMRESTART) is a serial-port command
 | interpreter used by Apple manufacturing test stations. It accepts
@@ -43,6 +45,7 @@
 |     bit 23:    append CR/LF after output
 |     bit 24:    error flag (triggers Sad Mac on check; Apple's STEqu.a:
 |                excp, "unexpected exception received")
+|     bit 25:    STEqu.a: nmi, "the NMI switch was hit" (set by INTLEVEL7)
 |     bit 26:    factory loopback jumper found (STEqu.a: test, "the
 |                VIA loopback was found")
 |     bit 27:    STEqu.a: beok, "a BusError is expected and is OK"
@@ -53,188 +56,214 @@
 |   A6 = return address (used instead of stack before RAM is trusted)
 | -------------------------------------------------------------------------
 
+| ----------------------------------------------------------
+| MEMTEST - exception vector table of the startup tests: 64 vectors in
+| 68000 order, each pointing at one of the handlers that follow the table.
+| Apple source: TMVectors in USTStartUp.a (System 7.1), the same table
+| with the same handlers ("used by the Ikki Test Manager and the power up
+| test code"); MacSEROM.lst: MEMTEST. A 68000 always takes its vectors
+| from address 0, so after the first startup tests the start code copies
+| the table there (COLDSTART_MEMTEST_COPYLOOP; Apple: "They are copied to
+| RAM after completion of the first set of power up tests"). The vectors
+| stay in effect until SYSERRINIT (debugger/debugger.s) installs the
+| system's handlers. The entries for vectors 0 and 1 are placeholders
+| (Apple: "space for initial SP/PC"): a reset reads the ROM header.
+| Vectors 13, 14 and 48-58 belong to the 68010/68020 and their
+| coprocessors; the SE's 68000 never takes them.
 MEMTEST:
-    .long	0x00002000
-    .long	0x00401BDE
-    .long	0x00401AE8
-    .long	0x00401AFA
-    .long	0x00401B02
-    .long	0x00401B0A
-    .long	0x00401B12
-    .long	0x00401B1A
-    .long	0x00401B22
-    .long	0x00401B2A
-    .long	0x00401B32
-    .long	0x00401B3A
-    .long	0x00401B42
-    .long	0x00401B4A
-    .long	0x00401B50
-    .long	0x00401B56
-    .long	0x00401B42
-    .long	0x00401B42
-    .long	0x00401B42
-    .long	0x00401B42
-    .long	0x00401B42
-    .long	0x00401B42
-    .long	0x00401B42
-    .long	0x00401B42
-    .long	0x00401B56
-    .long	0x00401B62
-    .long	0x00401B68
-    .long	0x00401B6E
-    .long	0x00401B74
-    .long	0x00401B7A
-    .long	0x00401B80
-    .long	0x00401B86
-    .long	0x00401B5C
-    .long	0x00401B5C
-    .long	0x00401B5C
-    .long	0x00401B5C
-    .long	0x00401B5C
-    .long	0x00401B5C
-    .long	0x00401B5C
-    .long	0x00401B5C
-    .long	0x00401B5C
-    .long	0x00401B5C
-    .long	0x00401B5C
-    .long	0x00401B5C
-    .long	0x00401B5C
-    .long	0x00401B5C
-    .long	0x00401B5C
-    .long	0x00401B5C
-    .long	0x00401B90
-    .long	0x00401B96
-    .long	0x00401B9C
-    .long	0x00401BA2
-    .long	0x00401BA8
-    .long	0x00401BAE
-    .long	0x00401BB4
-    .long	0x00401B42
-    .long	0x00401BBA
-    .long	0x00401BC0
-    .long	0x00401BC6
-    .long	0x00401B42
-    .long	0x00401B42
-    .long	0x00401B42
-    .long	0x00401B42
-    .long	0x00401B42
+    .long	0x00002000                            | $00 vector 0: initial SSP (placeholder)
+    .long	STARTTEST1-BASEOFROM+0x400000         | $04 vector 1: initial PC (placeholder)
+    .long	BUSERROR-BASEOFROM+0x400000           | $08 vector 2: bus error
+    .long	ADRERROR-BASEOFROM+0x400000           | $0C vector 3: address error
+    .long	ILLERROR-BASEOFROM+0x400000           | $10 vector 4: illegal instruction
+    .long	ZERERROR-BASEOFROM+0x400000           | $14 vector 5: zero divide
+    .long	CHKERROR-BASEOFROM+0x400000           | $18 vector 6: CHK instruction
+    .long	XTRAPX-BASEOFROM+0x400000             | $1C vector 7: TRAPV instruction
+    .long	PRIVERROR-BASEOFROM+0x400000          | $20 vector 8: privilege violation
+    .long	TRACE-BASEOFROM+0x400000              | $24 vector 9: trace
+    .long	LINEA-BASEOFROM+0x400000              | $28 vector 10: line 1010 emulator (A-line)
+    .long	LINEF-BASEOFROM+0x400000              | $2C vector 11: line 1111 emulator (F-line)
+    .long	NOTASS-BASEOFROM+0x400000             | $30 vector 12: unassigned
+    .long	CPPROTOCOL-BASEOFROM+0x400000         | $34 vector 13: coprocessor protocol violation
+    .long	FORMATX-BASEOFROM+0x400000            | $38 vector 14: format error
+    .long	SPURINTERRUPT-BASEOFROM+0x400000      | $3C vector 15: uninitialized interrupt
+    .long	NOTASS-BASEOFROM+0x400000             | $40 vector 16: unassigned
+    .long	NOTASS-BASEOFROM+0x400000             | $44 vector 17: unassigned
+    .long	NOTASS-BASEOFROM+0x400000             | $48 vector 18: unassigned
+    .long	NOTASS-BASEOFROM+0x400000             | $4C vector 19: unassigned
+    .long	NOTASS-BASEOFROM+0x400000             | $50 vector 20: unassigned
+    .long	NOTASS-BASEOFROM+0x400000             | $54 vector 21: unassigned
+    .long	NOTASS-BASEOFROM+0x400000             | $58 vector 22: unassigned
+    .long	NOTASS-BASEOFROM+0x400000             | $5C vector 23: unassigned
+    .long	SPURINTERRUPT-BASEOFROM+0x400000      | $60 vector 24: spurious interrupt
+    .long	INTLEVEL1-BASEOFROM+0x400000          | $64 vector 25: level 1 interrupt
+    .long	INTLEVEL2-BASEOFROM+0x400000          | $68 vector 26: level 2 interrupt
+    .long	INTLEVEL3-BASEOFROM+0x400000          | $6C vector 27: level 3 interrupt
+    .long	INTLEVEL4-BASEOFROM+0x400000          | $70 vector 28: level 4 interrupt
+    .long	INTLEVEL5-BASEOFROM+0x400000          | $74 vector 29: level 5 interrupt
+    .long	INTLEVEL6-BASEOFROM+0x400000          | $78 vector 30: level 6 interrupt
+    .long	INTLEVEL7-BASEOFROM+0x400000          | $7C vector 31: level 7 interrupt (NMI)
+    .long	TRAPN-BASEOFROM+0x400000              | $80 vector 32: TRAP #0
+    .long	TRAPN-BASEOFROM+0x400000              | $84 vector 33: TRAP #1
+    .long	TRAPN-BASEOFROM+0x400000              | $88 vector 34: TRAP #2
+    .long	TRAPN-BASEOFROM+0x400000              | $8C vector 35: TRAP #3
+    .long	TRAPN-BASEOFROM+0x400000              | $90 vector 36: TRAP #4
+    .long	TRAPN-BASEOFROM+0x400000              | $94 vector 37: TRAP #5
+    .long	TRAPN-BASEOFROM+0x400000              | $98 vector 38: TRAP #6
+    .long	TRAPN-BASEOFROM+0x400000              | $9C vector 39: TRAP #7
+    .long	TRAPN-BASEOFROM+0x400000              | $A0 vector 40: TRAP #8
+    .long	TRAPN-BASEOFROM+0x400000              | $A4 vector 41: TRAP #9
+    .long	TRAPN-BASEOFROM+0x400000              | $A8 vector 42: TRAP #10
+    .long	TRAPN-BASEOFROM+0x400000              | $AC vector 43: TRAP #11
+    .long	TRAPN-BASEOFROM+0x400000              | $B0 vector 44: TRAP #12
+    .long	TRAPN-BASEOFROM+0x400000              | $B4 vector 45: TRAP #13
+    .long	TRAPN-BASEOFROM+0x400000              | $B8 vector 46: TRAP #14
+    .long	TRAPN-BASEOFROM+0x400000              | $BC vector 47: TRAP #15
+    .long	FPCP1-BASEOFROM+0x400000              | $C0 vector 48: FPCP branch or set on unordered
+    .long	FPCP2-BASEOFROM+0x400000              | $C4 vector 49: FPCP inexact result
+    .long	FPCP3-BASEOFROM+0x400000              | $C8 vector 50: FPCP divide by zero
+    .long	FPCP4-BASEOFROM+0x400000              | $CC vector 51: FPCP underflow
+    .long	FPCP5-BASEOFROM+0x400000              | $D0 vector 52: FPCP operand error
+    .long	FPCP6-BASEOFROM+0x400000              | $D4 vector 53: FPCP overflow
+    .long	FPCP7-BASEOFROM+0x400000              | $D8 vector 54: FPCP signaling NAN
+    .long	NOTASS-BASEOFROM+0x400000             | $DC vector 55: unassigned
+    .long	PMMUCONFIG-BASEOFROM+0x400000         | $E0 vector 56: PMMU configuration
+    .long	PMMUILLEGAL-BASEOFROM+0x400000        | $E4 vector 57: PMMU illegal operation
+    .long	PMMUACCESS-BASEOFROM+0x400000         | $E8 vector 58: PMMU access level violation
+    .long	NOTASS-BASEOFROM+0x400000             | $EC vector 59: unassigned
+    .long	NOTASS-BASEOFROM+0x400000             | $F0 vector 60: unassigned
+    .long	NOTASS-BASEOFROM+0x400000             | $F4 vector 61: unassigned
+    .long	NOTASS-BASEOFROM+0x400000             | $F8 vector 62: unassigned
+    .long	NOTASS-BASEOFROM+0x400000             | $FC vector 63: unassigned
 | ----------------------------------------------------------
-| SYSERR_RESTART_CHECK_MICROBUG - restart entry point: check if MicroBug should regain control
-| If bit 27 of D7 is set, MicroBug takes back the stack and jumps to A6.
-SYSERR_RESTART_CHECK_MICROBUG:
-    BTST	#0x1B,D7                               | MicroBug recapture flag?
-    BEQ.B	RESTART_CODE_1                        | no: restart with code 1
-    MOVEA.L	A5,A7                               | yes: restore MicroBug stack
-    JMP	(A6)                                    | return to MicroBug
+| Exception handlers of the startup tests, reached through MEMTEST
+| (Apple source: the handlers after TMVectors in USTStartUp.a; the labels
+| are Apple's names). Each stores $FF00 plus the exception number in
+| D7.W and branches to EXCEPTIONHANDLER. The numbers follow Apple's
+| STEqu.a, BECode (1, bus error) to PACode ($20, PMMU access violation);
+| Apple's later ROMs keep them in the high byte of D7.W instead.
+|
+| BUSERROR - vector 2. A test that probes for hardware sets D7 bit 27
+| (STEqu.a: beok, "a BusError is expected and is OK") and holds its SP in
+| A5 and its return address in A6; the bus error then returns there.
+| Any other bus error is exception 1.
+BUSERROR:
+    BTST	#0x1B,D7                               | D7 bit 27 (beok): bus error expected?
+    BEQ.B	BUSERROR_UNEXPECTED                   | no: an unexpected bus error
+    MOVEA.L	A5,A7                               | yes: SP of the probing code
+    JMP	(A6)                                    | return to the probe (A6)
+| The other handlers follow in vector order.
+BUSERROR_UNEXPECTED:
+    MOVE.W	#0xFF01,D7                           | D7.W = exception $01: bus error
+    BRA.W	EXCEPTIONHANDLER                      | common exit
+ADRERROR:
+    MOVE.W	#0xFF02,D7                           | D7.W = exception $02: address error
+    BRA.W	EXCEPTIONHANDLER                      | common exit
+ILLERROR:
+    MOVE.W	#0xFF03,D7                           | D7.W = exception $03: illegal instruction
+    BRA.W	EXCEPTIONHANDLER                      | common exit
+ZERERROR:
+    MOVE.W	#0xFF04,D7                           | D7.W = exception $04: zero divide
+    BRA.W	EXCEPTIONHANDLER                      | common exit
+CHKERROR:
+    MOVE.W	#0xFF05,D7                           | D7.W = exception $05: CHK instruction
+    BRA.W	EXCEPTIONHANDLER                      | common exit
+XTRAPX:
+    MOVE.W	#0xFF06,D7                           | D7.W = exception $06: TRAPV instruction
+    BRA.W	EXCEPTIONHANDLER                      | common exit
+PRIVERROR:
+    MOVE.W	#0xFF07,D7                           | D7.W = exception $07: privilege violation
+    BRA.W	EXCEPTIONHANDLER                      | common exit
+TRACE:
+    MOVE.W	#0xFF08,D7                           | D7.W = exception $08: trace
+    BRA.W	EXCEPTIONHANDLER                      | common exit
+LINEA:
+    MOVE.W	#0xFF09,D7                           | D7.W = exception $09: line A
+    BRA.W	EXCEPTIONHANDLER                      | common exit
+LINEF:
+    MOVE.W	#0xFF0A,D7                           | D7.W = exception $0A: line F
+    BRA.W	EXCEPTIONHANDLER                      | common exit
+NOTASS:
+    MOVE.W	#0xFF0B,D7                           | D7.W = exception $0B: unassigned vector
+    BRA.W	EXCEPTIONHANDLER                      | common exit
+CPPROTOCOL:
+    MOVE.W	#0xFF0C,D7                           | D7.W = exception $0C: coprocessor protocol violation
+    BRA.B	EXCEPTIONHANDLER                      | common exit
+FORMATX:
+    MOVE.W	#0xFF0D,D7                           | D7.W = exception $0D: format error
+    BRA.B	EXCEPTIONHANDLER                      | common exit
+SPURINTERRUPT:
+    MOVE.W	#0xFF0E,D7                           | D7.W = exception $0E: spurious interrupt
+    BRA.B	EXCEPTIONHANDLER                      | common exit
+TRAPN:
+    MOVE.W	#0xFF0F,D7                           | D7.W = exception $0F: TRAP #n
+    BRA.B	EXCEPTIONHANDLER                      | common exit
+INTLEVEL1:
+    MOVE.W	#0xFF10,D7                           | D7.W = exception $10: level 1 interrupt
+    BRA.B	EXCEPTIONHANDLER                      | common exit
+INTLEVEL2:
+    MOVE.W	#0xFF11,D7                           | D7.W = exception $11: level 2 interrupt
+    BRA.B	EXCEPTIONHANDLER                      | common exit
+INTLEVEL3:
+    MOVE.W	#0xFF12,D7                           | D7.W = exception $12: level 3 interrupt
+    BRA.B	EXCEPTIONHANDLER                      | common exit
+INTLEVEL4:
+    MOVE.W	#0xFF13,D7                           | D7.W = exception $13: level 4 interrupt
+    BRA.B	EXCEPTIONHANDLER                      | common exit
+INTLEVEL5:
+    MOVE.W	#0xFF14,D7                           | D7.W = exception $14: level 5 interrupt
+    BRA.B	EXCEPTIONHANDLER                      | common exit
+INTLEVEL6:
+    MOVE.W	#0xFF15,D7                           | D7.W = exception $15: level 6 interrupt
+    BRA.B	EXCEPTIONHANDLER                      | common exit
+INTLEVEL7:
+    MOVE.W	#0xFF16,D7                           | D7.W = exception $16: level 7 interrupt (NMI)
+    BSET	#0x19,D7                               | D7 bit 25 (nmi): the NMI switch was pressed
+    BRA.B	EXCEPTIONHANDLER                      | common exit
+FPCP1:
+    MOVE.W	#0xFF17,D7                           | D7.W = exception $17: FPCP unordered condition
+    BRA.B	EXCEPTIONHANDLER                      | common exit
+FPCP2:
+    MOVE.W	#0xFF18,D7                           | D7.W = exception $18: FPCP inexact result
+    BRA.B	EXCEPTIONHANDLER                      | common exit
+FPCP3:
+    MOVE.W	#0xFF19,D7                           | D7.W = exception $19: FPCP divide by zero
+    BRA.B	EXCEPTIONHANDLER                      | common exit
+FPCP4:
+    MOVE.W	#0xFF1A,D7                           | D7.W = exception $1A: FPCP underflow
+    BRA.B	EXCEPTIONHANDLER                      | common exit
+FPCP5:
+    MOVE.W	#0xFF1B,D7                           | D7.W = exception $1B: FPCP operand error
+    BRA.B	EXCEPTIONHANDLER                      | common exit
+FPCP6:
+    MOVE.W	#0xFF1C,D7                           | D7.W = exception $1C: FPCP overflow
+    BRA.B	EXCEPTIONHANDLER                      | common exit
+FPCP7:
+    MOVE.W	#0xFF1D,D7                           | D7.W = exception $1D: FPCP signaling NAN
+    BRA.B	EXCEPTIONHANDLER                      | common exit
+PMMUCONFIG:
+    MOVE.W	#0xFF1E,D7                           | D7.W = exception $1E: PMMU configuration
+    BRA.B	EXCEPTIONHANDLER                      | common exit
+PMMUILLEGAL:
+    MOVE.W	#0xFF1F,D7                           | D7.W = exception $1F: PMMU illegal operation
+    BRA.B	EXCEPTIONHANDLER                      | common exit
+PMMUACCESS:
+    MOVE.W	#0xFF20,D7                           | D7.W = exception $20: PMMU access level violation, falls through
 | ----------------------------------------------------------
-| Restart entry points: each sets a restart code in D7 and branches
-| to the common restart handler at RESTART_HANDLER.
-| Codes $FF01-$FF08 correspond to different restart reasons.
-RESTART_CODE_1:
-    MOVE.W	#0xFF01,D7                           | restart code 1
-    BRA.W	RESTART_HANDLER                       | common restart handler
-RESTART_CODE_2:
-    MOVE.W	#0xFF02,D7                           | restart code 2
-    BRA.W	RESTART_HANDLER                       | common restart handler
-RESTART_CODE_3:
-    MOVE.W	#0xFF03,D7                           | restart code 3
-    BRA.W	RESTART_HANDLER                       | common restart handler
-RESTART_CODE_4:
-    MOVE.W	#0xFF04,D7                           | restart code 4
-    BRA.W	RESTART_HANDLER                       | common restart handler
-RESTART_CODE_5:
-    MOVE.W	#0xFF05,D7                           | restart code 5
-    BRA.W	RESTART_HANDLER                       | common restart handler
-RESTART_CODE_6:
-    MOVE.W	#0xFF06,D7                           | restart code 6
-    BRA.W	RESTART_HANDLER                       | common restart handler
-RESTART_CODE_7:
-    MOVE.W	#0xFF07,D7                           | restart code 7
-    BRA.W	RESTART_HANDLER                       | common restart handler
-RESTART_CODE_8:
-    MOVE.W	#0xFF08,D7                           | restart code 8
-    BRA.W	RESTART_HANDLER                       | common restart handler
-RESTART_CODE_9:
-    MOVE.W	#0xFF09,D7                           | restart code 9
-    BRA.W	RESTART_HANDLER                       | common restart handler
-RESTART_CODE_10:
-    MOVE.W	#0xFF0A,D7                           | restart code 10
-    BRA.W	RESTART_HANDLER                       | common restart handler
-RESTART_CODE_11:
-    MOVE.W	#0xFF0B,D7                           | restart code 11
-    BRA.W	RESTART_HANDLER                       | common restart handler
-RESTART_CODE_12:
-    MOVE.W	#0xFF0C,D7                           | restart code 12
-    BRA.B	RESTART_HANDLER                       | common restart handler
-RESTART_CODE_13:
-    MOVE.W	#0xFF0D,D7                           | restart code 13
-    BRA.B	RESTART_HANDLER                       | common restart handler
-RESTART_CODE_14:
-    MOVE.W	#0xFF0E,D7                           | restart code 14
-    BRA.B	RESTART_HANDLER                       | common restart handler
-RESTART_CODE_15:
-    MOVE.W	#0xFF0F,D7                           | restart code 15
-    BRA.B	RESTART_HANDLER                       | common restart handler
-RESTART_CODE_16:
-    MOVE.W	#0xFF10,D7                           | restart code 16
-    BRA.B	RESTART_HANDLER                       | common restart handler
-RESTART_CODE_17:
-    MOVE.W	#0xFF11,D7                           | restart code 17
-    BRA.B	RESTART_HANDLER                       | common restart handler
-RESTART_CODE_18:
-    MOVE.W	#0xFF12,D7                           | restart code 18
-    BRA.B	RESTART_HANDLER                       | common restart handler
-RESTART_CODE_19:
-    MOVE.W	#0xFF13,D7                           | restart code 19
-    BRA.B	RESTART_HANDLER                       | common restart handler
-RESTART_CODE_20:
-    MOVE.W	#0xFF14,D7                           | restart code 20
-    BRA.B	RESTART_HANDLER                       | common restart handler
-RESTART_CODE_21:
-    MOVE.W	#0xFF15,D7                           | restart code 21
-    BRA.B	RESTART_HANDLER                       | common restart handler
-RESTART_CODE_22_WARM:
-    MOVE.W	#0xFF16,D7                           | restart code 22
-    BSET	#0x19,D7                               | set warm restart flag
-    BRA.B	RESTART_HANDLER                       | common restart handler
-RESTART_CODE_23:
-    MOVE.W	#0xFF17,D7                           | restart code 23
-    BRA.B	RESTART_HANDLER                       | common restart handler
-RESTART_CODE_24:
-    MOVE.W	#0xFF18,D7                           | restart code 24
-    BRA.B	RESTART_HANDLER                       | common restart handler
-RESTART_CODE_25:
-    MOVE.W	#0xFF19,D7                           | restart code 25
-    BRA.B	RESTART_HANDLER                       | common restart handler
-RESTART_CODE_26:
-    MOVE.W	#0xFF1A,D7                           | restart code 26
-    BRA.B	RESTART_HANDLER                       | common restart handler
-RESTART_CODE_27:
-    MOVE.W	#0xFF1B,D7                           | restart code 27
-    BRA.B	RESTART_HANDLER                       | common restart handler
-RESTART_CODE_28:
-    MOVE.W	#0xFF1C,D7                           | restart code 28
-    BRA.B	RESTART_HANDLER                       | common restart handler
-RESTART_CODE_29:
-    MOVE.W	#0xFF1D,D7                           | restart code 29
-    BRA.B	RESTART_HANDLER                       | common restart handler
-RESTART_CODE_30:
-    MOVE.W	#0xFF1E,D7                           | restart code 30
-    BRA.B	RESTART_HANDLER                       | common restart handler
-RESTART_CODE_31:
-    MOVE.W	#0xFF1F,D7                           | restart code 31
-    BRA.B	RESTART_HANDLER                       | common restart handler
-RESTART_CODE_32:
-    MOVE.W	#0xFF20,D7                           | restart code 32
-| Called by: RESTART_CODE_1, RESTART_CODE_2, RESTART_CODE_3, RESTART_CODE_4, RESTART_CODE_5 (and 26 more)
-RESTART_HANDLER:
-    BSET	#0x18,D7                               | set restart-in-progress flag
-    BTST	#0x19,D7                               | warm restart requested (bit 25)?
-    BEQ.B	RESTART_HANDLER_RTE                   | no: cold restart via RTE
-    MOVEA.W	#0x2000,A7                          | yes: set minimal stack at 8K
-    JMP	P_SadMac(PC)                            | restart via sad Mac display
-RESTART_HANDLER_RTE:
-    .byte 0x4E,0x73
+| EXCEPTIONHANDLER - common exit of the handlers (Apple: ExceptionHandler;
+| the 1992 version goes to CritErr instead). Sets D7 bit 24 (STEqu.a:
+| excp, "unexpected exception received"). After an NMI (D7 bit 25) it
+| shows the sad Mac at once; otherwise it returns with RTE, and the test
+| code, which checks bit 24, branches to the sad Mac itself.
+| Called by: BUSERROR_UNEXPECTED, ADRERROR, ILLERROR, ZERERROR, CHKERROR (and 26 more)
+EXCEPTIONHANDLER:
+    BSET	#0x18,D7                               | D7 bit 24 (excp): unexpected exception
+    BTST	#0x19,D7                               | D7 bit 25 (nmi): NMI switch pressed?
+    BEQ.B	EXCEPTIONHANDLER_RTE                  | no: return to the test code
+    MOVEA.W	#0x2000,A7                          | yes: fresh stack at $2000
+    JMP	P_SadMac(PC)                            | sad Mac
+EXCEPTIONHANDLER_RTE:
+    RTE                                         | back to the test code, which checks bit 24
 
 
 
@@ -348,17 +377,18 @@ COLDSTART_ADDRLINE_DONE:
     CLR.W	D7                                    | clear test phase (high word preserved)
     BTST	#0x1A,D7                               | loopback jumper found? (bit 26 in high word)
     BNE.B	COLDSTART_LOOPBACK_PATH               | yes: enter test manager path
-| normal start: copy MEMTEST routine from ROM to low RAM so it can
-| test RAM without self-referencing, then continue to boot init.
-    MOVEA.L	A7,A6                               | A6 = return addr (stack top = boot cont)
-    MOVEA.W	#0x400,A7                           | temporary stack at 1K
-    LEA.L	MEMTEST(PC),A0                        | A0 = MEMTEST source address (in ROM)
-    SUBA.L	A1,A1                                | A1 = 0 (destination: low RAM)
-    MOVE.W	#0x40,D0                             | D0 = 64 longwords (256 bytes to copy)
-    SUBQ.W	#0x1,D0                              | adjust for DBF loop (63 iterations)
+| Normal start: install MEMTEST as the exception vector table by copying
+| its 64 vectors to address 0 (a 68000 takes its vectors from there),
+| then continue at STARTINIT1 with A6 = top of RAM.
+    MOVEA.L	A7,A6                               | A6 = top of RAM (SP was set to it above)
+    MOVEA.W	#0x400,A7                           | temporary stack at $400
+    LEA.L	MEMTEST(PC),A0                        | A0 = the vector table in ROM
+    SUBA.L	A1,A1                                | A1 = 0: the exception vectors
+    MOVE.W	#0x40,D0                             | 64 vectors
+    SUBQ.W	#0x1,D0                              | minus 1 for DBF
 COLDSTART_MEMTEST_COPYLOOP:
-    MOVE.L	(A0)+,(A1)+                          | copy longword from ROM to RAM
-    DBF.W	D0,COLDSTART_MEMTEST_COPYLOOP         | loop 64 longwords
+    MOVE.L	(A0)+,(A1)+                          | copy one vector
+    DBF.W	D0,COLDSTART_MEMTEST_COPYLOOP         | 64 times
     JMP	STARTINIT1(PC)                          | continue boot init (boot_install.s)
 | loopback jumper (factory test fixture) found: enable diagnostic beep
 | and enter test manager.
@@ -428,7 +458,7 @@ RAMTEST_RETURN:
 | With the factory loopback jumper (D7 bit 26): restarts the diagnostic
 | test manager so the manufacturing test station can read the error
 | code via serial.
-| Called by: COLDSTART_CHECKSUM_DONE, FDHD_ColdStartPatchHook, COLDSTART_INIT_RAM_DONE, RESTART_HANDLER, COLDSTART_NO_TEST_SW (and 3 more)
+| Called by: COLDSTART_CHECKSUM_DONE, FDHD_ColdStartPatchHook, COLDSTART_INIT_RAM_DONE, EXCEPTIONHANDLER, COLDSTART_NO_TEST_SW (and 3 more)
 P_SadMac:
     BTST	#0x1A,D7                               | loopback jumper (test fixture) found?
     BNE.B	P_SADMAC_TESTMGR                      | yes: restart test manager
