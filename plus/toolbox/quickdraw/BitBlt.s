@@ -579,7 +579,7 @@ COPY31:
         MOVE.L  (A4)+,(A5)+                     | wordCount = 5
         MOVE.L  (A4)+,(A5)+                     | wordCount = 3
         MOVE    (A4)+,(A5)+                     | COPY WORD FROM SRC TO DST
-        RTS                                     | RETURN
+        RTS                                     | return from COPY31
 
 
 | -------------------------------------------------------
@@ -780,7 +780,7 @@ FILL31:
         MOVE.L  D6,(A5)+                        | wordCount = 5
         MOVE.L  D6,(A5)+                        | wordCount = 3
         MOVE    D6,(A5)+                        | FILL WORD TO DST
-        RTS                                     | RETURN
+        RTS                                     | return from FILL31
 
 
 | -------------------------------------------------------
@@ -897,7 +897,7 @@ XOR31:
         EOR.L   D6,(A5)+                        | wordCount = 5
         EOR.L   D6,(A5)+                        | wordCount = 3
         EOR     D6,(A5)+                        | XOR WORD TO DST
-        RTS                                     | RETURN
+        RTS                                     | return from XOR31
 
 
 | -------------------------------------------------------

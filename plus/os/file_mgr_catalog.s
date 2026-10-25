@@ -476,7 +476,7 @@ MC_ERR_EXIT:
         MOVEM.L (A6)+,D1/D3-D7/A0-A1/A3-A4      | Restore registers
         MOVE.L  (A6)+,-(SP)                     | put return address back on stack
         TST     D0                              | set condition codes
-        RTS                                     | Return
+        RTS                                     | return from MC_ERR_EXIT
 
 | CMRenameCN -- rename the root directory.
 | ----------------------------------------------------------
@@ -687,7 +687,7 @@ BuildKey:
         ADD.B   D0,(A1)                         | Return (A0 = key, D0 = key size)
 BLDKEY_DONE:
         MOVEM.L (SP)+,D0/A0-A1                  | Restore registers
-        RTS                                     | Return
+        RTS                                     | return from BLDKEY_DONE
 
 | CMFlush -- flush the catalog.
 | ----------------------------------------------------------
@@ -726,11 +726,11 @@ CMKeyCmp:
         MOVE.L  A1,A3                           | A3 = ptr(trial key)
 | compare DirID's first
         MOVE.L  0x2(A2),D0                      | compare parID's (ckrParID)
-        CMP.L   PORTBITS(A3),D0                 | compare search ParID vs trial ParID
+        CMP.L   0x2(A3),D0                      | compare search ParID vs trial ParID (ckrParID)
         BHI.B   KC_IS_GT                        | search ParID > trial ParID ->
         BCS     KC_IS_LT                        | search ParID < trial ParID ->
 | ParID's are equal, compare the CNames
-        LEA.L   vcbFlags(A2),A0                 | ptr(CName string) for search key (ckrCName)
+        LEA.L   0x6(A2),A0                      | ptr(CName string) for search key (ckrCName)
         LEA.L   0x6(A3),A1                      | ptr(CName string) for trial key
         MOVEQ.L #0x0,D0                         | D0(high word) = length(search key)
         MOVE.B  (A0)+,D0                        | get search CName length
@@ -802,7 +802,7 @@ LOCCREC_SEARCH:
 LOCCREC_EXIT:
         MOVE.L  (A6)+,-(SP)                     | put return address back on stack
         TST     D0                              | set condition codes
-        RTS                                     | Return
+        RTS                                     | return from LOCCREC_EXIT
 
 | UpdCName -- move in the CName.
 | ----------------------------------------------------------
@@ -814,11 +814,11 @@ UpdCName:
         MOVEQ.L #0x0,D0                         | clear high bytes
         MOVE.B  (A0)+,D0                        | D0 = source CName length
         MOVEQ.L #0x1F,D1                        | D1 = max CName length (31)
-        CMP     D1,D0                           | Compare
-        BLE.B   UPDCNAME_COPY                   | ->
+        CMP     D1,D0                           | longer than 31 characters?
+        BLE.B   UPDCNAME_COPY                   | no ->
         MOVE    D1,D0                           | clamp to max length
 UPDCNAME_COPY:
         MOVE.B  D0,(A1)+                        | store length byte in dest
-        _BlockMove                              | _BlockMove
+        _BlockMove                              | copy the D0 name characters after the length byte
         MOVEM.L (SP)+,D0-D1/A0-A1               | Restore registers
-        RTS                                     | Return
+        RTS                                     | return from UPDCNAME_COPY

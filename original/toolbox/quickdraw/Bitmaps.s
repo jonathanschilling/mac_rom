@@ -1,4 +1,4 @@
-|-----------------------------------------------------------
+| -----------------------------------------------------------
 |
 |
 |     ****   ***  *****  *     *     *     ****    ***
@@ -160,6 +160,18 @@ STDBITS_NOTPIC_EXIT:
         MOVE.L  (SP)+,A0                        | pop return PC
         ADDA.W  #0x12,SP                        | strip PARAMSIZE bytes
         JMP     (A0)                            | RTS
+| ----------------------------------------------------------
+|
+| _CopyBits ($A8EC): copy a bit image from one bitmap to another
+| Pascal: PROCEDURE CopyBits(srcBits, dstBits: BitMap; srcRect, dstRect: Rect;
+|                            mode: INTEGER; maskRgn: RgnHandle);
+| Shields the cursor if srcBits.baseAddr is the screen. If dstBits has
+| thePort's portBits baseAddr and bounds.topLeft, calls the port's bitsProc
+| (StdBits if grafProcs is nil); otherwise calls StretchBits directly with
+| wideOpen for visRgn/clipRgn and for a nil maskRgn. Unlike the 1983
+| Bitmaps.a, there is no check for a nil or odd thePort.
+|
+CopyBits:
         LINK    A6,#0x0                         | NO LOCAL VARS
         MOVEM.L D6-D7/A2-A4,-(SP)               | SAVE REGS
         MOVE.L  (A5),A4                         | POINT TO QD GLOBALS
@@ -171,7 +183,7 @@ STDBITS_NOTPIC_EXIT:
         BNE.B   STDBITS_NOTPIC_NO               | NO, CONTINUE
         MOVE.L  18(A6),-(SP)                    | YES, PUSH SRCRECT
         MOVE.L  6(A2),-(SP)                     | PUSH SRCBITS.BOUNDS.TOPLEFT
-        JSR     DrawControls(PC)                | HIDE THE CURSOR IF IN SRCRECT
+        JSR     ShieldCursor(PC)                | HIDE THE CURSOR IF IN SRCRECT
 STDBITS_NOTPIC_NO:
         MOVE.L  22(A6),A1                       | POINT TO DSTBITS
         MOVE.L  2(A3),D0                        | GET PORTBITS.BASEADDR
@@ -213,20 +225,31 @@ CALLBITS_USESTD:
 CALLBITS_RETURN:
         CMP.L   D6,D7                           | WAS SRC FROM THE SCREEN ?
         BNE.B   NOTPORT_NO                      | NO, CONTINUE
-        JSR     FMQD_ShowCursor(PC)             | YES, REPLACE CURSOR
+        JSR     ShowCursor(PC)                  | YES, REPLACE CURSOR
 NOTPORT_NO:
         MOVEM.L (SP)+,D6-D7/A2-A4               | RESTORE REGS
         UNLK    A6                              | tear down frame
         MOVE.L  (SP)+,A0                        | pop return addr
         ADDA.W  #0x16,SP                        | strip PARAMSIZE bytes
         JMP     (A0)                            | RTS
+| ----------------------------------------------------------
+|
+| _ScrollRect ($A8EF): scroll the bits inside a rectangle of the current port
+| Pascal: PROCEDURE ScrollRect(r: Rect; dh, dv: INTEGER; updateRgn: RgnHandle);
+| srcRgn := r SECT visRgn SECT clipRgn, dstRgn := srcRgn offset by (dh,dv),
+| updateRgn := srcRgn - dstRgn. With the cursor shielded, copies the bits
+| (RgnBlt srcCopy clipped to dstRgn and srcRgn), erases updateRgn with
+| bkPat and disposes the two temporary regions. If pnVis < 0 or dh = dv
+| = 0, it only sets updateRgn to empty (NOTPORT_EXIT).
+|
+ScrollRect:
         LINK    A6,#-0x8                        | ALLOCATE SRCRECT LOCAL
         MOVEM.L D6-D7/A3-A4,-(SP)               | SAVE REGS
         MOVE.L  (A5),A4                         | POINT TO QD GLOBALS
         MOVE.L  (A4),A3                         | GET THEPORT
         TST     0x42(A3)                        | IS PNVIS < 0 ?
         BLT.W   NOTPORT_EXIT                    | YES, QUIT FAST
-        TST.L   12(A6)                          | IS DSTRECT NIL ?
+        TST.L   12(A6)                          | ARE DH AND DV BOTH 0 ?
         BEQ.W   NOTPORT_EXIT                    | YES, QUIT FAST
         CLR.L   -(SP)                           | ROOM FOR FCN RESULT
         JSR     NewRgn(PC)                      | ALLOCATE SRCRGN
@@ -250,7 +273,7 @@ NOTPORT_NO:
         JSR     CopyRgn(PC)                     | CopyRgn(srcRgn,dstRgn);
         MOVE.L  D6,-(SP)                        | PUSH DSTRGN
         MOVE.L  12(A6),-(SP)                    | PUSH DH,DV PACKED
-        JSR     OffsetRgn(PC)                   | OffsetRgn(dstRgn,dh,dv);
+        JSR     OfsetRgn(PC)                    | OfsetRgn(dstRgn,dh,dv);
         MOVE.L  16(A6),A0                       | POINT TO DSTRECT
         MOVE.L  (A0)+,-8(A6)                    | COPY DSTRECT INTO SRCRECT
         MOVE.L  (A0)+,-4(A6)                    | COPY BOTTOM+RIGHT
@@ -266,7 +289,7 @@ NOTPORT_NO:
         JSR     DiffRgn(PC)                     | DiffRgn(srcRgn,dstRgn,updateRgn);
         MOVE.L  16(A6),-(SP)                    | PUSH DSTRECT
         MOVE.L  8(A3),-(SP)                     | PUSH PORTBITS.BOUNDS.TOPLEFT
-        JSR     DrawControls(PC)                | REMOVE CRSR IF INTERSECTS
+        JSR     ShieldCursor(PC)                | REMOVE CRSR IF INTERSECTS
         PEA.L     2(A3)                         | PUSH SRCBITS
         MOVE.L  (SP),-(SP)                      | PUSH DSTBITS
         PEA.L     -8(A6)                        | PUSH SRCRECT
@@ -287,14 +310,14 @@ NOTPORT_NO:
         MOVE.L  -0x82(A4),-(SP)                 | PUSH WIDEOPEN
         MOVE.L  (SP),-(SP)                      | PUSH WIDEOPEN
         JSR     RgnBlt(PC)                      | ERASE THE UPDATE RGN
-        JSR     FMQD_ShowCursor(PC)             | RESTORE THE CURSOR
+        JSR     ShowCursor(PC)                  | RESTORE THE CURSOR
         MOVE.L  D7,-(SP)                        | push srcRgn handle
-        JSR     NEWRGN_CONT(PC)                 | ERASE THE UPDATE RGN
+        JSR     DisposRgn(PC)                   | DisposeRgn(srcRgn)
         MOVE.L  D6,-(SP)                        | push dstRgn handle
-        JSR      NEWRGN_CONT(PC)                | RESTORE THE CURSOR
+        JSR      DisposRgn(PC)                  | DisposeRgn(dstRgn)
         BRA.B   SCROLLRECT_EXIT                 | skip empty branch
 NOTPORT_EXIT:
-        MOVE.L  8(A6),-(SP)                     | STORE COPYOP
+        MOVE.L  8(A6),-(SP)                     | PUSH UPDATERGN HANDLE
         JSR     SetEmptyRgn(PC)                 | SET IT TO EMPTY
 SCROLLRECT_EXIT:
         MOVEM.L (SP)+,D6-D7/A3-A4               | RESTORE REGS

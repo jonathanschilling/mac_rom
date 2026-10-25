@@ -1,115 +1,17 @@
-| Font Manager (ROM $B23E-$B6BF, ~1150 bytes)
+| Font Manager
 |
-| Prior to Phase 8.3, this code was scattered across three files:
-| the tail of quickdraw/Pictures.s ($B23E-$B2F2, ~180 B) with
-| `E_ATP_PRIMESTATUS_*` labels (a fingerprint-matcher misnomer --
-| the block has nothing to do with AppleTalk), and the head of
-| toolbox_event.s ($B30A-$B6BF, ~950 B) with `TOOLBOX_EVENT_CONT_*`
-| labels (another misnomer -- the block walks FMStyleTab, touches
-| FOutBold/FOutExtra/CurFMFamily/GotStrike and is pure FM).
-|
-| Now consolidated. Entry points:
-|
-| J-vector pushers @ $B23E-$B298 -- helpers for _InitGraf / _InitFonts
-| that push a proc pointer (JShowCursor, JHideCursor, JSetCrsr,
-| JInitCrsr, JCrsrObscure, JShieldCursor, JScrnAddr, JScrnSize,
-| JSwapFont) onto the stack and RTS, so callers tail-jump through
-| the J-vector.
-| Font-family search loop @ $B2BE -- given an FMInput record, walks
-| a font family looking for an exact match on family ID, face,
-| size, and strike availability.
-| FM_LOADFONTRES @ $B2F2 -- (misnomer) _LoadResource for a font
-| strike when FOutFontHandle is nil.
-| FM_EPILOGUE-CONT_10 @ $B30A-$B3EE -- (misnomer) the inner
-| loop of _FMSwapFont: clears FOutBold/FOutExtra/FOutULOffset,
-| walks FMStyleTab applying style adjustments, then copies the
-| 16-byte FMInput record into CurFMFamily/CurFMFace/CurFMSize/
-| CurFMNeedBits.
-| SWAPFONT_CONT_27 / _39 @ $B3F6-$B538 -- _GetResource('FONT'/'FOND')
-| font-handle resolution; install-font-recovery logic.
-| INSTALL_INF_RGN @ $B53A-$B606 -- _BlockMove of 28-byte FMOutput
-| defaults + 72-byte default arrow cursor into low memory.
-| FM_DEFAULTS_DATA @ $B548 -- 108-byte FMOutput+cursor default data.
-| GetFName @ $B5B4 -- _GetFName trap: return family name string.
-| RealFont family-query tail @ $B65C -- resolve family/size to a
-| present FOND/FONT resource ID.
-|
-| Classic note: the 128K/512K ROM has no dedicated InitFonts entry --
-| Font Manager initialization is inlined into the boot path. Classic
-| also has significantly less Font Manager code than Plus because
-| Plus added features like HFS-aware font lookup and extended family
-| metrics. Consequently this file is much shorter in classic.
+| Apple source: FontMgr.a (MacSEROM.lst module FONTMANAGER). InitFonts
+| ($A8FE: FMOutput and default cursor data into low memory, ROM font 0,
+| JSwapFont), the font search and strike loading behind _FMSwapFont
+| (SwapFont: FMInput -> FMOutput, FMStyleTab style adjustments,
+| 'FONT' resources, CurFMFamily/CurFMFace/CurFMSize/CurFMNeedBits),
+| GetFName ($A8FF), GetFNum ($A900), SetFontLock ($A903) and RealFont
+| ($A902). The QuickDraw glue in front of it (cursor and screen
+| J-vector trampolines, _FMSwapFont's vector jump) is in
+| quickdraw/QuickGlue.s.
 |
 | References:
 | Inside Macintosh Vol I, Ch 7: The Font Manager
-| Inside Macintosh Vol IV, Ch 5: Font Manager additions
-
-HLock_Inline:
-        MOVE.L  4(SP),A0                        | A0 := 4(SP)
-        BSET    #0x7,(A0)                       | set bit #0x7 of (A0)
-        MOVE.L  (SP)+,(SP)                      | pop (SP)
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-| HUNLOCK_POP_RTS -- tail of _HUnlock trap; clears bit 7 of master flag
-| then strips param and RTS. Reached via fall-through from _HUnlock body.
-HUNLOCK_POP_RTS:
-        MOVE.L  4(SP),A0                        | A0 = handle param
-        BCLR    #0x7,(A0)                       | clear lock bit in master ptr flag
-        MOVE.L  (SP)+,(SP)                      | strip handle param
-        RTS                                     | return
-
-| ----------------------------------------------------------
-| _ShowCursor ($A853): vectored through JShowCursor.
-ShowCursor:
-        MOVE.L  (JShowCursor).w,-(SP)           | get lo mem vector
-        RTS                                     | and call it
-
-| _HideCursor ($A852): vectored through JHideCursor.
-HideCursor:
-        MOVE.L  (GrafBegin_JHideCursor).w,-(SP) | get lo mem vector
-        RTS                                     | and call it
-
-| _SetCursor ($A851): vectored through JSetCrsr.
-SetCursor:
-        MOVE.L  (JSetCrsr).w,-(SP)              | get lo mem vector
-        RTS                                     | and call it
-
-| _InitCursor ($A850): vectored through JInitCrsr.
-InitCursor:
-        MOVE.L  (JInitCrsr).w,-(SP)             | get lo mem vector
-        RTS                                     | and call it
-
-| _ObscureCursor ($A856): vectored through JCrsrObscure.
-ObscureCursor:
-        MOVE.L  (JCrsrObscure).w,-(SP)          | get lo mem vector
-        RTS                                     | and call it
-
-| _ShieldCursor ($A85A): vectored through JShieldCursor. Classic
-| uses pure-trampoline form; Plus's ShieldCursor wraps this with
-| arg-processing logic.
-ShieldCursor:
-        MOVE.L  (JShieldCursor).w,-(SP)         | get lo mem vector
-        RTS                                     | and call it
-
-| _ScrnAddr ($A839): vectored through JScrnAddr; trampoline form.
-| The actual ScrnAddress implementation lives in hw/interrupts.s.
-PUSH_JScrnAddr:
-        MOVE.L  (JScrnAddr).w,-(SP)             | push screen-address proc vector
-        RTS                                     | and call it
-
-| _ScrnSize ($A89B): vectored through JScrnSize; trampoline form.
-| The actual ScrnSize implementation lives in hw/interrupts.s.
-PUSH_JScrnSize:
-        MOVE.L  (JScrnSize).w,-(SP)             | push screen-size proc vector
-        RTS                                     | and call it
-
-| _FMSwapFont ($A901): vectored through JSwapFont. Classic
-| installs SwapFont into JSwapFont during InitFonts; Plus
-| installs SwapFont. Same overall mechanism.
-FMSwapFont:
-        MOVE.L  (JSwapFont).w,-(SP)             | vectored through JSwapFont
-        RTS                                     | jump to SwapFont implementation
 
 | ----------------------------------------------------------
 | _InitFonts ($A8FE): initialize the Font Manager
@@ -123,7 +25,7 @@ InitFonts:
         MOVE.L  D3,-(SP)                        | save D3
         MOVEQ.L #-0x1,D0                        | D0 = -1 (invalid sentinel)
         MOVE    D0,(CurFMFamily).w              | invalidate cached font family
-        BSR.W   INSTALL_INF_RGN                 | install FMOutput + cursor defaults
+        BSR.W   FM_INSTALL_DEFAULTS             | install FMOutput + cursor defaults
         CLR     (CurFMDevice).w                 | current device = screen
         CLR.B   (FScaleDisable).w               | enable font scaling
         MOVE    (SPFont).w,(ApFontID).w         | application font from PRAM
@@ -179,7 +81,7 @@ FM_LOADFONTRES:
 FM_EPILOGUE:
         MOVE.L  (SP)+,A3                        | restore A3
         MOVE.L  (SP)+,(SP)                      | strip FMInput pointer param
-        RTS                                     | return to caller
+        RTS                                     | return from FM_EPILOGUE
 FM_SAVEREGS_TAIL:
         MOVEM.L D3-D7,-(SP)                     | save D3-D7 across slow path
 FM_APPLY_STYLE:
@@ -388,7 +290,7 @@ SWAPFONT_CONT_27_CONT_11:
 | Fills FMDotsPerInch_h/v with device resolution
 SWAPFONT_CONT_39:
         TST     D0                              | device 0 (screen)?
-        BEQ.B   INSTALL_INF_RGN                 | yes -> reset to 80-DPI defaults
+        BEQ.B   FM_INSTALL_DEFAULTS             | yes -> reset to 80-DPI defaults
         MOVEQ.L #-0x1,D0                        | prime D0 sign-extension
         MOVE.B  6(A3),D0                        | D0 = FMInput.device byte
         MOVEQ.L #0x32,D1                        | D1 = sizeof(IOParam) = 50
@@ -403,7 +305,7 @@ SWAPFONT_CONT_39:
         _Status                                 | ask printer driver for DPI
         ADDA.L  D1,SP                           | SP += D1 (unwind IOParam)
         RTS                                     | return with DPI in low memory
-INSTALL_INF_RGN:
+FM_INSTALL_DEFAULTS:
         LEA.L     (FMDotsPerInch_h).w,A1        | A1 = FMOutput defaults destination
         LEA     FM_DEFAULTS_DATA(PC),A0         | A0 = ROM defaults table (28 bytes)
         MOVEQ.L #0x1C,D0                        | D0 = 28 bytes to copy
@@ -413,7 +315,7 @@ INSTALL_INF_RGN:
 | ----------------------------------------------------------
 | FM_DEFAULTS_DATA @ $B548 -- 100-byte default FMOutput + cursor table
 |
-| 28-byte FMOutput record copied by INSTALL_INF_RGN (via _BlockMove
+| 28-byte FMOutput record copied by FM_INSTALL_DEFAULTS (via _BlockMove
 | with D0=0x1C) to (FMDotsPerInch_h). Layout:
 | +0 vDotsPerInch = 80 dpi
 | +2 hDotsPerInch = 80 dpi
@@ -451,24 +353,32 @@ FM_DEFAULTS_DATA_CONT:                          | internal data-region label
   .byte 0x1F, 0xC1, 0xA8, 0x04
 FM_DEFAULTS_DATA_CONT_2:                        | internal data-region label
   .byte                   0x0F, 0x80, 0x02, 0x02, 0x9A, 0x01, 0x04, 0x87
-  .byte 0x08, 0x00, 0x2F, 0x03                  | 108-byte cursor bitmap + mask + hotspot
+  .byte 0x08, 0x00                              | end of the default data
 | ----------------------------------------------------------
-| GetFName: resolve family ID -> font resource handle + name string
-| Pascal: procedure GetFName(familyID: INTEGER; VAR name: Str255);
-GetFName:                                       | jump via A0
+|
+| _GetFName ($A8FF): return the name of a font family
+| Pascal: PROCEDURE GetFontName(fontNum: INTEGER; VAR theName: Str255);
+| With ResLoad off, gets the FONT resource with ID fontNum*128 (the
+| family's name resource; fontNum 1 = ApFontID) via SWAPFONT_CONT_27 and
+| copies its resource name with _GetResInfo; theName := '' if there is
+| no such resource. Saves and restores D3.
+| Apple source name: GetFontName (MacSEROM.lst: GETFONTNAME)
+|
+GetFName:
+        MOVE.L  D3,-(SP)                        | save D3
         CLR     (ResLoad).w                     | suppress resource auto-load
-        MOVE    0xC(SP),D3                      | D3 = familyID from stack
+        MOVE    0xC(SP),D3                      | D3 = fontNum from stack
         CMPI    #0x1,D3                         | application font family?
         BNE.B   GETFNAME_CONT_2                 | no -> use caller's ID directly
         MOVE    (ApFontID).w,D3                 | yes -> substitute app font ID ($984)
 GETFNAME_CONT_2:
         ASL     #0x7,D3                         | D3 = FONT resource ID (ID << 7)
-        BSR.W   SWAPFONT_CONT_27                | load FONT resource -> D0 = handle
+        BSR.W   SWAPFONT_CONT_27                | GetResource('FONT', D3) -> A0/D0, Z if nil
         BEQ.B   GETFNAME_FOUND_2                | not found -> return empty name
-        MOVE.L  A0,-(SP)                        | save handle
-        PEA.L   (scratch8).w                    | push scratch for resType
-        MOVE.L  (SP),-(SP)                      | dup for resID
-        MOVE.L  0x14(SP),-(SP)                  | push caller's name-ptr var
+        MOVE.L  A0,-(SP)                        | push FONT handle (GetResInfo param)
+        PEA.L   (scratch8).w                    | push @theID (scratch8)
+        MOVE.L  (SP),-(SP)                      | push @theType (same scratch8)
+        MOVE.L  0x14(SP),-(SP)                  | push @theName (caller's VAR)
         _GetResInfo                             | fill name string
 GETFNAME_EXIT:
         ST      (ResLoad).w                     | restore auto-load flag
@@ -482,7 +392,7 @@ GETFNAME_FOUND_2:
         BRA.B   GETFNAME_EXIT                   | -> clean up and return
 
 | ----------------------------------------------------------
-| GetFNum -- _GetFNum ($A900). Plus font_mgr.s 1634.
+| GetFNum -- _GetFNum ($A900).
 | Pascal: procedure GetFNum(fontName: Str255; VAR theNum: INTEGER);
 | Resolves a font name to a family ID. Classic 1984 looks up only
 | the FONT resource (since FOND was added in Plus 1986); Plus tries
@@ -517,7 +427,7 @@ SWAPFONT_CONT_45_CONT_4:
         BRA.B   SWAPFONT_CONT_45_CONT_3         | -> common cleanup
 
 | ----------------------------------------------------------
-| SetFontLock -- _SetFontLock ($A903). Plus font_mgr.s 1692.
+| SetFontLock -- _SetFontLock ($A903).
 | Pascal: procedure SetFontLock(lockFlag: BOOLEAN);
 | Locks/unlocks the current font in memory by toggling the
 | purgeable bit on the font handle. Classic 1984 calls
@@ -540,7 +450,7 @@ SWAPFONT_CONT_45_NO:
         BRA.B   SWAPFONT_CONT_45_CONT_5         | strip param + return
 
 | ----------------------------------------------------------
-| RealFont -- _RealFont ($A902). Plus font_mgr.s 1719.
+| RealFont -- _RealFont ($A902).
 | Pascal: function RealFont(fontNum: INTEGER; size: INTEGER): BOOLEAN;
 | Tests whether a font/size combination exists without scaling.
 | Classic 1984 looks up only the FONT resource directly; Plus 1986

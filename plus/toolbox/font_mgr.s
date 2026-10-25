@@ -180,7 +180,7 @@ SWAPFONT_EXIT:
         _LoadResource                           | try to reload
         TST     (ResErr).w                      | load succeeded?
         BNE.B   SWAPFONT_RETRY                  | no -> rebuild FMInput and retry
-        BSR     INVERTCOLOR_CONT_3              | rebuild glyph bbox table
+        BSR     BuildCharTable                  | rebuild image height table (BuildCharTable)
         BRA.B   SWAPFONT_EXIT_2                 | -> return
 
 | ----------------------------------------------------------
@@ -262,12 +262,12 @@ SWAPFONT_NO:
         EXT     D6                              | sign-extend to word
         SWAP    D6                              | move to high word (integer part)
 SWAPFONT_OK_4:
-        MOVE    PORTBITS(A3),D1                 | D1 = current port's rowBytes
+        MOVE    fmInSize(A3),D1                 | D1 = FMInput.size (requested point size)
         LEA.L   0x400(A0),A1                    | A1 = width table cache header
         MOVE.L  (FOutFontHandle).w,D0           | D0 = current font handle
         CMP.L   (A1),D0                         | same font as cached?
         BNE.B   SWAPFONT_NO_2                   | no, rebuild width table ->
-        CMP     0x40E(A0),D1                    | same rowBytes (same port)?
+        CMP     0x40E(A0),D1                    | same size as the cached widthFSize?
         BEQ     SWAPFONT_OK_8                   | yes, just update extra ->
 SWAPFONT_NO_2:
         MOVE.L  D0,(A1)+                        | store font handle in cache header
@@ -479,7 +479,7 @@ SWAPFONT_CONT_9:
 | Returns D0 = font size: from FMInput.size, SysFontSize, or FMDefaultSize
 | Called during boot.
 SWAPFONT_CONT_10:
-        MOVE    PORTBITS(A3),D0                 | D0 = FMInput.size (at offset 2)
+        MOVE    fmInSize(A3),D0                 | D0 = FMInput.size (at offset 2)
         BNE.B   SWAPFONT_CONT_11                | explicit size requested ->
         TST     (A3)                            | FMInput.family nonzero?
         BNE.B   SWAPFONT_OK_7                   | yes, use default size ->
@@ -875,7 +875,7 @@ SWAPFONT_CONT_23:
 | SWAPFONT_CONT_24: FixMul - multiply two 16.16 fixed-point values
 | Pascal calling convention: pop D0 and D1 from stack, push result
 | Optimizes identity (1.0) and integer cases to avoid full FixMul trap
-| Called by: SWAPFONT_NO_7, SWAPFONT_NO_17, SWAPFONT_CONT_36, INVERTCOLOR_OK, SWAPFONT_CONT_8 (and 2 more)
+| Called by: SWAPFONT_NO_7, SWAPFONT_NO_17, SWAPFONT_CONT_36, FONTMETRICS_OK, SWAPFONT_CONT_8 (and 2 more)
 SWAPFONT_CONT_24:
         MOVE.L  (SP)+,A1                        | pop return address
         MOVE.L  (SP)+,D0                        | pop first operand
@@ -1065,7 +1065,7 @@ SWAPFONT_NEXT_3:
 | SWAPFONT_FOUND_3: font resource found - compute scale factors
 SWAPFONT_FOUND_3:
         MOVE.L  A0,(FOutFontHandle).w           | save font handle
-        BSR     INVERTCOLOR_CONT_3              | build glyph bounding box table
+        BSR     BuildCharTable                  | build image height table (BuildCharTable)
         BSR     SWAPFONT_CONT_10                | get effective font size -> D0
 | compute size ratio: requested size / actual size
         SUBQ.W  #0x4,SP                         | space for FixRatio result
@@ -1761,11 +1761,14 @@ REALFONT_LOOP:
 
 | ----------------------------------------------------------
 |
-| Index2Color
+| _SetFScaleDisable ($A834): enable or disable font scaling
+| Pascal: PROCEDURE SetFScaleDisable(fontScaleDisable: BOOLEAN);
+| Stores the Boolean in FScaleDisable ($A63; TRUE = scaling disabled),
+| sets CurFMFamily to -1 so the next FMSwapFont misses its cache, and
+| invalidates all cached width tables (INITFONTS_CONT_2, cf. InValWidths
+| in System 7.1 FontMgr.a). Pops the 2-byte parameter.
 |
-| Index2Color: set FScaleDisable flag and invalidate font caches
-| On Mac Plus (B&W), repurposed as SetFScaleDisable
-Index2Color:
+SetFScaleDisable:
         MOVE.L  (SP)+,A0                        | pop return address
         MOVE.B  (SP)+,(FScaleDisable).w         | pop boolean -> FScaleDisable
         MOVE    #-0x1,(CurFMFamily).w           | invalidate cached family
@@ -1775,201 +1778,222 @@ Index2Color:
 
 | ----------------------------------------------------------
 |
-| Invert Color
+| _FontMetrics ($A835): return fractional metrics of the current font
+| Pascal: PROCEDURE FontMetrics(VAR theMetrics: FMetricRec);
+| FMetricRec: ascent, descent, leading, widMax: Fixed; wTabHandle: Handle
+| Calls _CharWidth(' ') so FMSwapFont sets up the port's font, then
+| takes ascent/descent/leading (scaled vertically) and widMax (scaled
+| horizontally) from the current font record via ScaleVFVal and
+| ScaleFVal, stores WidthTabHandle, adds 1 to ascent and the
+| shadow count to descent for shadowed text, and adds the width table's
+| style extra to widMax. Pops the 4-byte parameter.
 |
-| _FontMetrics ($A835): return detailed font metrics for current font
-| Fills FMOutput record with scaled ascent, descent, widMax, leading
-InvertColor:
+FontMetrics:
         SUBQ.W  #0x2,SP                         | space for CharWidth result
         MOVE    #0x20,-(SP)                     | space character
         _CharWidth                              | force font swap if needed
         ADDQ.W  #0x2,SP                         | discard width
-| copy font metrics from strike to output, applying scaling
+| scale the font record's metrics into theMetrics
         MOVEM.L A2-A3,-(SP)                     | save regs
-        MOVE.L  0xC(SP),A2                      | A2 = output FontInfo ptr
+        MOVE.L  0xC(SP),A2                      | A2 = @theMetrics (FMetricRec)
         MOVE.L  (FOutFontHandle).w,A1           | current font handle
         MOVE.L  (A1),A1                         | dereference
-        LEA.L   0x12(A1),A0                     | A0 = font strike metrics (owTLoc area)
-        PEA.L   0x6(A1)                         | push font bounds rect
+        LEA.L   0x12(A1),A0                     | A0 -> font ascent (+$12), descent, leading
+        PEA.L   0x6(A1)                         | save ptr to font widMax (+$6)
 | scale 3 metric values (ascent, descent, leading)
-        BSR.B   INVERTCOLOR_CONT                | scale and store metric 1 (ascent)
-        BSR.B   INVERTCOLOR_CONT                | scale and store metric 2 (descent)
-        BSR.B   INVERTCOLOR_CONT                | scale and store metric 3 (leading)
-        MOVE.L  (SP)+,A0                        | A0 = font bounds rect
+        BSR.B   ScaleVFVal                      | scale and store metric 1 (ascent)
+        BSR.B   ScaleVFVal                      | scale and store metric 2 (descent)
+        BSR.B   ScaleVFVal                      | scale and store metric 3 (leading)
+        MOVE.L  (SP)+,A0                        | A0 -> font widMax
 | scale widMax
         MOVE.L  (FScaleHFact).w,D1              | horizontal scale factor
-        LEA.L   (FOutNumer_v).w,A1              | scaling numerator
-        BSR.B   INVERTCOLOR_CONT_2              | scale widMax
+        LEA.L   (FOutNumer_v).w,A1              | A1 -> FMOutput numer.h ($9AC), denom.h
+        BSR.B   ScaleFVal                       | scale widMax
         MOVE.L  (WidthTabHandle).w,(A2)         | store width table handle in output
 | adjust metrics for shadow style
-        MOVE.L  0xC(SP),A2                      | A2 = FontInfo ptr
+        MOVE.L  0xC(SP),A2                      | A2 = @theMetrics again
         MOVEQ.L #0x0,D0                         | clear D0 for byte extend
-        MOVE.B  (FOutShadow).w,D0               | shadow offset
-        BEQ.B   INVERTCOLOR_NO                  | no shadow ->
+        MOVE.B  (FOutShadow).w,D0               | D0 = FMOutput shadow count
+        BEQ.B   FONTMETRICS_NO                  | no shadow ->
         ADDQ.W  #0x1,(A2)                       | ascent += 1 (shadow extends up)
-        ADD     D0,0x4(A2)                      | widMax += shadow offset
-INVERTCOLOR_NO:
-        MOVE.L  (WidthPtr).w,A0                 | width table data
-        MOVE.L  0x408(A0),D0                    | D0 = spExtra from width table
-        ADD.L   D0,0xC(A2)                      | add spExtra to leading in output
+        ADD     D0,0x4(A2)                      | descent += shadow count (integer part)
+FONTMETRICS_NO:
+        MOVE.L  (WidthPtr).w,A0                 | A0 -> current width table
+        MOVE.L  0x408(A0),D0                    | D0 = width table style extra (+$408)
+        ADD.L   D0,0xC(A2)                      | widMax += style extra
         MOVEM.L (SP)+,A2-A3                     | restore regs
         MOVE.L  (SP)+,(SP)                      | strip param (move ret addr down)
         RTS                                     | return from FontMetrics
 
 | ----------------------------------------------------------
 |
-| INVERTCOLOR_CONT
+| ScaleVFVal - scale one vertical font metric (FontMetrics helper)
+| Entry: A0 -> INTEGER metric in the font record, A2 -> Fixed result
+| Exit:  A0 += 2, A2 += 4; D0-D1/A1 trashed
+| Sets D1 = FScaleVFact, A1 -> FMOutput numer.v ($9AA, denom.v at 4(A1))
+| and falls into ScaleFVal (used directly for widMax).
+| Note: FixRatio gets (denom, numer) in that order here; Apple's
+| FontMgr.a history notes a 5/28/86 patch "to get num/denom right".
+| Apple source names: ScaleVFVal/ScaleFVal (System 7.1 FontMgr.a)
 |
-| INVERTCOLOR_CONT: scale metric by vertical factor with numer/denom
-INVERTCOLOR_CONT:
+ScaleVFVal:
         MOVE.L  (FScaleVFact).w,D1              | D1 = vertical scale factor
-        LEA.L   (FOutNumer_h).w,A1              | A1 = numer/denom for vertical
-| INVERTCOLOR_CONT_2: scale metric at (A0)+ by D1, with numer/denom from A1
-| Stores 16.16 fixed-point result at (A2)+
-INVERTCOLOR_CONT_2:
+        LEA.L   (FOutNumer_h).w,A1              | A1 -> FMOutput numer.v ($9AA), denom.v
+| ScaleFVal: (A2)+ = FixMul(factor, FixMul(Fixed((A0)+),
+|   FixRatio(4(A1), (A1)))); factor = D1 if FScaleDisable, else 1.0
+ScaleFVal:
         MOVE    (A0)+,D0                        | D0 = metric value from font
         MOVE.L  A0,-(SP)                        | save source pointer
-        TST.B   (FScaleDisable).w               | scaling enabled?
-        BNE.B   INVERTCOLOR_OK                  | yes -> use actual scale factor
-        MOVE.L  SWAPFONT_CONT_23(PC),D1         | no -> force scale = 1.0
-INVERTCOLOR_OK:
-        SUBQ.W  #0x4,SP                         | space for FixMul chain result
+        TST.B   (FScaleDisable).w               | font scaling disabled?
+        BNE.B   FONTMETRICS_OK                  | yes -> apply FScale factor in D1
+        MOVE.L  SWAPFONT_CONT_23(PC),D1         | no (scaling on) -> factor = 1.0
+FONTMETRICS_OK:
+        SUBQ.W  #0x4,SP                         | room for outer FixMul result
         MOVE.L  D1,-(SP)                        | push scale factor
-        SUBQ.W  #0x4,SP                         | space for metric as fixed
-        CLR     -(SP)                           | push metric high word = 0
-        MOVE    D0,-(SP)                        | push metric as integer
-        SUBQ.W  #0x4,SP                         | space for numer/denom ratio
-        MOVE    0x4(A1),-(SP)                   | push denom
-        MOVE    (A1),-(SP)                      | push numer
-        BSR     SWAPFONT_CONT_25                | FixRatio(numer, denom)
-        BSR     SWAPFONT_CONT_24                | FixMul: metric * numer/denom
+        SUBQ.W  #0x4,SP                         | room for inner FixMul result
+        CLR     -(SP)                           | push fraction word = 0
+        MOVE    D0,-(SP)                        | push integer word: Fixed(metric)
+        SUBQ.W  #0x4,SP                         | room for FixRatio result
+        MOVE    0x4(A1),-(SP)                   | push FMOutput denom (FixRatio numer)
+        MOVE    (A1),-(SP)                      | push FMOutput numer (FixRatio denom)
+        BSR     SWAPFONT_CONT_25                | FixRatio(denom, numer)
+        BSR     SWAPFONT_CONT_24                | FixMul: metric * ratio
         BSR     SWAPFONT_CONT_24                | FixMul: result * scale factor
         MOVE.L  (SP)+,(A2)+                     | store 16.16 result in output
         MOVE.L  (SP)+,A0                        | restore source pointer
-        RTS                                     | return from INVERTCOLOR_CONT/INVERTCOLOR_CONT_2
+        RTS                                     | return from ScaleVFVal/ScaleFVal
 
 | ----------------------------------------------------------
 |
-| INVERTCOLOR_CONT_3
+| BuildCharTable - build the image height table of a FONT
+| Entry: A0 = font handle. Not part of FontMetrics; called by SwapFont
+|        (SWAPFONT_FOUND_3, and SWAPFONT_EXIT after reloading a purged
+|        font).
+| Returns at once if fontType bit 0 (height table present) is set or
+| if the font cannot be grown. Otherwise appends one word per entry
+| (lastChar-firstChar+3) after the offset/width table (and after the
+| optional glyph-width table, fontType bit 1), sets bit 0 and fills it
+| by scanning each glyph's columns in the strike: high byte = first
+| row with ink, low byte = rows from there to the last ink row
+| ($0000 = blank). QuickDraw uses it to draw only the inked rows.
+| Apple source name: BuildCharTable (System 7.1 FontMgr.a). This ROM
+| computes the height per 16-pixel band, the code that FontMgr.a
+| fixed on 5/28/86 ("height table loop for wide, tall fonts").
 |
-| INVERTCOLOR_CONT_3: build per-glyph bounding box table appended to font strike
-| Scans bitmap to find top/bottom ink row for each glyph
-| Used by QuickDraw for faster text clipping
-| A0 = font handle
 | Called during boot.
-INVERTCOLOR_CONT_3:
+BuildCharTable:
         MOVEM.L D3-D7/A2-A4,-(SP)               | save regs
         MOVE.L  A0,A3                           | A3 = font handle
-        MOVE.L  (A3),A1                         | A1 = font strike data
+        MOVE.L  (A3),A1                         | A1 -> font record
         MOVE    (A1)+,D0                        | D0 = fontType
-        LSR     #0x1,D0                         | bit 0 = bbox table present?
-        BCS.B   INVERTCOLOR_EXIT                | already built -> return
+        LSR     #0x1,D0                         | bit 0 (height table present) -> C
+        BCS.B   BUILDCHARTABLE_EXIT             | already built -> return
         MOVE    (A1)+,D0                        | D0 = firstChar
         MOVE    (A1),D5                         | D5 = lastChar
-        SUB     D0,D5                           | D5 = char range
-        ADDQ.W  #0x3,D5                         | + missing char + 2 extra entries
-        ADD     D5,D5                           | * 2 bytes per bbox entry
+        SUB     D0,D5                           | D5 = lastChar - firstChar
+        ADDQ.W  #0x3,D5                         | +3 = locTable/owTable entry count
+        ADD     D5,D5                           | * 2 = table size in bytes
         EXT.L   D5                              | sign-extend to long
-| calculate new handle size with bbox data appended
-        MOVE.L  (A3),A1                         | re-dereference (may have moved)
+| compute table offsets and the new font size
+        MOVE.L  (A3),A1                         | A1 -> font record
         MOVEQ.L #0x0,D0                         | clear D0
-        MOVE    0x10(A1),D0                     | D0 = rowWords
-        ADDQ.L  #0x8,D0                         | + 8 header words
-        ADD.L   D0,D0                           | * 2 = byte offset to bitmap end
-        MOVE.L  D0,D1                           | D1 = offset to offset/width table
-        SUB.L   D5,D1                           | D1 = (adjusted for table layout)
-        ADD.L   D5,D0                           | D0 = past offset table
-        MOVE.L  D0,D2                           | D2 = offset to bbox table
-        ADD.L   D5,D0                           | D0 = new total size with bbox
-        BTST    #0x1,0x1(A1)                    | font has 16-bit widths?
-        BEQ.B   INVERTCOLOR_NO_2                | no ->
-        ADD.L   D5,D0                           | add space for extra width table
-        ADD.L   D5,D2                           | adjust bbox table offset
-INVERTCOLOR_NO_2:
-        _SetHandleSize                          | resize font handle
-        BEQ.B   INVERTCOLOR_CONT_4              | success ->
-INVERTCOLOR_EXIT:
-        MOVEM.L (SP)+,D3-D7/A2-A4               | resize failed or already done
-        RTS                                     | return from INVERTCOLOR_CONT_3
+        MOVE    0x10(A1),D0                     | D0 = owTLoc (words from owTLoc to owTable)
+        ADDQ.L  #0x8,D0                         | + 8: owTLoc is header word 8
+        ADD.L   D0,D0                           | * 2 = byte offset of owTable
+        MOVE.L  D0,D1                           | D1 = owTable offset
+        SUB.L   D5,D1                           | D1 = locTable offset (precedes owTable)
+        ADD.L   D5,D0                           | D0 = end of owTable
+        MOVE.L  D0,D2                           | D2 = offset for the height table
+        ADD.L   D5,D0                           | D0 = new font size incl. height table
+        BTST    #0x1,0x1(A1)                    | fontType bit 1: glyph-width table?
+        BEQ.B   BUILDCHARTABLE_NO_2             | no ->
+        ADD.L   D5,D0                           | size += width table
+        ADD.L   D5,D2                           | height table goes after width table
+BUILDCHARTABLE_NO_2:
+        _SetHandleSize                          | grow font handle (A0) to D0 bytes
+        BEQ.B   BUILDCHARTABLE_CONT_4           | success ->
+BUILDCHARTABLE_EXIT:
+        MOVEM.L (SP)+,D3-D7/A2-A4               | grow failed or table already present
+        RTS                                     | return from BuildCharTable
 
 | ----------------------------------------------------------
 |
-| INVERTCOLOR_CONT_4
+| BUILDCHARTABLE_CONT_4 - font grown: set fontType bit 0 and fill the
+| image height table, one entry per glyph
 |
-| INVERTCOLOR_CONT_4: resize succeeded - build bbox table by scanning bitmap
 | Called during boot.
-INVERTCOLOR_CONT_4:
-        MOVE.L  (A3),A2                         | A2 = font strike data
-        ORI     #0x1,(A2)                       | set bit 0 of fontType (bbox present)
+BUILDCHARTABLE_CONT_4:
+        MOVE.L  (A3),A2                         | A2 -> font record
+        ORI     #0x1,(A2)                       | fontType bit 0: height table present
         MOVE    0xE(A2),D3                      | D3 = fRectHeight (bitmap rows)
-        ADDA.L  D1,A2                           | A2 = offset/width table
+        ADDA.L  D1,A2                           | A2 -> locTable (glyph image offsets)
         MOVE.L  (A3),A4                         | A4 = font data base
-        ADDA.L  D2,A4                           | A4 = bbox output table
-        SUBQ.W  #0x2,D5                         | D5 = loop counter (entries - 1)
-| INVERTCOLOR_NEXT: process each glyph - find top and bottom ink rows
-INVERTCOLOR_NEXT:
-        MOVE    #-0x100,(A4)                    | init bbox entry ($FF00 = no ink)
+        ADDA.L  D2,A4                           | A4 -> image height table
+        SUBQ.W  #0x2,D5                         | D5 = 2 * glyphs (chars + missing glyph)
+| BUILDCHARTABLE_NEXT: next glyph - init its entry, get image width
+BUILDCHARTABLE_NEXT:
+        MOVE    #-0x100,(A4)                    | init entry: top = $FF, height = 0
         MOVE    (A2)+,D7                        | D7 = glyph X start (bit offset)
         MOVE    (A2),D6                         | D6 = next glyph X start
         SUB     D7,D6                           | D6 = glyph pixel width
-        BEQ     INVERTCOLOR_EMPTY               | zero width (space) ->
-| INVERTCOLOR_NEXT_2: build bit mask for glyph columns, scan bitmap rows
-INVERTCOLOR_NEXT_2:
+        BEQ     BUILDCHARTABLE_EMPTY            | no image -> entry $0000
+| BUILDCHARTABLE_NEXT_2: next 16-pixel band - column mask in D0.hi
+BUILDCHARTABLE_NEXT_2:
         MOVE    D7,D2                           | D2 = bit position
         MOVE    D7,D0                           | D0 = bit position
         LSR     #0x4,D0                         | D0 = word index
         ADD     D0,D0                           | * 2 = byte offset
         MOVE.L  (A3),A1                         | re-dereference font handle
-        ADDA    #0x1A,A1                        | A1 = bitmap data start (offset $1A)
-        ADDA    D0,A1                           | A1 = column word in bitmap
+        ADDA    #0x1A,A1                        | A1 -> bitImage (font record +$1A)
+        ADDA    D0,A1                           | A1 -> word with band's 1st pixel, row 0
         ANDI    #0xF,D2                         | D2 = bit position within word
         MOVE    D2,D1                           | D1 = bit position
         ADD     D1,D1                           | * 2 for word table index
         MOVEQ.L #0x0,D0                         | clear D0
-        MOVE    INVERTCOLOR_CONT_5(PC,D1.W),D0  | D0 = right-aligned bitmask
+        MOVE    BUILDCHARTABLE_CONT_5(PC,D1.W),D0 | D0 = $FFFF >> bit (bits up to word end)
         SWAP    D0                              | move to high word (for long mask)
         MOVEQ.L #0x10,D1                        | D1 = 16 (bits per word)
-        SUB     D2,D1                           | D1 = remaining bits in this word
+        SUB     D2,D1                           | D1 = pixels of glyph in this word
         ADD     D1,D7                           | advance X past this word
         SUB     D1,D6                           | D6 = remaining glyph width
-        BEQ.B   INVERTCOLOR_CONT_7              | fits in one word ->
-        BPL.B   INVERTCOLOR_CONT_6              | spans multiple words ->
-| glyph narrower than remaining bits - mask off right side
+        BEQ.B   BUILDCHARTABLE_CONT_7           | glyph ends at word end -> mask done
+        BPL.B   BUILDCHARTABLE_CONT_6           | glyph continues in next word ->
+| glyph ends inside this word - clear mask bits right of its end
         MOVE    D6,D1                           | D1 = negative overshoot
-        ADDI    #0x10,D1                        | adjust to positive
+        ADDI    #0x10,D1                        | D1 = 16 + D6 = bit where glyph ends
         ADD     D1,D1                           | * 2 for table index
-        MOVE.L  INVERTCOLOR_CONT_5(PC,D1.W),D2  | D2 = right-side mask
-        NOT.L   D2                              | invert (bits to clear)
-        AND.L   D2,D0                           | narrow the column mask
-        BRA.B   INVERTCOLOR_CONT_7              | -> scan with this mask
+        MOVE.L  BUILDCHARTABLE_CONT_5(PC,D1.W),D2 | D2.hi = $FFFF >> D1
+        NOT.L   D2                              | D2.hi = bits left of glyph end
+        AND.L   D2,D0                           | clear mask bits right of the glyph
+        BRA.B   BUILDCHARTABLE_CONT_7           | -> scan with this mask
 
 | ----------------------------------------------------------
 |
-| INVERTCOLOR_CONT_5
+| BUILDCHARTABLE_CONT_5 - mask table: entry n (n = 0..16) = $FFFF >> n
 |
-INVERTCOLOR_CONT_5:
-  .byte 0xFF,0xFF,0x7F,0xFF,0x3F,0xFF           | bit masks: 16,15,14 bits from left
-  .byte 0x1F,0xFF,0x0F,0xFF,0x07,0xFF           | bit masks: 13,12,11 bits from left
-  .byte 0x03,0xFF,0x01,0xFF,0x00,0xFF           | bit masks: 10,9,8 bits from left
-  .byte 0x00,0x7F,0x00,0x3F,0x00,0x1F           | bit masks: 7,6,5 bits from left
-  .byte 0x00,0x0F,0x00,0x07,0x00,0x03           | bit masks: 4,3,2 bits from left
-  .byte 0x00,0x01,0x00,0x00                     | bit masks: 1,0 bits from left
-| INVERTCOLOR_CONT_6: glyph spans next word - extend mask for right portion
-INVERTCOLOR_CONT_6:
+BUILDCHARTABLE_CONT_5:
+  .byte 0xFF,0xFF,0x7F,0xFF,0x3F,0xFF           | n=0..2:   $FFFF, $7FFF, $3FFF
+  .byte 0x1F,0xFF,0x0F,0xFF,0x07,0xFF           | n=3..5:   $1FFF, $0FFF, $07FF
+  .byte 0x03,0xFF,0x01,0xFF,0x00,0xFF           | n=6..8:   $03FF, $01FF, $00FF
+  .byte 0x00,0x7F,0x00,0x3F,0x00,0x1F           | n=9..11:  $007F, $003F, $001F
+  .byte 0x00,0x0F,0x00,0x07,0x00,0x03           | n=12..14: $000F, $0007, $0003
+  .byte 0x00,0x01,0x00,0x00                     | n=15..16: $0001, $0000
+| BUILDCHARTABLE_CONT_6: glyph continues - extend mask into D0.lo
+BUILDCHARTABLE_CONT_6:
         MOVEQ.L #0x10,D4                        | 16 bits per word
         MOVE    D6,D1                           | D1 = remaining glyph width
         CMP     D4,D1                           | more than 16 remaining?
-        BLE.B   INVERTCOLOR_NO_3                | no ->
+        BLE.B   BUILDCHARTABLE_NO_3             | no ->
         MOVE    D4,D1                           | clamp to 16
-INVERTCOLOR_NO_3:
+BUILDCHARTABLE_NO_3:
         ADD     D1,D1                           | * 2 for table index
-        MOVE    INVERTCOLOR_CONT_5(PC,D1.W),D2  | D2 = mask for right-side bits
-        NOT     D2                              | invert to get bits to set
-        OR      D2,D0                           | extend column mask rightward
+        MOVE    BUILDCHARTABLE_CONT_5(PC,D1.W),D2 | D2 = $FFFF >> n
+        NOT     D2                              | D2 = leftmost n bits set
+        OR      D2,D0                           | mask covers first n pixels of next word
         SUB     D4,D6                           | reduce remaining width
         ADD     D4,D7                           | advance X position
-| INVERTCOLOR_CONT_7: scan bitmap rows from top, looking for first ink row
-INVERTCOLOR_CONT_7:
+| BUILDCHARTABLE_CONT_7: scan bitmap rows from top, looking for first ink row
+BUILDCHARTABLE_CONT_7:
         MOVE.L  A1,-(SP)                        | save bitmap column pointer
         MOVE    D3,D1                           | D1 = fRectHeight (row count)
         SUBQ.W  #0x1,D1                         | adjust for DBF
@@ -1977,30 +2001,30 @@ INVERTCOLOR_CONT_7:
         MOVE.L  (A3),A0                         | re-dereference font handle
         MOVE    0x18(A0),A0                     | A0 = rowWords (words per row)
         ADDA    A0,A0                           | A0 = rowBytes (bytes per row)
-INVERTCOLOR_LOOP:
+BUILDCHARTABLE_LOOP:
         MOVE.L  (A1),D2                         | D2 = bitmap data at this row
         AND.L   D0,D2                           | mask to glyph columns
-        BNE.B   INVERTCOLOR_FOUND               | ink found -> record top row
+        BNE.B   BUILDCHARTABLE_FOUND            | ink found -> record top row
         ADDQ.W  #0x1,D4                         | next row
         ADDA    A0,A1                           | advance to next bitmap row
-        DBF     D1,INVERTCOLOR_LOOP             | loop all rows
+        DBF     D1,BUILDCHARTABLE_LOOP          | loop all rows
         ADDQ.L  #0x4,SP                         | discard saved pointer (no ink found)
         MOVEQ.L #0x0,D6                         | D6 = 0 (no more columns to check)
-INVERTCOLOR_EMPTY:
-        CLR     (A4)+                           | store 0 in bbox (empty glyph)
-        BRA.B   INVERTCOLOR_NEXT_3              | -> next glyph
+BUILDCHARTABLE_EMPTY:
+        CLR     (A4)+                           | entry = $0000 (band has no ink)
+        BRA.B   BUILDCHARTABLE_NEXT_3           | -> next glyph
 
 | ----------------------------------------------------------
 |
-| INVERTCOLOR_FOUND: found top ink row - record it, then scan from bottom for last row
+| BUILDCHARTABLE_FOUND: found top ink row - record it, then scan from bottom for last row
 |
 | Called during boot.
-INVERTCOLOR_FOUND:
+BUILDCHARTABLE_FOUND:
         CMP.B   (A4),D4                         | top row < current min?
-        BCC     INVERTCOLOR_NO_4                | no ->
-        MOVE.B  D4,(A4)                         | update top row (min ascent)
-| INVERTCOLOR_NO_4: scan bitmap rows from bottom up for last ink row
-INVERTCOLOR_NO_4:
+        BCC     BUILDCHARTABLE_NO_4             | no ->
+        MOVE.B  D4,(A4)                         | entry.hi = new topmost ink row
+| BUILDCHARTABLE_NO_4: scan bitmap rows from bottom up for last ink row
+BUILDCHARTABLE_NO_4:
         MOVE.L  (SP)+,A1                        | restore bitmap column pointer
         MOVE    D3,D2                           | D2 = fRectHeight
         SUBQ.W  #0x1,D2                         | D2 = last row index
@@ -2010,32 +2034,32 @@ INVERTCOLOR_NO_4:
         MOVE    D3,D4                           | D4 = fRectHeight (bottom row + 1)
         MOVE    D3,D1                           | D1 = loop counter
         SUBQ.W  #0x1,D1                         | adjust for DBF
-INVERTCOLOR_LOOP_2:
+BUILDCHARTABLE_LOOP_2:
         MOVE.L  (A1),D2                         | D2 = bitmap data at this row
         AND.L   D0,D2                           | mask to glyph columns
-        BNE.B   INVERTCOLOR_FOUND_2             | ink found -> record bottom row
+        BNE.B   BUILDCHARTABLE_FOUND_2          | ink found -> record bottom row
         SUBQ.W  #0x1,D4                         | move up one row
         SUBA    A0,A1                           | back up one row
-        DBF     D1,INVERTCOLOR_LOOP_2           | loop all rows
-        BRA.B   INVERTCOLOR_EMPTY               | empty glyph -> move to next glyph
+        DBF     D1,BUILDCHARTABLE_LOOP_2        | loop all rows
+        BRA.B   BUILDCHARTABLE_EMPTY            | (not reached: top scan found ink)
 
 | ----------------------------------------------------------
 |
-| INVERTCOLOR_FOUND_2
+| BUILDCHARTABLE_FOUND_2
 |
-| INVERTCOLOR_FOUND_2: compute glyph height (bottom - top) and update max
+| BUILDCHARTABLE_FOUND_2: compute glyph height (bottom - top) and update max
 | Called during boot.
-INVERTCOLOR_FOUND_2:
-        SUB.B   (A4)+,D4                        | D4 = bottom - top = glyph ink height
-        CMP.B   (A4)+,D4                        | greater than current max height?
-        BLE.B   INVERTCOLOR_NEXT_3              | no ->
-        MOVE.B  D4,-0x1(A4)                     | update max height in bbox entry
-INVERTCOLOR_NEXT_3:
-        SUBQ.L  #0x2,A4                         | back up to current bbox entry
-        TST     D6                              | more column words for this glyph?
-        BGT     INVERTCOLOR_NEXT_2              | yes -> scan next word column
-        ADDQ.L  #0x2,A4                         | advance to next glyph's bbox
+BUILDCHARTABLE_FOUND_2:
+        SUB.B   (A4)+,D4                        | D4 = last ink row+1 - top = rows to draw
+        CMP.B   (A4)+,D4                        | more than stored row count?
+        BLE.B   BUILDCHARTABLE_NEXT_3           | no ->
+        MOVE.B  D4,-0x1(A4)                     | entry.lo = new row count
+BUILDCHARTABLE_NEXT_3:
+        SUBQ.L  #0x2,A4                         | back up to this glyph's entry
+        TST     D6                              | more 16-pixel bands in this glyph?
+        BGT     BUILDCHARTABLE_NEXT_2           | yes -> scan next band
+        ADDQ.L  #0x2,A4                         | advance to next glyph's entry
         SUBQ.W  #0x2,D5                         | decrement glyph counter
-        BGT     INVERTCOLOR_NEXT                | more glyphs -> process next
-        BRA     INVERTCOLOR_EXIT                | done -> restore regs and return
+        BGT     BUILDCHARTABLE_NEXT             | more glyphs -> process next
+        BRA     BUILDCHARTABLE_EXIT             | done -> restore regs and return
 

@@ -808,7 +808,7 @@ ABCLOOP:
         MOVE.L  D0,(A3)+                        | SAVE TO MASK BUFFER
         DBF     D1,ABCLOOP                      | LOOP FOR ALL WORDS
 ABCDONE:
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from ABCDONE
 
 | ----------------------------------------------------------
 |

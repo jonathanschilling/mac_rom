@@ -1,4 +1,4 @@
-|---------------------------------------------------------
+| ---------------------------------------------------------
 |
 |
 |     *****  *****  *   *  *****
@@ -219,7 +219,7 @@ SpaceExtra:
         MOVE.L  (A0),A0                         | A0 = thePort
         MOVE.L  4(SP),0x4C(A0)                  | install spExtra long
         MOVE.L  (SP)+,(SP)                      | strip param
-        RTS                                     | return
+        RTS                                     | return from SpaceExtra
 
 | PROCEDURE DrawChar(ch: Char); push count=1 + textAddr -> CallText.
 DrawChar:
@@ -239,7 +239,7 @@ DrawString:
         MOVE.L  A0,-(SP)                        | PUSH TEXTADDR
         JSR     CallText(PC)                    | CALL TEXT ROUTINE
         MOVE.L  (SP)+,(SP)                      | strip param
-        RTS                                     | return
+        RTS                                     | return from DrawString
 
 | PROCEDURE DrawText(textBuf: Ptr; firstByte, byteCount: INTEGER);
 DrawText:
@@ -434,10 +434,23 @@ TEXTWIDTH_RETURN:
         JMP     (A0)                            | RTS
 SWAP_FONT_TRAMP:
         JMP     FMSwapFont(PC)                  | forward to FMSwapFont
+| ----------------------------------------------------------
+|
+| _GetFontInfo ($A88B): return the metrics of the current port's font
+| Pascal: PROCEDURE GetFontInfo(VAR info: FontInfo);
+| Entry: 8(A6) = @info (ascent, descent, widMax, leading)
+| Calls the port's txMeasProc (StdTxMeas if grafProcs is nil) with
+| count 0 and numer = denom = (1,1) to fill info, then adds the FMOutput
+| extra to widMax, adds 1 to ascent and the shadow count to descent if
+| shadowed, and scales all four fields by numer/denom (truncating) when
+| the Font Manager returned numer <> denom. (The historic Text.a, changed
+| 13 May 85, rounds up instead.)
+|
+GetFontInfo:
         LINK    A6,#-0x8                        | ALLOCATE LOCALS
         MOVE.L  #0x10001,-4(A6)                 | NUMER := (1,1)
         MOVE.L  #0x10001,-8(A6)                 | DENOM := (1,1)
-        CLR.L   -(SP)                           | ROOM FOR FCN, COUNT = 0
+        CLR.L   -(SP)                           | ROOM FOR FCN RESULT, COUNT = 0
         CLR.L   -(SP)                           | TEXTADDR := NIL
         PEA.L     -4(A6)                        | PUSH VAR NUMER
         PEA.L     -8(A6)                        | PUSH VAR DENOM
@@ -450,7 +463,7 @@ SWAP_FONT_TRAMP:
         MOVE.L  D0,A0                           | A0 = grafProcs
         MOVE.L  0x28(A0),A0                     | A0 = txMeasProc
 GETFONTINFO_USESTD:
-        JSR     (A0)                            | call subroutine via A0
+        JSR     (A0)                            | CALL txMeasProc
         TST     (SP)+                           | DISCARD WIDTH FCN RSLT
         MOVE.L  (A5),A0                         | POINT TO QUICKDRAW GLOBALS
         MOVE.L  -0xB0(A0),A0                    | GET FMOUTPUT RECORD
@@ -460,30 +473,30 @@ GETFONTINFO_USESTD:
         ADD     D0,4(A1)                        | ADD TO WIDMAX
         CLR     D0                              | GET READY FOR BYTE
         MOVE.B  11(A0),D0                       | GET SHADOW COUNT
-        BEQ.B   GETFONTINFO_USESTD_SKIP_3       | SKIP IF ZERO
+        BEQ.B   GETFONTINFO_USESTD_SKIP_3       | SKIP IF ZERO (NOT SHADOWED)
         ADDQ.W  #0x1,(A1)                       | ADJUST ASCENT
         ADD     D0,2(A1)                        | ADJUST DESCENT
 GETFONTINFO_USESTD_SKIP_3:
-        MOVE.L  -4(A6),D0                       | D0 = numer.h
-        CMP.L   -8(A6),D0                       | numer == denom?
+        MOVE.L  -4(A6),D0                       | D0 = numer (v,h)
+        CMP.L   -8(A6),D0                       | IS NUMER SAME AS DENOM ?
         BEQ.B   GETFONTINFO_USESTD_CONT         | YES, SKIP SCALING
-        MOVE    (A1),D0                         | get ascent
-        MULU    -4(A6),D0                       | D0 = D0 *u -4(A6)
-        DIVU    -8(A6),D0                       | D0 = D0 /u -8(A6)
-        MOVE    D0,(A1)+                        | scaled ascent
-        MOVE    (A1),D0                         | get descent
-        MULU    -4(A6),D0                       | D0 = D0 *u -4(A6)
-        DIVU    -8(A6),D0                       | D0 = D0 /u -8(A6)
-        MOVE    D0,(A1)+                        | scaled descent
+        MOVE    (A1),D0                         | GET ASCENT
+        MULU    -4(A6),D0                       | * numer.v
+        DIVU    -8(A6),D0                       | / denom.v
+        MOVE    D0,(A1)+                        | UPDATE ASCENT
+        MOVE    (A1),D0                         | GET DESCENT
+        MULU    -4(A6),D0                       | * numer.v
+        DIVU    -8(A6),D0                       | / denom.v
+        MOVE    D0,(A1)+                        | UPDATE DESCENT
         MOVE    (A1),D0                         | GET MAXWID
-        MULU    -2(A6),D0                       | D0 = D0 *u -2(A6)
-        DIVU    -6(A6),D0                       | D0 = D0 /u -6(A6)
+        MULU    -2(A6),D0                       | * numer.h
+        DIVU    -6(A6),D0                       | / denom.h
         MOVE    D0,(A1)+                        | UPDATE MAXWID
-        MOVE    (A1),D0                         | GET IT
-        MULU    -4(A6),D0                       | D0 = D0 *u -4(A6)
-        DIVU    -8(A6),D0                       | D0 = D0 /u -8(A6)
-        MOVE    D0,(A1)+                        | UPDATE IT
+        MOVE    (A1),D0                         | GET LEADING
+        MULU    -4(A6),D0                       | * numer.v
+        DIVU    -8(A6),D0                       | / denom.v
+        MOVE    D0,(A1)+                        | UPDATE LEADING
 GETFONTINFO_USESTD_CONT:
         UNLK    A6                              | tear down frame
         MOVE.L  (SP)+,(SP)                      | strip param
-        RTS                                     | return
+        RTS                                     | return from GetFontInfo

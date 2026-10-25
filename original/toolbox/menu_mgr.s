@@ -1,12 +1,16 @@
 | Menu Manager
 |
-| Manages the menu bar and pull-down menus. Provides InitMenus,
-| InsertMenu, DrawMenuBar, MenuSelect, MenuKey, HiliteMenu,
-| GetMenuBar, SetMenuBar, and item manipulation routines.
+| Apple source: MenuMgr.a (MacSEROM.lst module MMGR). Manages the menu
+| bar and the pull-down menus: InitMenus, ClearMenuBar, InsertMenu,
+| DeleteMenu, DrawMenuBar, HiliteMenu, EnableItem, DisableItem,
+| MenuSelect, GetMenuBar, SetMenuBar, DisposMenu, FlashMenuBar, the item
+| attribute calls, CheckItem, MenuKey, GetItem, CalcMenuSize, NewMenu,
+| AppendMenu, GetMHandle, SetItem, SetMFlash, AddResMenu, InsertResMenu,
+| CountMItems and PlotIcon.
 |
 | MenuInfo (MPW 1.0 Menus.h):
 | Offset 0: menuID INTEGER menu identifier
-| Offset 2: menuWidth INTEGER width of menu in pixels | call subroutine via A0 | call subroutine via A0
+| Offset 2: menuWidth INTEGER width of menu in pixels
 | Offset 4: menuHeight INTEGER height of menu in pixels
 | Offset 6: menuProc Handle MDEF resource handle
 | Offset 10: enableFlags LongInt bit 0=menu, bits 1-31=items (1=enabled)
@@ -16,14 +20,14 @@
 | Inside Macintosh Vol I, Ch 11: The Menu Manager
 
 | ----------------------------------------------------------
-| InitMenus -- _InitMenus ($A930). Plus window_mgr.s 2490.
+| InitMenus -- _InitMenus ($A930).
 | Pascal: procedure InitMenus;
 | Initializes the Menu Manager: allocates MenuList ($66 = 102
 | bytes for a 24-slot menu bar), reads MenuFlash count from
 | parameter RAM (SPMisc2 bits 2-3), clears MBarEnable/MBarHook/
 | MenuHook, then clears the menu bar and draws it.
 InitMenus:
-        BSR.B   FINDWINDOW_OK_2_CONT            | allocate MenuList block -> A0
+        BSR.B   INITMENUS_NEWLIST               | allocate MenuList block -> A0
         MOVE.L  A0,(MenuList).w                 | store handle
         MOVEQ.L #0xC,D0                         | mask = bits 2-3
         AND.B   (SPMisc2).w,D0                  | extract flash count from PRAM
@@ -35,7 +39,7 @@ InitMenus:
         _ClearMenuBar                           | clear the menu list contents
         _DrawMenuBar                            | draw empty menu bar
         RTS                                     | return from InitMenus
-FINDWINDOW_OK_2_CONT:
+INITMENUS_NEWLIST:
         MOVEQ.L #0x66,D0                        | D0 = sizeof(MenuList) = 102 bytes
         _NewHandle                              | allocate MenuList block -> A0
 | CALCMBHEIGHT_EMPTY_2 -- reinitialize to empty list.
@@ -48,10 +52,10 @@ CALCMBHEIGHT_EMPTY_2:
 CALCMBHEIGHT_LOOP:
         CLR.L   (A1)+                           | zero out menu entry slots
         DBF     D0,CALCMBHEIGHT_LOOP            | loop 24 times (96 bytes)
-        RTS                                     | return to caller
+        RTS                                     | return from CALCMBHEIGHT_LOOP
 
 | ----------------------------------------------------------
-| ClearMenuBar -- _ClearMenuBar ($A934). Plus window_mgr.s 2561.
+| ClearMenuBar -- _ClearMenuBar ($A934).
 | Pascal: procedure ClearMenuBar;
 | Empties MenuList by reinitializing it via CALCMBHEIGHT_EMPTY_2
 | and clearing TheMenu. Plus 1986 added a BSR DISABLEITEM_CONT
@@ -61,10 +65,10 @@ ClearMenuBar:
         MOVE.L  (MenuList).w,A0                 | A0 = MenuList handle
         BSR.B   CALCMBHEIGHT_EMPTY_2            | reinitialize to empty list
         CLR     (TheMenu).w                     | no highlighted menu
-        RTS                                     | return to caller
+        RTS                                     | return from ClearMenuBar
 
 | ----------------------------------------------------------
-| InsertMenu -- _InsertMenu ($A935). Plus window_mgr.s 2575.
+| InsertMenu -- _InsertMenu ($A935).
 | Pascal: procedure InsertMenu(theMenu: MenuHandle; beforeID: INTEGER);
 | Inserts a menu into MenuList at the position before menu ID
 | beforeID (or at the end if beforeID = 0). Computes the new
@@ -121,7 +125,7 @@ INSERTMENU_CONT_EXIT:
         ADDQ.W  #0x6,SP                         | strip 6 bytes of params
         JMP     (A0)                            | RTS
 INSERTMENU_CONT_2:
-        TST     D1                              | jump via A0
+        TST     D1                              | menuID = 0?
         BEQ.B   INSERTMENU_EMPTY                | menuID = 0 -> not found (return 0)
         MOVE.L  (MenuList).w,A1                 | A1 = MenuList handle
         MOVE.L  (A1),A1                         | A1 = dereferenced MenuList ptr
@@ -141,10 +145,10 @@ INSERTMENU_EMPTY:
         MOVEQ.L #0x0,D2                         | not found: D2 = 0
 INSERTMENU_FOUND_2:
         MOVE    D2,D0                           | return offset in D0 (Z reflects found)
-        RTS                                     | return to caller
+        RTS                                     | return from INSERTMENU_FOUND_2
 
 | ----------------------------------------------------------
-| DeleteMenu -- _DeleteMenu ($A936). Plus window_mgr.s 2664.
+| DeleteMenu -- _DeleteMenu ($A936).
 | Pascal: procedure DeleteMenu(menuID: INTEGER);
 | Removes a menu from MenuList by ID. Shifts subsequent entries
 | up to fill the gap, decrementing menuLeft of each by the
@@ -188,15 +192,15 @@ DELETEMENU_CONT_2:
         SUBQ.W  #0x1,(A0)+                      | rect.left -= 1 (1px left margin)
         MOVE    #0x13,(A0)+                     | rect.bottom = 19 (menu bar height)
         CMP     (A1),D0                         | last menu in list?
-        BEQ.B   E_BINOUT_CONTROL_EXIT           | yes -> use lastRight as right edge
+        BEQ.B   DELETEMENU_LASTRIGHT            | yes -> use lastRight as right edge
         ADDQ.W  #0x6,D0                         | advance to next slot
         MOVE    4(A1,D0.W),(A0)                 | rect.right = next slot's menuLeft
-        BRA.B   E_BINOUT_CONTROL_EXIT_CONT      | commit right edge
-E_BINOUT_CONTROL_EXIT:
+        BRA.B   DELETEMENU_SETRIGHT             | commit right edge
+DELETEMENU_LASTRIGHT:
         MOVE    2(A1),(A0)                      | rect.right = lastRight
-E_BINOUT_CONTROL_EXIT_CONT:
+DELETEMENU_SETRIGHT:
         ADDQ.W  #0x4,(A0)                       | (A0) += 0x4
-        RTS                                     | return to caller
+        RTS                                     | return from DELETEMENU_SETRIGHT
 DELETEMENU_CONT_4:
         MOVE.L  (WMgrPort).w,A3                 | A3 = WMgr port
         MOVE.L  28(A3),-(SP)                    | push WMgr clipRgn handle
@@ -215,10 +219,10 @@ DELETEMENU_CONT_4:
 DELETEMENU_CONT_4_CONT:
         _MoveTo                                 | move pen to bottom-left of bar
         _LineTo                                 | draw separator line to right edge
-        RTS                                     | return to caller
+        RTS                                     | return from DELETEMENU_CONT_4_CONT
 
 | ----------------------------------------------------------
-| DrawMenuBar -- _DrawMenuBar ($A937). Plus window_mgr.s 2757.
+| DrawMenuBar -- _DrawMenuBar ($A937).
 | Pascal: procedure DrawMenuBar;
 | Erases the menu bar with a 16x16 rounded rect (clears outside
 | visible area), draws a separator line, then walks MenuList
@@ -264,7 +268,7 @@ DRAWMENUBAR_NEXT_2:
 DRAWMENUBAR_DONE:
         JSR     RestorePort(PC)                 | pc-relative jsr (was raw .short pair)
         MOVEM.L (SP)+,D3-D5/A3-A4               | restore saved regs
-        RTS                                     | return to caller
+        RTS                                     | return from DRAWMENUBAR_DONE
 
 | DRAWMENUBAR_CONT_2 -- paint gray over title (dim effect).
 | ----------------------------------------------------------
@@ -277,10 +281,10 @@ DRAWMENUBAR_CONT_2:
         PEA.L     (scratch8).w                  | push title rect (built by DELETEMENU_CONT_2)
         _PaintRect                              | paint gray BIC over title (dims it)
         _PenNormal                              | restore default pen
-        RTS                                     | return to caller
+        RTS                                     | return from DRAWMENUBAR_CONT_2
 
 | ----------------------------------------------------------
-| HiliteMenu -- _HiliteMenu ($A938). Plus window_mgr.s 2830.
+| HiliteMenu -- _HiliteMenu ($A938).
 | Pascal: procedure HiliteMenu(menuID: INTEGER);
 | Highlights a menu title in the menu bar (or unhighlights the
 | current one if menuID = 0). Calls DISABLEITEM_CONT_4 to invert
@@ -302,11 +306,11 @@ DRAWMENUBAR_CONT_2_OK:
         BRA.W   DELETEMENU_EXIT                 | -> strip param and return
 
 | ----------------------------------------------------------
-| EnableItem -- _EnableItem ($A93B). Plus window_mgr.s 2851.
+| EnableItem -- _EnableItem ($A939).
 | Pascal: procedure EnableItem(theMenu: MenuHandle; item: INTEGER);
 | Sets bit (item) in the menu's enableFlags field. Bit 0 = whole
-| menu enable; bits 1-31 = items 1..31. Item numbers > 31 affect
-| bit 31 (clamped via the BSET register-direct mode).
+| menu enable; bits 1-31 = items 1..31. BSET Dn,Dn uses the bit
+| number mod 32, so item numbers > 31 wrap around (32 -> bit 0).
 EnableItem:
         BSR.B   ENABLEITEM_CONT                 | get menu enable flags -> D0=item, D1=flags
         BSET    D0,D1                           | set item's enable bit
@@ -322,7 +326,7 @@ ENABLEITEM_CONT:
         MOVE.L  (A0),A0                         | dereference to MenuInfo
         MOVE    0x8(SP),D0                      | D0 = item number (bit index)
         MOVE.L  0xA(A0),D1                      | D1 = menuEnable flags (32-bit)
-        RTS                                     | return to caller
+        RTS                                     | return from ENABLEITEM_CONT
 DisableItem:
         BSR.B   ENABLEITEM_CONT                 | get menu enable flags -> D0=item, D1=flags
         BCLR    D0,D1                           | clear item's enable bit
@@ -334,7 +338,7 @@ DISABLEITEM_NEXT:
         MOVE.L  0(A0,D5.W),A1                   | A1 = MenuHandle at slot D5
         MOVE.L  (A1),A0                         | A0 = MenuInfo (deref MenuHandle)
 DISABLEITEM_EXIT:                               | shared early-exit target
-        RTS                                     | return to caller
+        RTS                                     | return from DISABLEITEM_EXIT
 DISABLEITEM_CONT_4:
         BSR.W   INSERTMENU_CONT_2               | look up menu ID -> A1 (zero = not found)
         BEQ.B   DISABLEITEM_EXIT                | not found -> RTS
@@ -351,10 +355,10 @@ DISABLEITEM_CONT_5:
         PEA.L     (scratch8).w                  | push title rect
         _InvertRect                             | invert title rect (highlight toggle)
 DISABLEITEM_SKIP:
-        RTS                                     | return to caller
+        RTS                                     | return from DISABLEITEM_SKIP
 
 | ----------------------------------------------------------
-| MenuSelect -- _MenuSelect ($A93D). Plus window_mgr.s 2952.
+| MenuSelect -- _MenuSelect ($A93D).
 | Pascal: function MenuSelect(startPt: Point): LONGINT;
 | Tracks the mouse through pull-down menus until the button is
 | released. Returns menuID<<16 | itemNumber (0 if no selection).
@@ -427,7 +431,7 @@ MENUSELECT_OK_2:
         MOVEQ.L #0x14,D0                        | D0 = 20 (menu bar height)
         MOVE    D0,(A1)+                        | rect.top = below menu bar
         MOVE    D6,(A1)+                        | rect.left = menu left edge
-        ADD     contrlOwner(A0),D0              | D0 += menuHeight (offset 4)
+        ADD     menuHeight(A0),D0               | D0 += menuHeight
         MOVE    D0,(A1)+                        | rect.bottom = top + menuHeight
         ADD     menuWidth(A0),D6                | D6 += menuWidth
         MOVE    D6,(A1)+                        | rect.right = left + menuWidth
@@ -505,11 +509,11 @@ MENUSELECT_CONT_3:
         MOVE.L  (A0),-20(A6)                    | store baseAddr in local BitMap
         PEA.L     -20(A6)                       | push saved BitMap (source)
         MOVE.L  (WMgrPort).w,A0                 | A0 = WMgr port
-        PEA.L     menuWidth(A0)                 | push &2(A0)
+        PEA.L     0x2(A0)                       | push WMgrPort^.portBits (+$2) = dstBits
         BSR.B   MENUSELECT_CONT_4               | CopyBits saved -> screen
         MOVE.L  (SavedHandle).w,A0              | A0 = saved bits handle
         _DisposeHandle                          | free saved bits buffer
-        RTS                                     | return to caller
+        RTS                                     | return from MENUSELECT_CONT_3
 MENUSELECT_CONT_4:
         MOVE.L  (SP)+,D7                        | save return address
         PEA.L     -14(A6)                       | push srcRect (saved bounds)
@@ -552,7 +556,7 @@ MENUSELECT_CONT_5:
         MOVE.L  (A3)+,-14(A6)                   | store bounds.topLeft in BitMap
         MOVE.L  (A3),-10(A6)                    | store bounds.botRight in BitMap
         MOVE.L  (WMgrPort).w,A0                 | A0 = WMgr port
-        PEA.L     menuWidth(A0)                 | push &2(A0)
+        PEA.L     0x2(A0)                       | push WMgrPort^.portBits (+$2) = srcBits
         PEA.L     -20(A6)                       | push local BitMap (dest)
         BSR.B   MENUSELECT_CONT_4               | CopyBits screen -> save buffer
         MOVE.L  A4,-(SP)                        | push menu rect
@@ -582,7 +586,7 @@ MENUSELECT_CONT_5:
         BSR.B   MENUSELECT_CONT_9               | unlock MDEF handle
         BSR.W   FullClip                        | restore full clip
         MOVEM.L (SP)+,D4/A2-A4                  | restore saved regs
-        RTS                                     | return to caller
+        RTS                                     | return from MENUSELECT_CONT_5
 MENUSELECT_CONT_7:
         MOVE.L  D4,-(SP)                        | push pen size (2,2)
         _PenSize                                | set pen to 2x2 for shadow
@@ -600,20 +604,20 @@ MENUSELECT_CONT_7:
         _LineTo                                 | draw shadow segment 1
         _LineTo                                 | draw shadow segment 2
         _PenNormal                              | restore default pen
-        RTS                                     | return to caller
+        RTS                                     | return from MENUSELECT_CONT_7
 MENUSELECT_CONT_8:
         MOVE.L  6(A0),A0                        | A0 = menuProc handle (MDEF)
         MOVE.L  A0,-(SP)                        | push handle for LoadResource
         _LoadResource                           | load MDEF resource if purged
         BSET    #0x7,(A0)                       | lock MDEF handle during call
         MOVE.L  (A0),A0                         | A0 = MDEF code address
-        RTS                                     | return to caller
+        RTS                                     | return from MENUSELECT_CONT_8
 MENUSELECT_CONT_9:
         BSR.W   DISABLEITEM_NEXT                | A0 = MenuInfo for D5
 MENUSELECT_CONT_10:
         MOVE.L  6(A0),A0                        | A0 = menuProc handle (MDEF)
         BCLR    #0x7,(A0)                       | unlock MDEF handle
-        RTS                                     | return to caller
+        RTS                                     | return from MENUSELECT_CONT_10
 
 | ----------------------------------------------------------
 | MENUSELECT_CONT_11
@@ -636,13 +640,13 @@ MENUSELECT_LOOP_3:
         BSR.B   FullClip                        | restore full screen clip
 MENUSELECT_SKIP_3:
         MOVE.W   (SP)+,D4                       | restore D4
-        RTS                                     | return to caller
+        RTS                                     | return from MENUSELECT_SKIP_3
 | Called by: DrawMenuBar, HiliteMenu, MenuSelect, MENUSELECT_SKIP_2, MENUSELECT_CONT_5 (and 2 more)
 FullClip:
         MOVE.L  (WMgrPort).w,A0                 | A0 = WMgr port
         PEA.L     16(A0)                        | push WMgr portRect
         _ClipRect                               | clip to full screen
-        RTS                                     | return to caller
+        RTS                                     | return from FullClip
 FULLCLIP_CONT:
         MOVE    #0x1,-(SP)                      | message 1 = mChooseMsg
         BSR.W   DISABLEITEM_NEXT                | A0=MenuInfo, A1=MenuHandle
@@ -658,7 +662,7 @@ FULLCLIP_CONT:
 FULLCLIP_NO:
         CMP.L   (Ticks).w,D0                    | target reached?
         BGT.B   FULLCLIP_NO                     | no -> spin wait
-        RTS                                     | return to caller
+        RTS                                     | return from FULLCLIP_NO
 
 | ----------------------------------------------------------
 |
@@ -669,7 +673,7 @@ FULLCLIP_NO:
 | current MenuList contents into it. Returns the new handle.
 |
 GetMenuBar:
-        BSR.W   FINDWINDOW_OK_2_CONT            | allocate new MenuList -> A0 (Plus: CALCMBHEIGHT_EMPTY)
+        BSR.W   INITMENUS_NEWLIST               | allocate new MenuList -> A0 (Plus: CALCMBHEIGHT_EMPTY)
         MOVE.L  A0,0x4(SP)                      | store as return value (Handle)
         MOVE.L  (A0),A1                         | A1 = dest (new list data)
         MOVE.L  (MenuList).w,A0                 | A0 = MenuList handle
@@ -677,7 +681,7 @@ GETMENUBAR_CONT:
         MOVE.L  (A0),A0                         | A0 = source (current MenuList data)
         MOVEQ.L #0x66,D0                        | 102 bytes to copy
         _BlockMove                              | copy MenuList data from A0 to A1
-        RTS                                     | return to caller
+        RTS                                     | return from GETMENUBAR_CONT
 
 | ----------------------------------------------------------
 |
@@ -695,18 +699,18 @@ SetMenuBar:
 
 | ----------------------------------------------------------
 |
-| DisposeMenu -- _DisposeMenu ($A932). Plus window_mgr.s 3409.
-| (Was misnamed ClrMenuBar -- actually disposes a single MenuHandle.)
-| Pascal: procedure DisposeMenu(theMenu: MenuHandle);
-| Frees a menu's allocated storage. Plus 1986 added a resource-flag
-| check (BTST #5,(A0)) so resource-based menus are released via
-| _ReleaseResource; classic 1984 always disposes as a plain handle.
+| _DisposMenu ($A932): dispose of a menu
+| Pascal: PROCEDURE DisposeMenu(theMenu: MenuHandle);
+| Disposes the MenuHandle with _DisposHandle.;
+| the Plus first checks the resource bit (BTST #5,(A0)) and releases
+| resource menus with _ReleaseResource, the 1984 ROM always disposes.
+| Apple source name: DisposeMenu (MacSEROM.lst: DISPOSEMENU)
 |
-DisposeMenu:
+DisposMenu:
         MOVE.L  0x4(SP),A0                      | A0 = MenuHandle to dispose
         _DisposeHandle                          | free the handle
         MOVE.L  (SP)+,(SP)                      | strip param
-        RTS                                     | return to caller
+        RTS                                     | return from DisposMenu
 
 | ----------------------------------------------------------
 |
@@ -735,8 +739,8 @@ FLASHMENUBAR_EXIT:
 |
 FLASHMENUBAR_EMPTY:
         MOVE.L  (WMgrPort).w,A0                 | A0 = WMgr port
-        PEA.L   0x10(A0)                        | push portRect (for InvertRoundRect)
-        MOVE.L  0x1C(A0),-(SP)                  | push clipRgn for SetRectRgn
+        PEA.L   0x10(A0)                        | push portRect (for InverRoundRect)
+        MOVE.L  0x1C(A0),-(SP)                  | push clipRgn for SetRecRgn
         CLR.L   -(SP)                           | top=0, left=0
         MOVE    0x16(A0),-(SP)                  | push screen width (right)
         MOVE    #0x14,-(SP)                     | bottom = 20 (menu bar area)
@@ -775,7 +779,7 @@ MENUMGR_FOUND:
         SUBA.L  A0,A0                           | A0 = nil (not found)
         MOVE.L  A0,A1                           | A1 = nil
         MOVE.L  A0,D0                           | D0 = 0 (Z set: not found)
-        RTS                                     | return to caller
+        RTS                                     | return from MENUMGR_FOUND
 
 | ----------------------------------------------------------
 | RETURNS_17
@@ -788,7 +792,7 @@ RETURNS_17:
         MOVE.L  A1,A0                           | A0 = ptr to item title
         MOVE.B  (A1)+,D1                        | D1 = title length, A1 past length byte
         ADDA.W  D1,A1                           | A1 = ptr to attribute bytes (icon,key,mark,style)
-        RTS                                     | return to caller
+        RTS                                     | return from RETURNS_17
 MENUMGR_CONT:
         MOVE.L  8(SP),A0                        | A0 = MenuHandle param
         MOVE.L  (A0),A0                         | A0 = MenuInfo (deref handle)
@@ -942,26 +946,28 @@ MENUKEY_OK:
 
 | ----------------------------------------------------------
 |
-| _GetMenuItemText ($A946)
+| _GetItem ($A946): return the text of a menu item
+| Pascal: PROCEDURE GetItem(theMenu: MenuHandle; item: INTEGER;
+|                           VAR itemString: Str255);
+| Finds the item (RETURNS_16) and copies its Pascal string to
+| itemString; returns the empty string if the item does not exist.
 |
-| _GetMenuItemText ($A946): copy item title to caller's string buffer
-| Pascal: procedure GetItem(theMenu: MenuHandle; item: INTEGER; VAR itemString: Str255);
-GetMenuItemText:
+GetItem:
         MOVE.L  0xA(SP),A0                      | A0 = MenuHandle
         MOVE.L  (A0),A0                         | dereference -> MenuInfo ptr
         MOVE    0x8(SP),D0                      | D0 = item number
-        BSR.W   RETURNS_16                      | find item -> A0 = title ptr
+        BSR.W   RETURNS_16                      | find item -> A0 = item string, Z if none
         MOVE.L  0x4(SP),A1                      | A1 = destination string buffer
-        BEQ.B   GETMENUITEMTEXT_EXIT            | item not found -> return empty
+        BEQ.B   GETITEM_EXIT                    | item not found -> return empty
         MOVEQ.L #0x0,D0                         | clear high bytes
         MOVE.B  (A0),D0                         | D0 = title length
         ADDQ.W  #0x1,D0                         | +1 for length byte itself
         _BlockMove                              | copy Pascal string: A0 -> A1, D0 bytes
-GETMENUITEMTEXT_CONT:
+GETITEM_CONT:
         BRA.W   MENUMGR_NO                      | -> strip 10 bytes of params
-GETMENUITEMTEXT_EXIT:
+GETITEM_EXIT:
         CLR.B   (A1)                            | return empty string (length=0)
-        BRA.B   GETMENUITEMTEXT_CONT            | -> strip params
+        BRA.B   GETITEM_CONT                    | -> strip params
 
 | ----------------------------------------------------------
 |
@@ -981,7 +987,7 @@ CalcMenuSize:
         MOVE.L  (A0),A0                         | dereference
         BSR.W   MENUSELECT_CONT_10              | store computed width/height in MenuInfo
         MOVE.L  (SP)+,(SP)                      | strip 4-byte param (shift ret addr down)
-        RTS                                     | return to caller
+        RTS                                     | return from CalcMenuSize
 
 | ----------------------------------------------------------
 |
@@ -997,7 +1003,7 @@ RETURNS_18:
         BEQ.B   CALCMENUSIZE_EXIT_2             | item disabled -> return Z=1
         BTST    #0x0,D0                         | test menu-global enable (bit 0)
 CALCMENUSIZE_EXIT_2:
-        RTS                                     | return to caller
+        RTS                                     | return from CALCMENUSIZE_EXIT_2
 
 | ----------------------------------------------------------
 |
@@ -1040,12 +1046,16 @@ NEWMENU_LOOP:
 
 | ----------------------------------------------------------
 |
-| _AppendMenu ($A933)
-|
-| _AppendMenu ($A933): add item(s) to end of a menu
-| Pascal: procedure AppendMenu(theMenu: MenuHandle; data: Str255);
+| _AppendMenu ($A933): append one or more items to a menu
+| Pascal: PROCEDURE AppendMenu(theMenu: MenuHandle; data: Str255);
+| Parses data one character at a time (APPENDMENU_CONT_3): items are
+| separated by ';' or CR; '^' icon number, '/' key equivalent, '!' mark
+| character and '<' style letter (B/I/U/O/S) set an attribute from the
+| next character; '(' disables the item. Each item is added at the end
+| of the item list (APPENDMENU_NO_5), then CalcMenuSize is called.
 | Classic's 1984 implementation appends only -- Plus added InsMenuItem
 | and turned AppendMenu into a thin wrapper around it.
+|
 AppendMenu:
         LINK    A6,#-0x118                      | set up stack frame (280 bytes locals)
         MOVEM.L D3-D4/A3-A4,-(SP)               | save registers
@@ -1053,13 +1063,13 @@ AppendMenu:
         MOVE.L  0xC(A6),A3                      | A3 = MenuHandle
         CLR     D3                              | clear item string length counter
         MOVE.B  (A4)+,D3                        | D3 = length of item data string
-        BSR.B   DISPOSECCURSOR_NEXT             | init parse state (clear attr buffer)
+        BSR.B   APPENDMENU_NEXT                 | init parse state (clear attr buffer)
         SUBQ.W  #0x1,D3                         | adjust for DBF loop
-DISPOSECCURSOR_LOOP:
+APPENDMENU_LOOP:
         MOVE.B  (A4)+,D0                        | D0 = next char from data string
-        BSR.B   DISPOSECCURSOR_CONT_3           | process one char (parse state machine)
-        DBRA    D3,DISPOSECCURSOR_LOOP          | loop through all chars
-        BSR.W   DISPOSECCURSOR_NO_5             | flush last item into menu
+        BSR.B   APPENDMENU_CONT_3               | process one char (parse state machine)
+        DBRA    D3,APPENDMENU_LOOP              | loop through all chars
+        BSR.W   APPENDMENU_NO_5                 | flush last item into menu
         MOVE.L  A3,-(SP)                        | push MenuHandle
         _CalcMenuSize                           | recompute menu size after appends
         MOVEM.L (SP)+,D3-D4/A3-A4               | restore saved regs
@@ -1067,90 +1077,87 @@ DISPOSECCURSOR_LOOP:
         BRA.W   MENUMGR_SKIP                    | strip params and return
 
 | ----------------------------------------------------------
-| DISPOSECCURSOR_NEXT
+| APPENDMENU_NEXT: clear the item parse state in the local frame:
+| -0x114(A6): parse state (metachar pending), -0x113: disable flag,
+| -0x112: title length (word), -0x110..-0x10D: icon, key equivalent,
+| mark and style bytes. The title text is collected at -0x10C(A6).
 | Called during boot.
-| DISPOSECCURSOR_NEXT: initialize item parse state buffer to zero
-| Local frame: A6-0x118 = 8-byte attribute/state area
-| -0x118(A6): icon byte, -0x117: key byte, -0x116: mark byte, -0x115: style byte
-| -0x114: parse state (metachar pending), -0x113: disable flag
-| -0x112: title length (word), -0x110: title buffer (256 bytes)
-DISPOSECCURSOR_NEXT:
-        LEA.L     -0x114(A6),A0                 | A0 = start of attribute buffer
-        CLR.L   (A0)+                           | clear icon, key, mark, style bytes
-        CLR.L   (A0)                            | clear parse state, disable flag, title length
-        RTS                                     | return to caller
-DISPOSECCURSOR_CONT_2:
-        ADDQ.B  #0x7,0x213C(SP)                 | prefix byte of inline BTST below
-| BTST-shaped wrapper whose displacement low byte ($42 = 'B') starts
-| the 5-byte style-letter table (BIUOS) read by CMP.B below.
-        .short  0x0D3B, 0x2842                  | BTST D6, PC@($42, D2.L) -- byte $42 = 'B'
+APPENDMENU_NEXT:
+        LEA.L     -0x114(A6),A0                 | A0 = parse state / disable flag / title length
+        CLR.L   (A0)+                           | clear parse state, disable flag, title length
+        CLR.L   (A0)                            | clear icon, key, mark, style bytes
+        RTS                                     | return from APPENDMENU_NEXT
+APPENDMENU_CONT_2:                              | METACHAR_TBL: ^ / ! < CR ; ( then BIUOS
+        ADDQ.B  #0x7,0x213C(SP)                 | data, not code: bytes '^' '/' '!' '<'
+| The 7 metacharacters (indices 0-6: '^' '/' '!' '<' CR ';' '(') are
+| followed by the 5 style letters "BIUOS" (bold..shadow = style bits 0-4).
+        .short  0x0D3B, 0x2842                  | bytes CR ';' '(' 'B'
         .ascii  "IUOS"                          | style letters Italic/Underline/Outline/Shadow
 
-| DISPOSECCURSOR_CONT_3: process one character from menu item data string
+| APPENDMENU_CONT_3: process one character from menu item data string
 | D0 = current char, parse state in local frame
 | State 0: check if char is metachar or title text
 | State 1 (after '^'): char is icon number (ASCII digit -> binary)
-| State 2 (after '!'): char is mark character
-| State 3 (after '/'): char is key equivalent
+| State 2 (after '/'): char is key equivalent
+| State 3 (after '!'): char is mark character
 | State 4 (after '<'): char is style letter (B/I/U/O/S)
-DISPOSECCURSOR_CONT_3:
+APPENDMENU_CONT_3:
         CLR     D1                              | clear high byte
         MOVE.B  -0x114(A6),D1                   | D1 = current parse state
-        BEQ.B   DISPOSECCURSOR_NO_3             | state 0: no metachar pending ->
+        BEQ.B   APPENDMENU_NO_3                 | state 0: no metachar pending ->
         CMPI.B  #0x1,D1                         | state 1: icon number pending?
-        BNE.B   DISPOSECCURSOR_NO               | no ->
+        BNE.B   APPENDMENU_NO                   | no ->
         SUBI    #0x30,D0                        | convert ASCII digit to binary ('0'=0x30)
-DISPOSECCURSOR_NO:
+APPENDMENU_NO:
         CMPI.B  #0x4,D1                         | state 4: style letter pending?
-        BNE.B   DISPOSECCURSOR_NO_2             | no -> store directly as attribute
+        BNE.B   APPENDMENU_NO_2                 | no -> store directly as attribute
         MOVEQ.L #0x4,D2                         | D2 = 4 (scan style table from end)
-DISPOSECCURSOR_LOOP_2:
+APPENDMENU_LOOP_2:
         CMP.B   -0x21(PC,D2.W),D0               | D0 == BIUOS_TABLE[D2]?
-        BEQ.B   DISPOSECCURSOR_OK               | yes -> set style bit
-        DBRA    D2,DISPOSECCURSOR_LOOP_2        | try next style letter
+        BEQ.B   APPENDMENU_OK                   | yes -> set style bit
+        DBRA    D2,APPENDMENU_LOOP_2            | try next style letter
         RTS                                     | unknown style letter, ignore
-DISPOSECCURSOR_OK:
-        LEA.L     -0x111(A6),A0                 | A0 = attribute base ptr (style slot)
+APPENDMENU_OK:
+        LEA.L     -0x111(A6),A0                 | A0 = attribute[state] base (state 4 = style)
         MOVE.B  0(A0,D1.W),D0                   | D0 = current style byte
         BSET    D2,D0                           | set style bit (B/I/U/O/S)
-DISPOSECCURSOR_NO_2:
+APPENDMENU_NO_2:
         LEA.L     -0x111(A6),A0                 | A0 = attribute base
         MOVE.B  D0,0(A0,D1.W)                   | store value at attribute[state]
         CLR.B   -0x114(A6)                      | reset parse state to 0 (normal)
-        RTS                                     | return to caller
-DISPOSECCURSOR_NO_3:
-        LEA     DISPOSECCURSOR_CONT_2(PC),A0    | A0 = METACHAR_TBL base
+        RTS                                     | return from APPENDMENU_NO_2
+APPENDMENU_NO_3:
+        LEA     APPENDMENU_CONT_2(PC),A0        | A0 = METACHAR_TBL
         MOVE    #0x6,D1                         | D1 = 6 (scan from end of table)
-DISPOSECCURSOR_LOOP_3:
+APPENDMENU_LOOP_3:
         CMP.B   0(A0,D1.W),D0                   | char matches metachar[D1]?
-        BEQ.B   DISPOSECCURSOR_OK_2             | yes -> handle metachar
-        DBRA    D1,DISPOSECCURSOR_LOOP_3        | try next metachar
+        BEQ.B   APPENDMENU_OK_2                 | yes -> handle metachar
+        DBRA    D1,APPENDMENU_LOOP_3            | try next metachar
         MOVE    -0x112(A6),D1                   | D1 = current title length
         LEA.L     -0x10C(A6),A0                 | A0 = title buffer
         MOVE.B  D0,0(A0,D1.W)                   | append char to title buffer
         ADDQ.W  #0x1,-0x112(A6)                 | increment title length
-        RTS                                     | return to caller
+        RTS                                     | return from APPENDMENU_LOOP_3
 
 | ----------------------------------------------------------
-| DISPOSECCURSOR_OK_2
-| DISPOSECCURSOR_OK_2: matched metachar at index D1 in METACHAR_TBL
-| Indices 3-6 (< ! / ^): set parse state to D1+1 for next char
-| Index 2 (CR) or 1 (;): item separator -> flush current item
-| Index 0 (open paren): mark item as disabled
-DISPOSECCURSOR_OK_2:
+| APPENDMENU_OK_2: matched metachar at index D1 in METACHAR_TBL
+| Indices 0-3 (^ / ! <): set parse state to D1+1 for the next char
+| Index 4 (CR) or 5 (;): item separator -> flush current item
+| Index 6 (open paren): mark item as disabled
+APPENDMENU_OK_2:
         CMPI    #0x3,D1                         | metachar index <= 3?
-        BGT.B   DISPOSECCURSOR_NO_4             | no, index 4-6 -> separator or disable
-        ADDQ.W  #0x1,D1                         | state = index+1 (1=icon,2=mark,3=key,4=style)
+        BGT.B   APPENDMENU_NO_4                 | no, index 4-6 -> separator or disable
+        ADDQ.W  #0x1,D1                         | state = index+1 (1=icon,2=key,3=mark,4=style)
         MOVE.B  D1,-0x114(A6)                   | set parse state for next char
-        RTS                                     | return to caller
-DISPOSECCURSOR_NO_4:
+        RTS                                     | return from APPENDMENU_OK_2
+APPENDMENU_NO_4:
         SUBQ.W  #0x6,D1                         | index 6 ('(')? -> D1=0
-        BNE.B   DISPOSECCURSOR_NO_5             | no, it's CR or ';' -> flush item
+        BNE.B   APPENDMENU_NO_5                 | no, it's CR or ';' -> flush item
         ST      -0x113(A6)                      | set disable flag for current item
-        RTS                                     | return to caller
-DISPOSECCURSOR_NO_5:
+        RTS                                     | return from APPENDMENU_NO_4
+APPENDMENU_NO_5:
         MOVE    -0x112(A6),D1                   | D1 = current title length
-        BEQ.B   DISPOSECCURSOR_NO_6             | empty title -> reset state only
+        BEQ.B   APPENDMENU_NO_6                 | empty title -> reset state only
         MOVE.L  A3,A0                           | A0 = MenuHandle
         _GetHandleSize                          | D0 = current MenuInfo size
         ADDQ.W  #0x5,D0                         | + 5 (length byte + 4 attribute bytes)
@@ -1164,18 +1171,18 @@ DISPOSECCURSOR_NO_5:
         MOVEQ.L #0x1,D2                         | D2 = 1 (item count, 1-based)
 APPENDMENU_FIND_END:
         MOVE.B  (A1),D0                         | D0 = item title length byte
-        BEQ.B   DISPOSECCURSOR_OK_2_CONT_2      | 0 = end of items, append here
+        BEQ.B   APPENDMENU_OK_2_CONT_2          | 0 = end of items, append here
         ADDA.W  D0,A1                           | skip title bytes
         ADDQ.W  #0x5,A1                         | skip length + 4 attr bytes
         ADDQ.W  #0x1,D2                         | increment item count
         BRA.B   APPENDMENU_FIND_END             | loop
-DISPOSECCURSOR_OK_2_CONT_2:
+APPENDMENU_OK_2_CONT_2:
         LEA.L     -0x10C(A6),A0                 | A0 = title buffer ptr
         MOVE.B  D1,(A1)+                        | write item title length byte
-DISPOSECCURSOR_OK_2_NO_3:
+APPENDMENU_OK_2_NO_3:
         MOVE.B  (A0)+,(A1)+                     | copy title char
         SUBQ.W  #0x1,D1                         | decrement remaining count
-        BNE.B   DISPOSECCURSOR_OK_2_NO_3        | more chars -> continue
+        BNE.B   APPENDMENU_OK_2_NO_3            | more chars -> continue
         LEA.L     -0x110(A6),A0                 | A0 = attribute buffer (icon..style)
         MOVE    #0x3,D1                         | 4 attribute bytes (DBRA: 0..3)
 APPENDMENU_ATTR_COPY:
@@ -1183,38 +1190,44 @@ APPENDMENU_ATTR_COPY:
         DBRA    D1,APPENDMENU_ATTR_COPY         | loop 4 times
         CLR.B   (A1)+                           | terminate item list with 0
         TST.B   -0x113(A6)                      | disable flag set?
-        BEQ.B   DISPOSECCURSOR_NO_6             | no -> skip DisableItem
+        BEQ.B   APPENDMENU_NO_6                 | no -> skip DisableItem
         MOVE.L  A3,-(SP)                        | push MenuHandle
         MOVE    D2,-(SP)                        | push item number
         BSR.W   DisableItem                     | disable the new item
-DISPOSECCURSOR_NO_6:
-        BSR.W   DISPOSECCURSOR_NEXT             | reset attribute parse state
-        RTS                                     | return to caller
+APPENDMENU_NO_6:
+        BSR.W   APPENDMENU_NEXT                 | reset attribute parse state
+        RTS                                     | return from APPENDMENU_NO_6
 
 | ----------------------------------------------------------
-| GetMenuHandle -- _GetMHandle ($A949). Plus menu_mgr.s 638.
-| Pascal: function GetMHandle(menuID: INTEGER): MenuHandle;
-| Searches MenuList for a menu with the requested ID and
-| returns its MenuHandle (nil if not found).
-GetMenuHandle:
+|
+| _GetMHandle ($A949): return the handle of a menu in the menu list
+| Pascal: FUNCTION GetMHandle(menuID: INTEGER): MenuHandle;
+| Searches MenuList for menuID (INSERTMENU_CONT_2) and returns its
+| MenuHandle, or NIL if the menu is not in the current menu list.
+|
+GetMHandle:
         CLR.L   6(SP)                           | result = nil initially
         MOVE    4(SP),D1                        | D1 = menuID to find
-        BSR.W   INSERTMENU_CONT_2               | search MenuList for matching ID
-        BEQ.B   GETMENUHANDLE_FOUND             | not found ->
+        BSR.W   INSERTMENU_CONT_2               | D0 = MenuList offset of menuID, Z if none
+        BEQ.B   GETMHANDLE_FOUND                | not found ->
         MOVE    D5,-(SP)                        | save menu counter
-        MOVE    D0,D5                           | D5 = index in MenuList
-        BSR.W   DISABLEITEM_NEXT                | get MenuHandle at index -> A1
+        MOVE    D0,D5                           | D5 = MenuList offset
+        BSR.W   DISABLEITEM_NEXT                | A1 = MenuHandle at that offset
         MOVE    (SP)+,D5                        | restore counter
         MOVE.L  A1,6(SP)                        | store result MenuHandle
-GETMENUHANDLE_FOUND:
+GETMHANDLE_FOUND:                               | exit (also taken when not found)
         BRA.W   DELETEMENU_EXIT                 | strip param and return
 
 | ----------------------------------------------------------
-| SetMenuItemText -- _SetItem ($A947). Plus menu_mgr.s 682.
-| Pascal: procedure SetItem(theMenu: MenuHandle; item: INTEGER;
-| itemString: Str255);
-| Replaces the title of an existing menu item via _Munger.
-SetMenuItemText:
+|
+| _SetItem ($A947): change the text of a menu item
+| Pascal: PROCEDURE SetItem(theMenu: MenuHandle; item: INTEGER;
+|                           itemString: Str255);
+| Replaces the item's string (including its length byte) by itemString
+| with _Munger (ptr1 = NIL: replace at the item's offset), then calls
+| CalcMenuSize. Does nothing if the item does not exist.
+|
+SetItem:
         MOVEM.L D3-D4/A2-A4,-(SP)               | save working registers
         MOVE.L  30(SP),A3                       | A3 = MenuHandle
         MOVE    28(SP),D3                       | D3 = item number
@@ -1222,7 +1235,7 @@ SetMenuItemText:
         MOVE    D3,D0                           | D0 = item number for RETURNS_16
         MOVE.L  (A3),A0                         | dereference MenuHandle
         BSR.W   RETURNS_16                      | find item -> A0 = old title ptr
-        BEQ.B   SETMENUITEMTEXT_FOUND           | item not found -> exit
+        BEQ.B   SETITEM_FOUND                   | item not found -> exit
         MOVE.L  A0,A4                           | A4 = old title ptr
         SUBA.L  (A3),A4                         | A4 = byte offset within MenuInfo
         MOVEQ.L #0x1,D4                         | D4 = 1 (length byte)
@@ -1240,12 +1253,12 @@ SetMenuItemText:
         ADDQ.W  #0x4,SP                         | strip Munger result
         MOVE.L  A3,-(SP)                        | push MenuHandle
         _CalcMenuSize                           | recompute menu size
-SETMENUITEMTEXT_FOUND:
+SETITEM_FOUND:                                  | exit (also taken when the item is missing)
         MOVEM.L (SP)+,D3-D4/A2-A4               | restore saved regs
         BRA.W   MENUMGR_NO                      | strip 10 bytes of params and return
 
 | ----------------------------------------------------------
-| SetMFlash -- _SetMFlash ($A24A). Plus menu_mgr.s 720.
+| SetMFlash -- _SetMFlash ($A94A).
 | Pascal: procedure SetMFlash(count: INTEGER);
 | Stores the menu-flash count (number of blinks on selection).
 SetMFlash:
@@ -1253,16 +1266,29 @@ SetMFlash:
         BRA.W   DELETEMENU_EXIT                 | -> strip params
 
 | ----------------------------------------------------------
-| AppendResMenu -- _AddResMenu ($A94D). Plus menu_mgr.s 729.
-| Pascal: procedure AddResMenu(theMenu: MenuHandle; theType: ResType);
-| Trampoline that pushes afterItem=999 to append, then drops into the
-| resource scan loop. Plus 1986 split this entry from _InsertResMenu
-| ($A951, new in Plus) and added FONT->FOND retry + alphabetical
-| insertion; classic 1984 just iterates resources in index order.
-AppendResMenu:
+|
+| _AddResMenu ($A94D): append the names of all resources of a type to a menu
+| Pascal: PROCEDURE AddResMenu(theMenu: MenuHandle; theType: ResType);
+| Pushes afterItem = 999 and falls into InsertResMenu.
+|
+AddResMenu:
         MOVE.L  (SP)+,A0                        | pop return address
         MOVE    #0x3E7,-(SP)                    | afterItem = 999 (append)
         MOVE.L  A0,-(SP)                        | push return address back
+| _InsertResMenu ($A951): insert the names of all resources of a type
+| Pascal: PROCEDURE InsertResMenu(theMenu: MenuHandle; theType: ResType;
+|                                 afterItem: INTEGER);
+| With ResLoad off, walks the resources of theType in index order
+| (GetIndResource, GetResInfo), skipping unnamed ones and names that
+| start with '.' or '%'. Each name becomes item afterItem+1, inserted
+| with _Munger (empty attributes; enableFlags shifted, new bit set), or
+| is appended with _AppendMenu if afterItem+1 is past the last item (as
+| for AddResMenu's 999). Then CalcMenuSize and ResLoad on again.
+| The Plus version scans 'FOND' before 'FONT' and inserts the names
+| in alphabetical order.
+| Note: theMenu is loaded into A4 only for a name that passes the filter;
+| if every resource is skipped, CalcMenuSize gets the caller's A4.
+InsertResMenu:
         LINK    A6,#-0x10E                      | set up stack frame
         MOVEM.L D3-D6/A3-A4,-(SP)               | save regs
         CLR     -(SP)                           | SetResLoad: don't auto-load resources
@@ -1271,9 +1297,9 @@ AppendResMenu:
         MOVE.L  10(A6),-(SP)                    | push resource type
         _CountResources                         | count resources of this type
         MOVE    (SP)+,D4                        | D4 = resource count
-        BEQ.W   APPENDRESMENU_EXIT              | none found ->
+        BEQ.W   ADDRESMENU_EXIT                 | none found ->
         MOVEQ.L #0x1,D3                         | D3 = resource index (start at 1)
-DISPOSECCURSOR_OK_2_CONT_5:
+APPENDMENU_OK_2_CONT_5:                         | loop over the resources (index D3)
         SUBQ.W  #0x4,SP                         | space for GetIndResource result
         MOVE.L  10(A6),-(SP)                    | push resource type
         MOVE    D3,-(SP)                        | push resource index
@@ -1284,18 +1310,18 @@ DISPOSECCURSOR_OK_2_CONT_5:
         MOVE.L  A3,-(SP)                        | push VAR name buffer
         _GetResInfo                             | fetch type/id/name of resource
         TST.B   (A3)                            | name length zero?
-        BEQ.B   DISPOSECCURSOR_OK_2_CONT_6      | unnamed -> skip
+        BEQ.B   APPENDMENU_OK_2_CONT_6          | unnamed -> skip
         CMPI.B  #0x2E,1(A3)                     | first char '.' (driver)?
-        BEQ.B   DISPOSECCURSOR_OK_2_CONT_6      | yes -> skip drivers
+        BEQ.B   APPENDMENU_OK_2_CONT_6          | yes -> skip drivers
         CMPI.B  #0x25,1(A3)                     | first char '%' (DA)?
-        BEQ.B   DISPOSECCURSOR_OK_2_CONT_6      | yes -> skip DAs
+        BEQ.B   APPENDMENU_OK_2_CONT_6          | yes -> skip DAs
         MOVE.L  14(A6),A4                       | A4 = MenuHandle param
         MOVE.L  (A4),A0                         | A0 = MenuInfo (deref)
         MOVE    8(A6),D0                        | D0 = afterItem param
         ADDQ.W  #0x1,D0                         | D0 = insertion item number
         MOVE    D0,D6                           | D6 = saved item index for enable
         BSR.W   RETURNS_16                      | locate insertion point in menu
-        BEQ.B   DISPOSECCURSOR_OK_2_CONT_7      | past end -> append
+        BEQ.B   APPENDMENU_OK_2_CONT_7          | past end -> append
         MOVE.L  A0,D0                           | D0 = insertion ptr
         SUB.L   (A4),D0                         | D0 = byte offset within MenuInfo
         SUBQ.W  #0x4,SP                         | space for Munger result
@@ -1319,33 +1345,33 @@ DISPOSECCURSOR_OK_2_CONT_5:
         MOVE.L  (A4),A0                         | A0 = updated MenuInfo
         MOVE.L  menuEnable(A0),D5               | D5 = old enableFlags
         MOVEQ.L #0x1F,D0                        | loop counter (32 bits, DBRA: 31..0)
-DISPOSECCURSOR_OK_2_LOOP_2:
+APPENDMENU_OK_2_LOOP_2:
         ASL.L   #0x1,D5                         | shift old flags left
         ROXL.L  #0x1,D1                         | rotate carry into new flags
         CMP     D6,D0                           | at insertion item position?
-        BNE.B   DISPOSECCURSOR_OK_2_NO_4        | no -> skip insert bit
+        BNE.B   APPENDMENU_OK_2_NO_4            | no -> skip insert bit
         ASL.L   #0x1,D1                         | shift to make room for new bit
         ADDQ.W  #0x1,D1                         | set new item bit = 1 (enabled)
-DISPOSECCURSOR_OK_2_NO_4:
-        DBRA    D0,DISPOSECCURSOR_OK_2_LOOP_2   | loop 32 times
+APPENDMENU_OK_2_NO_4:
+        DBRA    D0,APPENDMENU_OK_2_LOOP_2       | loop 32 times
         MOVE.L  D1,menuEnable(A0)               | store new enableFlags
-DISPOSECCURSOR_OK_2_CONT_6:
+APPENDMENU_OK_2_CONT_6:
         ADDQ.W  #0x1,D3                         | next resource index
         CMP     D4,D3                           | past last resource?
-        BLE.W   DISPOSECCURSOR_OK_2_CONT_5      | more -> continue scan
-        MOVE.L  A4,-(SP)                        | push srcBits (icon BitMap)
+        BLE.W   APPENDMENU_OK_2_CONT_5          | more -> continue scan
+        MOVE.L  A4,-(SP)                        | push MenuHandle
         _CalcMenuSize                           | recompute menu size
-APPENDRESMENU_EXIT:
-        MOVE    #0x100,-(SP)                    | dereference -> thePort
+ADDRESMENU_EXIT:
+        MOVE    #0x100,-(SP)                    | push TRUE
         _SetResLoad                             | re-enable resource loading
         MOVEM.L (SP)+,D3-D6/A3-A4               | restore saved regs
         UNLK    A6                              | tear down frame
         BRA.W   MENUMGR_NO                      | strip params and return
-DISPOSECCURSOR_OK_2_CONT_7:
+APPENDMENU_OK_2_CONT_7:
         MOVE.L  A4,-(SP)                        | push MenuHandle (for AppendMenu)
         MOVE.L  A3,-(SP)                        | push name string (Str255)
-        .short  0xA933                          | A-line trap $A933 (no macro in traps.inc)
-        BRA.B   DISPOSECCURSOR_OK_2_CONT_6      | next resource
+        .short  0xA933                          | _AppendMenu(theMenu, name)
+        BRA.B   APPENDMENU_OK_2_CONT_6          | next resource
 
 | ----------------------------------------------------------
 |
@@ -1366,7 +1392,7 @@ COUNTMITEMS_NEXT:
         SUBQ.W  #0x1,D2                         | back up (last was past end)
         MOVE    D2,0x8(SP)                      | store result
         MOVE.L  (SP)+,(SP)                      | strip param
-        RTS                                     | return to caller
+        RTS                                     | return from COUNTMITEMS_NEXT
 
 | ----------------------------------------------------------
 |
@@ -1390,7 +1416,7 @@ PlotIcon:
         MOVE.L  A1,-(SP)                        | push srcBits (icon BitMap)
         MOVE.L  (A5),A0                         | A0 = QD globals ptr
         MOVE.L  (A0),A0                         | A0 = thePort
-        PEA.L     menuWidth(A0)                 | push dstBits (thePort.portBits at offset 2)
+        PEA.L     0x2(A0)                       | push dstBits = thePort^.portBits (+$2)
         PEA.L     6(A1)                         | push srcRect (icon bounds at offset 6)
         MOVE.L  D1,-(SP)                        | push dstRect
         CLR     -(SP)                           | push mode = srcCopy (0)

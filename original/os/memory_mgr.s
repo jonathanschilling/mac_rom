@@ -1,7 +1,7 @@
 | Memory Manager
 |
 | Manages heap zones for dynamic memory allocation. Provides
-| NewHandle, NewPtr, DisposeHandle, DisposePtr, SetHandleSize,
+| NewHandle, NewPtr, DisposHandle, DisposPtr, SetHandleSize,
 | CompactMem, PurgeMem, and other routines.
 |
 | Zone record (Inside Macintosh: Memory, Ch 2, pp 2-20):
@@ -79,10 +79,13 @@ COPY_ZONE_PARAMS:
         RTS                                     | return from InitMemMgr
 
 | ----------------------------------------------------------
-| SetAppBase ($A05C) -- set application zone base address
-| A0 = requested base address; subtracts 12 (header overhead),
-| optionally adjusts SysZone end if requested base is past it,
-| then re-initializes the application zone.
+| _SetApplBase ($A057): set the start of the application heap zone
+| Pascal: PROCEDURE SetApplBase(startPtr: Ptr);
+| Entry: A0 = startPtr. Exit: D0 = noErr (from InitApplZone)
+| If startPtr - 12 lies beyond the system zone's end, the system zone
+| is extended to end there (ZoneAdjustEnd); then InitApplZone builds
+| the application zone just after the system zone and its 12-byte
+| trailer block. (IM II calls the trap macro _SetAppBase.)
 SetAppBase:
         MOVEM.L D3/A2-A6,-(SP)                  | save registers
         MOVE.L  (SysZone).w,A6                  | A6 = system zone
@@ -91,18 +94,28 @@ SetAppBase:
         BLS.B   SETAPPBASE_SKIP                 | branch if <= (unsigned)
         JSR     ZoneAdjustEnd(PC)               | push SysZone end up to new base
 SETAPPBASE_SKIP:
-        BSR.B   SETAPPBASE_CONT                 | initialize application zone
+        BSR.B   InitApplZone                    | initialize application zone
         MOVEM.L (SP)+,D3/A2-A6                  | restore registers
         RTS                                     | return from SetAppBase
-SETAPPBASE_CONT:
+
+| ----------------------------------------------------------
+| _InitApplZone ($A02C): reinitialize the application heap zone
+| Pascal: PROCEDURE InitApplZone;
+| Exit: D0 = noErr; TheZone = ApplZone = the new zone
+| Calls _RsrcZoneInit, sets ApplLimit := BufPtr - DefltStack
+| (ToMaxLimit) and builds a new zone (_InitZone: 64 master pointers,
+| no grow-zone procedure) from the end of SysZone + 12 (past its
+| trailer block), 6K long but ending at most at min(SP - MinStack,
+| ApplLimit). HeapEnd := the zone's end. Also called by SetApplBase.
+InitApplZone:
         MOVE.L  A6,-(SP)                        | save A6 (will be reloaded)
         _RsrcZoneInit                           | reset Resource Manager zone state
         CLR.L   (ApplZone).w                    | clear ApplZone before re-init
         JSR     ToMaxLimit(PC)                  | compute D1 = max usable end, D2 = appLimit
-        MOVE.L  D2,(ApplLimit).w                | A0 = zone header (for zeroing)
-        MOVE.L  (SysZone).w,A6                  | A2 = zone header (for field init)
+        MOVE.L  D2,(ApplLimit).w                | ApplLimit := BufPtr - DefltStack
+        MOVE.L  (SysZone).w,A6                  | A6 = system zone
         MOVE.L  (A6),A0                         | A0 = SysZone end
-        LEA.L     12(A0),A0                     | skip 12 bytes (block header) -> ApplZone start
+        LEA.L     12(A0),A0                     | skip its 12-byte trailer -> ApplZone start
         MOVE.L  A0,A1                           | A1 = initial ApplZone end (running)
         ADDA.W  #0x1800,A1                      | add 6K initial ApplZone size
         CMPA.L  D1,A1                           | fits within max heap end?
@@ -121,7 +134,7 @@ SETAPPBASE_OK:
         MOVE.L  A6,(ApplZone).w                 | ApplZone := A6
         MOVEQ.L #0x0,D0                         | return noErr
         MOVEA.L  (SP)+,FP                       | restore A6
-        RTS                                     | return from SETAPPBASE_CONT
+        RTS                                     | return from InitApplZone
 
 | ----------------------------------------------------------
 | Memory Manager proper starts here -- InitZone etc.
@@ -162,51 +175,49 @@ INITZONE_LOOP:
         RTS                                     | return from InitZone
 
 | ----------------------------------------------------------
-| GetZone -- _GetZone ($A011). Plus memory_mgr.s 212 (where
-| Plus mislabels this as "GetBackColor" -- an FDisasm artifact;
-| the body unambiguously reads (TheZone).w into A0, which is
-| the GetZone trap, not the Color Manager's GetBackColor at
-| $A85B).
-| Pascal: function GetZone: THz;
+| _GetZone ($A11A): return the current heap zone
+| Pascal: FUNCTION GetZone: THz;
+| Exit: A0 = TheZone, D0 = noErr
 GetZone:
         MOVE.L  (TheZone).w,A0                  | A0 = current zone pointer (return value)
         BRA.B   INITZONE_EXIT                   | -> return noErr
 
 | ----------------------------------------------------------
-| SetZone -- _SetZone ($A012). Plus memory_mgr.s 220 (where
-| Plus mislabels this as "GetCCursor" -- same FDisasm artifact;
-| the body unambiguously stores A0 into (TheZone).w).
-| Pascal: procedure SetZone(hz: THz);
+| _SetZone ($A01B): set the current heap zone
+| Pascal: PROCEDURE SetZone(hz: THz);
+| Entry: A0 = hz. Exit: D0 = noErr (exit shared with GetZone)
 SetZone:
         MOVE.L  A0,(TheZone).w                  | set current zone to A0
 INITZONE_EXIT:
         MOVEQ.L #0x0,D0                         | noErr
-        RTS                                     | return
+        RTS                                     | return noErr (GetZone, SetZone)
 
 | ----------------------------------------------------------
-| MaxBlock -- _MaxBlock ($A061). Plus memory_mgr.s 229.
-| -> D0.L = largest contiguous free block
-| Plus 1986 prepends MOVE.L #0x800000,D0 (request 8 MB) and a
-| D1 flag distinguishing MaxBlock from UserDelay (Plus addition);
-| classic 1984 has only MaxBlock and always favors contiguous
-| via BSET #4 directly.
-MaxBlock:
+| _CompactMem ($A04C): compact the current heap zone
+| Pascal: FUNCTION CompactMem(cbNeeded: Size): Size;
+| Entry: D0.L = cbNeeded; trap bit 10 (,SYS) = use the system heap
+| Exit:  D0.L = size of the largest free block afterwards (0 if none)
+| Sets fNSelCompct (bit 4 of the zone flags byte) around the CompactHp
+| call, forcing a real compaction (relocatable blocks are moved down);
+| nothing is purged. (The Plus ROM shares this code with its _MaxBlock,
+| $A061, which the 64K ROM does not have.)
+CompactMem:
         JSR     MMPrologue(PC)                  | set up zone, save regs
         JSR     Actuals(PC)                     | round D0 to actual block size
         LEA.L     22(A6),A1                     | A1 = ptr to zone.flags (offset 0x16)
         MOVE.B  (A1),D2                         | D2 = save original flags
-        BSET    #0x4,(A1)                       | set favor-contiguous bit (bit 4)
+        BSET    #0x4,(A1)                       | set fNSelCompct: force compaction
         JSR     CompactHp(PC)                   | compact the heap
         MOVE.B  D2,(A1)                         | restore original flags
         MOVE.L  D1,D0                           | D0 = largest free block size
-        BEQ.B   PURGEMEM_ERR                    | no free block found?
+        BEQ.B   PURGEMEM_ERR                    | no free space -> return D0 = 0
         SUBQ.L  #0x8,D0                         | subtract 8-byte header from usable size
-        MOVE.L  A0,D1                           | any free block found?
-        BEQ.B   PURGEMEM_ERR                    | no -> return zero
-        BRA.B   PURGEMEM_EXIT_2                 | -> return size
+        MOVE.L  A0,D1                           | block of cbNeeded bytes found?
+        BEQ.B   PURGEMEM_ERR                    | no -> return with A0 = nil
+        BRA.B   PURGEMEM_EXIT_2                 | yes -> A0 = its data address, return
 
 | ----------------------------------------------------------
-| PurgeMem -- _PurgeMem ($A04D). Plus memory_mgr.s 273.
+| PurgeMem -- _PurgeMem ($A04D).
 | D0.L = needed bytes -> purges blocks until enough space available.
 | Returns memFullErr (-108) in D0 if even after purging the request
 | cannot be satisfied.
@@ -227,17 +238,17 @@ PURGEMEM_ERR:
         JMP     MMEpilogue(PC)                  | restore regs and return
 
 | ----------------------------------------------------------
-| FreeMem -- _FreeMem ($A01C). Plus memory_mgr.s 310.
+| FreeMem -- _FreeMem ($A01C).
 | -> D0.L = total free bytes in current zone (sum of all free blocks).
-| Returns the zcbFree field directly without compacting; for
-| largest-contiguous-free-block use MaxBlock instead.
+| Returns the zcbFree field directly without compacting; for the
+| largest contiguous free block see MaxMem and CompactMem.
 FreeMem:
         JSR     MMPrologue(PC)                  | set up zone, save regs
         MOVE.L  12(A6),D0                       | D0 = zone.zcbFree (total free bytes)
         BRA.B   PURGEMEM_ERR                    | -> return via epilogue
 
 | ----------------------------------------------------------
-| ResrvMem -- _ResrvMem ($A040). Plus memory_mgr.s 321.
+| ResrvMem -- _ResrvMem ($A040).
 | D0.L = needed bytes -> reserves space (compacts/purges as needed).
 | Adjusts the request to account for master pointer space if the
 | zone has no master pointers yet (first allocation reserves room
@@ -255,27 +266,40 @@ RESRVMEM_SKIP:
         JSR     MakePtrSpc(PC)                  | compact/purge to make D0 bytes available
         MOVE.L  A2,A0                           | A0 = found free block
         BRA.B   PURGEMEM_CONT                   | join PurgeMem return path
+
+| ----------------------------------------------------------
+| _MaxMem ($A11D): compact and purge the current zone; return the
+| largest free block and how far the application zone could grow
+| Pascal: FUNCTION MaxMem(VAR grow: Size): Size;
+| Entry: trap bit 10 (,SYS) = use the system heap
+| Exit:  D0.L = size of the largest free block (0 if none);
+|        A0 = grow: bytes the application zone could still grow
+|        (0 if the current zone is not ApplZone)
+| BKCompacts with an 8 MB request and D2 = 0 compacts the zone and
+| purges all purgeable blocks, without growing the zone or calling
+| the grow-zone function. grow = min(SP - MinStack, ApplLimit) - HeapEnd.
+MaxMem:
         JSR     MMPrologue(PC)                  | set up zone, save regs
         MOVE.L  #0x00800000,D0                  | D0 = 8 MB (max possible block size)
         MOVEQ.L #0x0,D2                         | D2 = 0: don't try grow zone
-        JSR     BKCompacts(PC)                  | compact heap and measure
+        JSR     BKCompacts(PC)                  | compact + purge; D1 = largest free block
         MOVE.L  D1,D0                           | D0 = largest free block
-        BEQ.B   ALLOCCURSOR_CONT                | any free space?
+        BEQ.B   MAXMEM_CONT                     | no free space -> D0 = 0
         SUBQ.L  #0x8,D0                         | subtract 8-byte block header
-ALLOCCURSOR_CONT:
-        SUBA.L  A0,A0                           | A0 = 0 (no growth contribution)
+MAXMEM_CONT:
+        SUBA.L  A0,A0                           | grow = 0 unless TheZone is ApplZone
         MOVE.L  (ApplZone).w,A1                 | A1 = application zone
         CMPA.L  (TheZone).w,A1                  | current zone is the ApplZone?
-        BNE.B   ALLOCCURSOR_SKIP                | no -> skip grow calculation
+        BNE.B   MAXMEM_SKIP                     | no -> skip grow calculation
         MOVE.L  (ApplLimit).w,D2                | D2 = application heap limit
-        JSR     MaxLimit(PC)                    | compute max growable limit
+        JSR     MaxLimit(PC)                    | D1 = min(SP - MinStack, ApplLimit)
         SUB.L   (HeapEnd).w,D1                  | D1 -= current heap end
         MOVE.L  D1,A0                           | A0 = growable bytes (returned)
-ALLOCCURSOR_SKIP:
+MAXMEM_SKIP:
         JMP     MMEpilogue(PC)                  | return via MMEpilogue
 
 | ----------------------------------------------------------
-| SetGrowZone -- _SetGrowZone ($A04B). Plus memory_mgr.s 365.
+| SetGrowZone -- _SetGrowZone ($A04B).
 | Pascal: procedure SetGrowZone(growZone: ProcPtr);
 | Stores the caller's grow-zone proc address into the current
 | zone header at offset 16. The zone calls this proc when out
@@ -286,7 +310,7 @@ SetGrowZone:
         BRA.B   SETAPPLLIMIT_EXIT               | -> return noErr
 
 | ----------------------------------------------------------
-| SetApplLimit -- _SetApplLimit ($A05D). Plus memory_mgr.s 376.
+| SetApplLimit -- _SetApplLimit ($A02D).
 | Pascal: procedure SetApplLimit(zoneLimit: Ptr);
 | Sets the upper limit beyond which the application zone may
 | not grow. A0 = new limit address.
@@ -294,70 +318,70 @@ SetApplLimit:
         MOVE.L  A0,(ApplLimit).w                | store new app heap upper limit
 SETAPPLLIMIT_EXIT:
         MOVEQ.L #0x0,D0                         | noErr
-        RTS                                     | return
+        RTS                                     | return from SETAPPLLIMIT_EXIT
 
 | ----------------------------------------------------------
-| NewPtr -- _NewPtr ($A01E). Plus memory_mgr.s 435 (where Plus
-| mislabels this as "GetCIcon" -- an FDisasm artifact; the body
-| is unambiguously _NewPtr: MMPrologue (zone setup, no handle)
-| + SUBA.L A1,A1 (signal non-relocatable) + MakePtrSpc (compact
-| heap to make room) + AllocBK (allocate). _GetCIcon is the
-| Color Manager trap at $A82E, not this routine).
-| Pascal: function NewPtr(logicalSize: Size): Ptr;
-| D0 = requested size -> A0 = pointer (non-relocatable block).
-| Trap bit 9 = clear-on-allocate flag (handled by PTRZONE_CONT).
+| _NewPtr ($A11E): allocate a nonrelocatable block
+| Pascal: FUNCTION NewPtr(logicalSize: Size): Ptr;
+| Entry: D0.L = logicalSize; trap bit 9 ($A31E, ,CLEAR) = clear the
+|        block, bit 10 ($A51E, ,SYS) = allocate in the system heap
+| Exit:  A0 = pointer to the block (nil on failure), D0 = noErr or
+|        memFullErr (-108)
+| MakePtrSpc first makes room as low in the zone as possible (moving
+| relocatable blocks out of the way, purging if needed), then AllocBK
+| allocates the block (A1 = nil: no master pointer); PTRZONE_CONT
+| clears it if requested.
 NewPtr:
         JSR     MMPrologue(PC)                  | set up zone, save regs
         SUBA.L  A1,A1                           | A1 = nil (non-relocatable block)
-        JSR     MakePtrSpc(PC)                  | compact/purge to make space
+        JSR     MakePtrSpc(PC)                  | make room low in the zone
         JSR     AllocBK(PC)                     | allocate block of D0 bytes
-        BEQ.B   GETCICON_ERR_2                  | failed -> return memFullErr
+        BEQ.B   NEWPTR_ERR_2                    | failed -> return memFullErr
         BSR.B   PTRZONE_CONT                    | optionally clear block (trap bit 9)
-GETCICON_EXIT:
+NEWPTR_EXIT:
         MOVEQ.L #0x0,D0                         | return noErr
-GETCICON_ERR:
+NEWPTR_ERR:
         JMP     MMEpilogue(PC)                  | return via MMEpilogue
-GETCICON_ERR_2:
+NEWPTR_ERR_2:
         MOVEQ.L #-0x6C,D0                       | D0 = memFullErr (-108)
-        BRA.B   GETCICON_ERR                    | return error via epilogue
+        BRA.B   NEWPTR_ERR                      | return error via epilogue
 
 | ----------------------------------------------------------
-| DisposePtr -- _DisposePtr ($A01F): dispose a non-relocatable block.
-| A0 = pointer to dispose. Calls FreeBk to release block.
-DisposePtr:
+| _DisposPtr ($A01F): release a nonrelocatable block
+| Pascal: PROCEDURE DisposPtr(p: Ptr);
+| Entry: A0 = p. Exit: D0 = noErr (memWZErr if A0 is a free block)
+| DISPOSPTR_CONT (FreeBk, return noErr) is shared with DisposHandle.
+DisposPtr:
         JSR     MMPPrologue(PC)                 | set up zone, save regs
 DISPOSPTR_CONT:
-        JSR     FreeBk(PC)                      | D0 = total, A0 = largest purgeable
-        BRA.B   GETCICON_EXIT                   | return noErr via epilogue
+        JSR     FreeBk(PC)                      | free block (+ its master ptr if relocatable)
+        BRA.B   NEWPTR_EXIT                     | return noErr via epilogue
 
 | ----------------------------------------------------------
 | GetPtrSize -- _GetPtrSize ($A021): A0 = ptr -> D0.L = size.
-| Plus equivalent: memory_mgr.s 481.
 GetPtrSize:
         JSR     MMPPrologue(PC)                 | dereference ptr, validate zone
         JSR     GetSize(PC)                     | D0 = logical size
-        BRA.B   GETCICON_ERR                    | -> return via epilogue
+        BRA.B   NEWPTR_ERR                      | -> return via epilogue
 
 | ----------------------------------------------------------
 | SetPtrSize -- _SetPtrSize ($A020): A0 = ptr, D0.L = newSize.
-| Plus equivalent: memory_mgr.s 492.
 SetPtrSize:
         JSR     MMPPrologue(PC)                 | dereference ptr, validate zone
         JSR     SetSize(PC)                     | resize block in place or relocate
-        BRA.B   GETCICON_ERR                    | -> return via epilogue
+        BRA.B   NEWPTR_ERR                      | -> return via epilogue
 
 | ----------------------------------------------------------
-| PtrZone -- _PtrZone ($A048): A0 = ptr -> A0 = zone.
-| Plus equivalent: memory_mgr.s 502.
+| PtrZone -- _PtrZone ($A148): A0 = ptr -> A0 = zone.
 PtrZone:
         JSR     MMPPrologue(PC)                 | dereference ptr, find its zone
         MOVE.L  A6,A0                           | A0 = zone
-        BRA.B   GETCICON_EXIT                   | -> return noErr
+        BRA.B   NEWPTR_EXIT                     | -> return noErr
 
 | ----------------------------------------------------------
-| PTRZONE_CONT
-| PTRZONE_CONT: optionally clear allocated block (if _NewHandleClear/_NewPtrClear)
-| Trap bit 9 = clear flag; D0 = block size, A0 = block start
+| PTRZONE_CONT - clear a newly allocated block if trap bit 9 (,CLEAR)
+| is set (used by NewPtr, NewHandle). D1 = trap word, A0 = block
+| data, D0 = logical size (cleared in words, rounded up).
 PTRZONE_CONT:
         BTST    #0x9,D1                         | clear-on-allocate flag?
         BEQ.B   PTRZONE_NO                      | no ->
@@ -370,103 +394,96 @@ PTRZONE_CONT_2:
         BGT.B   PTRZONE_CONT_2                  | more words remaining ->
         MOVE.L  (SP)+,A0                        | restore block pointer
 PTRZONE_NO:
-        RTS                                     | return
+        RTS                                     | return from PTRZONE_NO
 
 | ----------------------------------------------------------
-| NewHandle -- _NewHandle ($A022). Plus memory_mgr.s 546 (where
-| Plus mislabels this as "HiliteColor" -- an FDisasm artifact;
-| the body unambiguously is MMPrologue + NextMaster + AllocBK.
-| HiliteColor is the Color Manager trap at $A861, not this).
-| Pascal: function NewHandle(logicalSize: Size): Handle;
-| D0 = requested size -> A0 = handle (master pointer).
-| Trap bit 9 = clear-on-allocate flag.
-| HILITECOLOR_* inner labels preserve their FDisasm names because
-| classic shares them with neighboring routines for bit-identity
-| safety (renaming would touch many sites; the entry rename is
-| what restores readable trap identification).
+| _NewHandle ($A122): allocate a relocatable block
+| Pascal: FUNCTION NewHandle(logicalSize: Size): Handle;
+| Entry: D0.L = logicalSize; trap bit 9 ($A322, ,CLEAR) = clear the
+|        block, bit 10 ($A522, ,SYS) = allocate in the system heap
+| Exit:  A0 = handle (nil on failure), D0 = noErr or memFullErr (-108)
+| Takes a free master pointer (NextMaster, which may allocate a new
+| block of them), allocates the block (AllocBK may compact, purge,
+| grow the zone and call the grow-zone function) and clears it if
+| requested; on failure the master pointer is released again.
 | Called during boot.
 NewHandle:
         JSR      MMPrologue(PC)                 | set up TheZone, save regs
         JSR     NextMaster(PC)                  | allocate master pointer -> A1
         BNE.B   NEWHANDLE                       | got one, allocate block ->
         MOVEQ.L #-0x6C,D0                       | memFullErr
-        BRA.B   CHAREXTRA_EXIT                  | -> return nil handle
+        BRA.B   DISPOSHANDLE_EXIT               | -> return nil handle
 NEWHANDLE:
         JSR     AllocBK(PC)                     | allocate block of D0 bytes -> A0
         BEQ.B   NEWHANDLE_2                     | failed ->
-HILITECOLOR_CONT:
+NEWHANDLE_CONT:
         BSR.B   PTRZONE_CONT                    | optionally clear block (trap bit 9)
         MOVE.L  A1,A0                           | A0 = handle (master pointer addr)
-HILITECOLOR_EXIT:
+NEWHANDLE_EXIT:
         MOVEQ.L #0x0,D0                         | noErr
-HILITECOLOR_EXIT_2:
+NEWHANDLE_EXIT_2:
         JMP     MMEpilogue(PC)                  | restore and return
 NEWHANDLE_2:
         MOVEQ.L #-0x6C,D0                       | memFullErr
-        BRA.B   CHAREXTRA_CONT                  | -> release master pointer
+        BRA.B   DISPOSHANDLE_CONT               | -> release master pointer
 
 | ----------------------------------------------------------
-| DisposeHandle -- _DisposeHandle ($A023). Plus memory_mgr.s 583
-| (where Plus mislabels this as "CharExtra" -- an FDisasm artifact;
-| the body is MMHPrologue + (BNE -> FreeBk via DISPOSPTR_CONT) +
-| ReleaseMP, which is the canonical _DisposeHandle: free the block
-| if non-empty, then release the master pointer. The previous
-| inherited "_NewPtr ($A01E)" annotation was incorrect -- _NewPtr
-| uses MMPrologue + MakePtrSpc + AllocBK and lives at NewPtr above
-| (trap dispatch order: $A01E NewPtr, $A01F DisposePtr, $A020-25
-| pair traps). _CharExtra is the Toolbox trap at $A8FF, not this).
-| Pascal: procedure DisposeHandle(h: Handle);
-| A0 = handle. Frees both the block and the master pointer.
+| _DisposHandle ($A023): release a relocatable block and its handle
+| Pascal: PROCEDURE DisposHandle(h: Handle);
+| Entry: A0 = h. Exit: D0 = noErr (memWZErr if the block is free)
+| An existing block is freed through DisposPtr's FreeBk path, which
+| also returns the master pointer to the free list; for an empty
+| handle only the master pointer is released.
 | Called during boot.
-DisposeHandle:
+DisposHandle:
         JSR     MMHPrologue(PC)                 | deref handle -> A0=block, A1=MP
-        BNE.B   DISPOSPTR_CONT                  | block exists -> free via DisposePtr path
+        BNE.B   DISPOSPTR_CONT                  | block exists -> free via DisposPtr path
         MOVEQ.L #0x0,D0                         | noErr (empty handle, just release MP)
-CHAREXTRA_CONT:
+DISPOSHANDLE_CONT:
         JSR     ReleaseMP(PC)                   | release master pointer to free list
-CHAREXTRA_EXIT:
+DISPOSHANDLE_EXIT:
         SUBA.L  A0,A0                           | A0 = nil (no block)
-        BRA.B   HILITECOLOR_EXIT_2              | -> return via MMEpilogue
+        BRA.B   NEWHANDLE_EXIT_2                | -> return via MMEpilogue
 | ----------------------------------------------------------
-| GetHandleSize -- _GetHandleSize ($A025). Plus memory_mgr.s 610
-| (where Plus mislabels this as "DisposeCIcon" -- an FDisasm
-| artifact; _DisposeCIcon is a Color Manager trap at $A82B, not
-| this routine). Body: MMHPrologue + GetSize + return.
-| Pascal: function GetHandleSize(h: Handle): Size;
-| A0 = handle -> D0.L = logical size of the handle's block.
+| _GetHandleSize ($A025): return the logical size of a relocatable block
+| Pascal: FUNCTION GetHandleSize(h: Handle): Size;
+| Entry: A0 = h
+| Exit:  D0.L = logical size, or nilHandleErr (-109) for an empty
+|        handle (memWZErr if the block is free)
 GetHandleSize:
         JSR     MMHPrologue(PC)                 | deref handle -> A0=block, A1=MP
-        BEQ.B   DISPOSECTABLE_EMPTY             | nil/empty handle -> nilHandleErr
+        BEQ.B   SETHANDLESIZE_EMPTY             | nil/empty handle -> nilHandleErr
         JSR     GetSize(PC)                     | D0 = block size (from block header)
-        BRA.B   DISPOSECTABLE_ERR               | -> return via MMEpilogue
+        BRA.B   SETHANDLESIZE_ERR               | -> return via MMEpilogue
 
 | ----------------------------------------------------------
-| SetHandleSize -- _SetHandleSize ($A024). Plus memory_mgr.s 621
-| (where Plus mislabels this as "DisposeCTable" -- an FDisasm
-| artifact; _DisposeCTable is the Color Manager trap at $A824,
-| not this). Body: MMHPrologue + SetSize + return.
-| Pascal: procedure SetHandleSize(h: Handle; newSize: Size);
-| A0 = handle, D0.L = new size.
+| _SetHandleSize ($A024): change the size of a relocatable block
+| Pascal: PROCEDURE SetHandleSize(h: Handle; newSize: Size);
+| Entry: A0 = h, D0.L = newSize
+| Exit:  D0 = noErr, memFullErr (-108), or nilHandleErr (-109) for an
+|        empty handle
+| SetSize grows the block in place if the space after it can be
+| freed, else moves it (unless locked); shrinking splits off the rest.
 | Note: SETHANDLESIZE inner label is intentionally distinct case
 | from SetHandleSize entry (GNU as is case-sensitive).
 SetHandleSize:
         JSR     MMHPrologue(PC)                 | deref handle -> A0=block, A1=MP
         BNE.B   SETHANDLESIZE                   | block exists ->
-DISPOSECTABLE_EMPTY:
+SETHANDLESIZE_EMPTY:
         MOVEQ.L #-0x6D,D0                       | nilHandleErr
-        BRA.B   DISPOSECTABLE_ERR               | -> return error
+        BRA.B   SETHANDLESIZE_ERR               | -> return error
 SETHANDLESIZE:
         JSR     SetSize(PC)                     | resize block
-DISPOSECTABLE_ERR:
+SETHANDLESIZE_ERR:
         MOVE.L  A1,A0                           | A0 = handle
-        BRA.B   HILITECOLOR_EXIT_2              | return via MMEpilogue
+        BRA.B   NEWHANDLE_EXIT_2                | return via MMEpilogue
 
 | ----------------------------------------------------------
 | HandleZone -- _HandleZone ($A126). Returns zone of handle's block.
 HandleZone:
         JSR     MMHPrologue(PC)                 | dereference, find zone -> A6
         MOVE.L  A6,A0                           | A0 = zone
-        BRA.B   HILITECOLOR_EXIT                | return noErr via MMEpilogue
+        BRA.B   NEWHANDLE_EXIT                  | return noErr via MMEpilogue
 
 | ----------------------------------------------------------
 | RecoverHandle -- _RecoverHandle ($A128). Plus 653.
@@ -475,7 +492,7 @@ RecoverHandle:
         JSR     MMPrologue(PC)                  | clear grow-zone protection
         MOVE.L  -4(A0),A1                       | get relative handle from block header
         ADDA.L  A6,A1                           | A1 = absolute master pointer addr
-        BRA.B   DISPOSECTABLE_ERR               | return via MMEpilogue (A0=A1)
+        BRA.B   SETHANDLESIZE_ERR               | return via MMEpilogue (A0=A1)
 
 | ----------------------------------------------------------
 | EmptyHandle -- _EmptyHandle ($A02B). Plus 676.
@@ -488,15 +505,15 @@ EmptyHandle:
 EMPTYHANDLE_CONT:
         JSR     EH(PC)                          | release block, clear master pointer
 EMPTYHANDLE_EXIT:
-        BRA.B   DISPOSECTABLE_ERR               | -> return via SetHandleSize epilogue
+        BRA.B   SETHANDLESIZE_ERR               | -> return via SetHandleSize epilogue
 | ----------------------------------------------------------
-| ReallocHandle -- _ReallocateHandle ($A027) trap entry. Plus 698.
+| ReallocHandle -- _ReAllocHandle ($A027) trap entry. Plus 698.
 ReallocHandle:
         JSR     MMHPrologue(PC)                 | dereference handle
         TST.L   (A1)                            | block already exists?
         BEQ.B   REALLOCHANDLE_OK                | no, allocate one
         JSR     EH(PC)                          | yes, free existing block
-        BNE.B   DISPOSECTABLE_ERR               | error -> exit
+        BNE.B   SETHANDLESIZE_ERR               | error -> exit
         MOVE.L  D2,D0                           | restore size param
 REALLOCHANDLE_OK:
         MOVE.L  A1,(GZRootHnd).w                | protect handle from grow-zone purging
@@ -504,21 +521,26 @@ REALLOCHANDLE_OK:
         JSR     AllocBK(PC)                     | allocate new block
         JSR     GETSIZE_CONT(PC)                | clear grow-zone protection
         MOVE.L  A0,D2                           | D2 = block address
-        BNE.W   HILITECOLOR_CONT                | success -> link to master ptr
+        BNE.W   NEWHANDLE_CONT                  | success -> link to master ptr
         MOVEQ.L #-0x6C,D0                       | memFullErr (-108)
-        BRA.B   DISPOSECTABLE_ERR               | return error via epilogue
+        BRA.B   SETHANDLESIZE_ERR               | return error via epilogue
 
 | ----------------------------------------------------------
-| GetDeviceList -- _HLock ($A029) trap entry. Misnamed in classic AND
-| in Plus (Plus 736). Sets bit 7 of master pointer flag byte.
-GetDeviceList:
+| _HLock ($A029): lock a relocatable block
+| Pascal: PROCEDURE HLock(h: Handle);
+| Entry: A0 = h. Exit: D0 = noErr, or nilHandleErr (-109) for an empty
+| handle. Sets the lock bit (bit 7) of the master pointer's flag byte.
+HLock:
         JSR     MMHPrologue(PC)                 | deref handle -> A1 = MP
         BEQ.B   HNOPURGE_EXIT_2                 | nil handle -> nilHandleErr
         BSET    #0x7,(A1)                       | set lock bit
         BRA.B   HNOPURGE_EXIT                   | return noErr
 | ----------------------------------------------------------
-| ComponentDispatch -- _HUnlock ($A02A) trap entry. Misnamed (Plus 747).
-ComponentDispatch:
+| _HUnLock ($A02A): unlock a relocatable block
+| Pascal: PROCEDURE HUnlock(h: Handle);
+| Entry: A0 = h. Exit: D0 = noErr, or nilHandleErr (-109) for an empty
+| handle. Clears the lock bit (bit 7) of the master pointer's flag byte.
+HUnlock:
         JSR     MMHPrologue(PC)                 | deref handle -> A1 = MP
         BEQ.B   HNOPURGE_EXIT_2                 | nil handle -> nilHandleErr
         BCLR    #0x7,(A1)                       | clear lock bit
@@ -553,7 +575,7 @@ DerefHandle:
         MOVE.L  A0,A1                           | A1 = handle
         MOVEA.L (A1),A0                         | A0 = dereferenced
         MOVE.L  A0,D0                           | D0 = block address
-        RTS                                     | return
+        RTS                                     | return from DerefHandle
 
 | ----------------------------------------------------------
 | DEREFHANDLE_CONT
@@ -575,7 +597,7 @@ DEREFHANDLE_CONT_3:
         MOVEQ.L #0x0,D0                         | return noErr
 DEREFHANDLE_EXIT_2:
         ADDQ.L  #0x8,A0                         | skip block header (return user ptr)
-        RTS                                     | return
+        RTS                                     | return from DEREFHANDLE_EXIT_2
 DEREFHANDLE_CONT_4:
         MOVEQ.L #-0x6F,D0                       | D0 = memWZErr (-111)
         BRA.B   DEREFHANDLE_EXIT_2              | return error
@@ -593,7 +615,7 @@ MMPPrologue:
         BMI.B   MMHPROLOGUE_ERR                 | invalid -> error exit
         MOVE.L  D2,D0                           | D0 = restore trap parameter
         RTS                                     | return from MMPPrologue
-| Called by: DisposeHandle, GetHandleSize, SetHandleSize, HandleZone, EmptyHandle (and 5 more)
+| Called by: DisposHandle, GetHandleSize, SetHandleSize, HandleZone, EmptyHandle (and 5 more)
 MMHPrologue:
         MOVE.L  (SP)+,A1                        | pop return address into A1
         MOVEM.L D3-D7/A2-A6,-(SP)               | save all working registers
@@ -611,12 +633,12 @@ MMHPROLOGUE_CONT:
 MMHPROLOGUE_ERR:
         ADDQ.L  #0x4,SP                         | discard caller's return addr
         BRA.B   MMEpilogue                      | unwind via MMEpilogue
-| Called by: MaxBlock, PurgeMem, FreeMem, ResrvMem, RESRVMEM_SKIP (and 3 more)
+| Called by: CompactMem, PurgeMem, FreeMem, ResrvMem, RESRVMEM_SKIP (and 3 more)
 MMPrologue:
         MOVE.L  (SP)+,A1                        | pop return addr to A1
         MOVEM.L D3-D7/A2-A6,-(SP)               | save all working registers
-        MOVE.L  A1,-(SP)                        | A1 = purge warning procedure
-        MOVE.L  (TheZone).w,A6                  | call subroutine via A1
+        MOVE.L  A1,-(SP)                        | push return address back
+        MOVE.L  (TheZone).w,A6                  | A6 = current zone (default)
         BTST    #0xA,D1                         | system-heap flag set in trap word?
         BEQ.B   MMPROLOGUE_NO                   | no -> use TheZone
         MOVE.L  (SysZone).w,A6                  | yes -> redirect to SysZone
@@ -624,7 +646,7 @@ MMPROLOGUE_NO:
         RTS                                     | return from MMPrologue
 MMEpilogue:
         MOVEM.L (SP)+,D3-D7/A2-A6               | restore working registers
-        RTS                                     | return to caller
+        RTS                                     | return from MMEpilogue
 
 | ----------------------------------------------------------
 | Make BKF
@@ -632,7 +654,7 @@ MMEpilogue:
 MakeBKF:
         MOVE.L  D0,(A0)                         | set block size in header
         CLR.B   (A0)                            | clear tag byte (= free block)
-        RTS                                     | return
+        RTS                                     | return from MakeBKF
 EH:
         BTST    #0x7,(A1)                       | MP locked? (bit 7)
         BNE.B   EH_EXIT_3                       | yes -> can't empty, return memLockedErr
@@ -926,7 +948,7 @@ ALLOCBK_CONT_6:
         MOVE.L  D0,-(SP)                        | save count around trap
         _BlockMove                              | move D0 bytes A0->A1
         MOVE.L  (SP)+,D0                        | restore count
-        RTS                                     | return
+        RTS                                     | return from ALLOCBK_CONT_6
 CompactHp:
         MOVEM.L D0/D2-D5/A1-A4,-(SP)            | save working registers
         MOVE.L  D0,D3                           | D3 = needed size (compaction target)
@@ -1011,7 +1033,7 @@ COMPACTHP_SKIP_3:
         BCC.B   COMPACTHP_DONE                  | no -> keep current best
         MOVE.L  D2,D1                           | D1 = new largest free block size
 COMPACTHP_DONE:
-        RTS                                     | return
+        RTS                                     | return from COMPACTHP_DONE
 ToMaxLimit:
         MOVE.L  (BufPtr).w,D2                   | D2 = BufPtr (top of usable RAM)
         SUB.L    0x322,D2                       | subtract DefltStack (default stack reserve)
@@ -1098,7 +1120,7 @@ GetSize:
 GETSIZE_CONT:
         CLR.L   (GZRootHnd).w                   | clear grow-zone protection (handle)
         CLR.L   (GZRootPtr).w                   | clear grow-zone protection (ptr)
-        RTS                                     | return
+        RTS                                     | return from GETSIZE_CONT
 SetSize:
         MOVEM.L D1-D5/A0-A2,-(SP)               | save working registers
         MOVE.B  (A1),-(SP)                      | save MP flags on stack
@@ -1225,7 +1247,7 @@ HMAKEMOREMASTERS_ERR:
 ReleaseMP:
         MOVE.L  8(A6),(A1)                      | A2 = new scan start
         MOVE.L  A1,8(A6)                        | zone.hFstFree = A1 (push on free list)
-        RTS                                     | return
+        RTS                                     | return from ReleaseMP
 MakePtrSpc:
         MOVEM.L D0-D3/A0-A1/A3,-(SP)            | save D0-D3/A0-A1/A3
         BSR.W   Actuals                         | round D0 to actual block size
@@ -1403,6 +1425,18 @@ FREEBK_NO:
 FREEBK_SKIP:
         MOVEM.L (SP)+,D0-D1/A0-A1               | restore D0-D1/A0-A1
         RTS                                     | return from FreeBk
+
+| ----------------------------------------------------------
+| _BlockMove ($A02E): copy a block of memory (overlap-safe)
+| Pascal: PROCEDURE BlockMove(sourcePtr, destPtr: Ptr; byteCount: Size);
+| Entry: A0 = sourcePtr, A1 = destPtr, D0.L = byteCount
+| Exit:  D0 = noErr (0)
+| Copies backwards from the end if the destination lies above the
+| source (24-bit compare), else forwards. An odd distance between
+| source and destination means a byte loop; otherwise it aligns to an
+| even address, moves 48-byte chunks with MOVEM (BlockMove_Fast, for
+| 124 bytes or more), then longs, then the last 0-3 bytes.
+BlockMove:
         TST.L   D0                              | count == 0?
         BEQ.B   BLKMOVE_BYTE_FWD_RTS            | yes -> nothing to do
         MOVE.L  A0,D2                           | D2 = source addr
@@ -1422,23 +1456,22 @@ BLKMOVE_TAIL_FIXUP:                             | tail-byte fixup entry
 
 | ============================================================
 | BlockMove fast-path ($341A-$34AD, 148 bytes)
-| Originally assembled in res_drvr_sound.s because the ROM layout
-| places it just before the .Sound DRVR header; logically it's the
-| tail of the Memory Manager _BlockMove implementation.
+| The ROM places it just before the .Sound driver header; logically
+| it is the tail of the Memory Manager _BlockMove implementation.
 | ============================================================
 | ----------------------------------------------------------
-| BLKMOVE_BYTE_FWD_LOOP - blind write loop (no per-byte DRQ check)
+| BLKMOVE_BYTE_FWD_LOOP - copy D0 bytes forward, one at a time
 BLKMOVE_BYTE_FWD_LOOP:
         MOVE.B  (A0)+,(A1)+                     | copy one byte forward
         SUBQ.L  #0x1,D0                         | decrement byte counter
         BNE.B   BLKMOVE_BYTE_FWD_LOOP           | loop until done
 BLKMOVE_BYTE_FWD_RTS:
-        RTS                                     | return
+        RTS                                     | return from BLKMOVE_BYTE_FWD_RTS
 BLKMOVE_BYTE_BACK_LOOP:
         MOVE.B  -(A0),-(A1)                     | copy one byte backward
         SUBQ.L  #0x1,D0                         | decrement byte counter
         BNE.B   BLKMOVE_BYTE_BACK_LOOP          | loop until done
-        RTS                                     | return
+        RTS                                     | return from BLKMOVE_BYTE_BACK_LOOP
 BLKMOVE_DIR_DISPATCH:
         MOVE    A0,D2                           | D2 = source addr (low word)
         LSR     #0x1,D2                         | test source alignment

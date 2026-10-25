@@ -186,7 +186,7 @@ NOSLOP:
         PEA.L   -0x84(A6)                       | PUSH TORECT
         JSR     MapRect(PC)                     | MAP TEXTR2 (PRESERVES ALL REGS)
 NOSTRCH:
-        ADD     D1,0x32(A3)                     | UPDATE PORT FIXTXWID
+        ADD     D1,PNLOC+H(A3)                  | BUMP PEN BY (SCALED) TEXT WIDTH
 
 |
 | Quit if the pen is hidden

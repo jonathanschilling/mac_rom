@@ -1,27 +1,58 @@
-| Boot-time I/O Manager Install (SCC reset, jump-table setup, driver install)
+| Boot-time I/O setup: SCC reset, jump-table setup, driver install
 |
-| Reached from vectors.s:InitSCC during the boot sequence, after memory
-| test and hardware setup but before the full OS is initialized.
+| Called from the startup code in vectors.s, after the memory test and
+| the hardware setup, before the managers are initialized.
 |
-| Contents:
-| InitSCC - reset both SCC channels, stream register writes
-| (classic's InitSCC entry + the DT_SCC_INIT_DATA
-| register table itself both live at the tail of
-| vectors.s; the code falls through into this
-| file's SCC_WRITE_REGS/LOOP to do the stream).
-| SCC_WRITE_REGS/LOOP- register write with settling delay
-| JmpTblInit / L_mJmpTbl2 - expand ROM-relative offset table into
-| absolute jump vectors (JFetch/JStash/JIODone)
-| DRVR_INSTALL_TABLE - 6-entry JMP table to DRVR headers (.Sound,
-| .Sony, .AIn, .AOut, .BIn, .BOut)
-| InitIOMgr - allocate 32-slot Unit Table (48 on Plus), loop
-| over the descriptor array, issue _DrvrInstall
-| + _Status (+_Open for unit >= 5) for each ROM
-| driver.
+| Contents, in ROM order:
+| DT_SCC_INIT_DATA   - SCC register/value pairs for both channels
+| InitSCC            - reset both SCC channels and stream the register table
+| SCC_WRITE_REGS/LOOP - register write with settling delay
+| JmpTblInit / L_mJmpTbl2 - expand a ROM-relative offset table into
+|                      absolute jump vectors (JFetch/JStash/JIODone)
+| DRVR_INSTALL_TABLE - JMP table to the ROM drivers (.Sound, .Sony,
+|                      .AIn, .AOut, .BIn, .BOut)
+| InitIOMgr          - allocate the 32-slot unit table, then _DrvrInstall
+|                      and _Status for each of the six ROM drivers, and
+|                      _Open for .Sound and .Sony (units 3 and 4; the
+|                      serial drivers stay closed until a program opens them)
+| The Mac Plus has the same code at the start of its boot_install.s.
 |
-| Called once during boot, never again.
 | References: Inside Macintosh II, Ch 6 (Device Manager, driver install).
 
+| DT_SCC_INIT_DATA - SCC initialization register data ($059A, 32 bytes)
+| Written sequentially to SCC write control register as (reg#,value)
+| pairs. Each byte pair: first selects the WR register, second is the
+| value to latch. Reset sequence for both channels.
+
+| DT_SCC_INIT_DATA - SCC initialization register data (17 bytes per channel)
+| Written sequentially to SCC write control register to reset and
+| configure each channel. Values are SCC register address/data pairs.
+DT_SCC_INIT_DATA:
+| SCC init data: 16 (register, value) byte pairs written sequentially
+| to the SCC write-control register to reset + configure both channels.
+        .byte   0x09, 0x40                      | WR9 = 0x40: reset channel B
+        .byte   0x04, 0x4C                      | WR4 = 0x4C: x16 clock, 1 stop, odd parity
+        .byte   0x02, 0x00                      | WR2 = 0x00: interrupt vector base
+        .byte   0x03, 0xC0                      | WR3 = 0xC0: Rx 8-bit/char, disabled
+        .byte   0x0F, 0x08                      | WR15 = 0x08: DCD ext/status IE
+        .byte   0x00, 0x10                      | WR0 = 0x10: reset ext/status
+        .byte   0x00, 0x10                      | WR0 = 0x10: second reset (per spec)
+        .byte   0x01, 0x01                      | WR1 = 0x01: Ext/Status IE
+        .byte   0x09, 0x80                      | WR9 = 0x80: reset channel A
+        .byte   0x04, 0x4C                      | WR4 = 0x4C: ch A timing (same as B)
+        .byte   0x03, 0xC0                      | WR3 = 0xC0: ch A Rx 8-bit, disabled
+        .byte   0x0F, 0x08                      | WR15 = 0x08: DCD ext/status IE
+        .byte   0x00, 0x10                      | WR0 = 0x10: reset ext/status
+        .byte   0x00, 0x10                      | WR0 = 0x10: second reset
+        .byte   0x01, 0x01                      | WR1 = 0x01: Ext/Status IE
+        .byte   0x09, 0x0A                      | WR9 = 0x0A: master IE, no-vector, RTS
+| InitSCC - SCC reset and write-register init (drives the SCC_INIT_DATA above)
+InitSCC:
+        MOVE.L  #0xBFFFF9,A0                    | absolute-long addressing
+        MOVE.L  #0x9FFFF8,A1                    | absolute-long addressing
+        MOVE.L  A0,(SCCWr).w                    | Store SCC write base in low-mem
+        MOVE.L  A1,(SCCRd).w                    | Store SCC read base in low-mem
+        LEA     DT_SCC_INIT_DATA(PC),A2         | A2 = SCC init register data
 | ----------------------------------------------------------
 | InitSCC (continuation) -- this is the latter half of InitSCC; the
 | prologue (MOVE.L of SCC_WrCtlB/SCC_RdCtlB, storing into SCCWr/SCCRd,
@@ -84,8 +115,10 @@ DRVR_INSTALL_TABLE:
 | ----------------------------------------------------------
 | InitIOMgr -- allocate Unit Table and install .Sony/.Sound drivers
 | Classic 1984 version: smaller unit table (32 entries, not Plus's 48)
-| and no SCSI reset. Loops over a 4-entry descriptor array at A2 to
-| issue _DrvrInstall + _Status for each ROM driver.
+| and no SCSI reset. Loops over the 6-entry descriptor array at A2
+| (DRVR_INSTALL_TABLE: .Sound, .Sony, .AIn, .AOut, .BIn, .BOut = units
+| 3-8) to issue _DrvrInstall + _Status for each ROM driver, and _Open
+| for units 3 and 4 only.
 InitIOMgr:
         MOVEQ.L #0x20,D0                        | D0 = 32 (Unit Table entries)
         MOVE    D0,(UnitTableEntryCount).w      | Store unit table entry count
@@ -93,8 +126,8 @@ InitIOMgr:
         _NewPtrSysClear                         | Allocate cleared block for Unit Table
         MOVE.L  A0,(UTableBase).w               | Store Unit Table base address
         LEA     DRVR_INSTALL_TABLE(PC),A2       | A2 = driver-descriptor array base
-        MOVEQ.L #0x5,D1                         | D1 = 5 iterations per driver config
-        MOVEQ.L #0x3,D7                         | D7 = 3 (first unit-number index)
+        MOVEQ.L #0x5,D1                         | D1 = 5: six drivers (DBRA count)
+        MOVEQ.L #0x3,D7                         | D7 = unit number, from 3 (.Sound)
 INITIOMGR_LOOP:                                 | driver-install loop top
         ADDQ.W  #0x2,A2                         | Skip leading word of descriptor
         MOVE.L  A2,A1                           | A1 = descriptor pointer (mutable copy)
@@ -114,8 +147,8 @@ INITIOMGR_LOOP:                                 | driver-install loop top
         MOVE.L  A1,(A3)+                        | install driver entry pointer
         CLR     (A3)                            | zero next descriptor word
         MOVE.B  (A1),(A3)                       | copy driver-flags byte into queue entry
-        CMPI    #0x5,D7                         | more unit-numbers left to install?
-        BCC.B   INITIOMGR_NEXT                  | no: exit the driver-install loop
+        CMPI    #0x5,D7                         | unit >= 5 (serial driver)?
+        BCC.B   INITIOMGR_NEXT                  | yes: install only, do not open
         LEA.L     18(A1),A1                     | A1 = driver's name-Pstring field (offset +18)
         MOVE.L  A1,ioFileName(SP)               | set ioFileName in IOParam block
         CLR.B   ioPermssn(SP)                   | ioPermssn = 0 (default permission)

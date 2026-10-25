@@ -1,12 +1,8 @@
-| Dialog Manager (1984 ROM)
+| Dialog Manager
 |
-| The 1984 Mac ROM places Dialog Manager code at the tail of the
-| Resource Manager region, sharing several helper routines (most
-| notably the alert-icon rect data above) for ROM-layout reasons.
-| The Plus ROM splits these into dialog_mgr.s (internals) and
-| dialog_mgr_publics.s (entry-point traps).
-|
-| Routines, in physical ROM order:
+| Apple source: DialogMgr.a (MacSEROM.lst module DMGR). It starts with the
+| alert data ALERT_ICON_RECT / ALERT_EMPTY_TITLE (pushed PC-relative by
+| Alert), then the traps, in physical ROM order:
 |   InitDialogs                                    (init)
 |   StopAlert, NoteAlert, CautionAlert, Alert      (alert traps)
 |   GetNewDialog, NewDialog                        (dialog creation)
@@ -17,11 +13,18 @@
 |   GetDItem, SetDItem, GetIText, SetIText, SelIText, FindDItem
 |                                                  (item access)
 |   HideDItem, ShowDItem, HiliteDefaultButton      (item state)
+| followed by the internal routines.
 |
-| Files cannot be reordered (ROM byte order is fixed).
+| References: Inside Macintosh Vol I, Ch 13 (The Dialog Manager).
 
+| Small data region @ $E436-$E443, referenced by PEA PC-rel from
+| the Alert sites below. Bytes preserved as raw data.
+ALERT_ICON_RECT:                                | 8-byte icon rect param
+        .short  0x000A, 0x0014, 0x002A, 0x0034  | top=10, left=20, bottom=42, right=52
+ALERT_EMPTY_TITLE:                              | 2-byte empty Pascal string
+        .short  0x0000                          | length=0
 | ----------------------------------------------------------
-| InitDialogs -- _InitDialogs ($A97B). Plus resource_mgr.s 1797.
+| InitDialogs -- _InitDialogs ($A97B).
 | Pascal: procedure InitDialogs(resumeProc: ProcPtr);
 | Initializes Dialog Manager globals: stores the resume proc,
 | clears the alert invocation count, sets ANumber to -1 (no
@@ -76,7 +79,7 @@ INITDIALOGS_DONE:
         JMP     (A1)                            | return via stored addr
 
 | ----------------------------------------------------------
-| StopAlert -- _StopAlert ($A986). Plus resource_mgr.s 1887.
+| StopAlert -- _StopAlert ($A986).
 | Pascal: function StopAlert(alertID: INTEGER;
 | filterProc: ProcPtr): INTEGER;
 StopAlert:
@@ -84,19 +87,19 @@ StopAlert:
         BRA.B   ALERT_CONT                      | -> common alert entry
 
 | ----------------------------------------------------------
-| NoteAlert -- _NoteAlert ($A987). Plus resource_mgr.s 1896.
+| NoteAlert -- _NoteAlert ($A987).
 NoteAlert:
         MOVEQ.L #0x1,D0                         | D0 = 1: note icon
         BRA.B   ALERT_CONT                      | -> common alert entry
 
 | ----------------------------------------------------------
-| CautionAlert -- _CautionAlert ($A988). Plus resource_mgr.s 1904.
+| CautionAlert -- _CautionAlert ($A988).
 CautionAlert:
         MOVEQ.L #0x2,D0                         | D0 = 2: caution icon
         BRA.B   ALERT_CONT                      | -> common alert entry
 
 | ----------------------------------------------------------
-| Alert -- _Alert ($A985). Plus resource_mgr.s 1913.
+| Alert -- _Alert ($A985).
 | Pascal: function Alert(alertID: INTEGER;
 | filterProc: ProcPtr): INTEGER;
 | Common alert dispatch: D0 = icon code (0=stop, 1=note,
@@ -222,7 +225,7 @@ ALERT_SKIP_3:
         RTS                                     | return after beep call
 
 | ----------------------------------------------------------
-| GetNewDialog -- _GetNewDialog ($A97C). Plus resource_mgr.s 2053.
+| GetNewDialog -- _GetNewDialog ($A97C).
 | Pascal: function GetNewDialog(dialogID: INTEGER; dStorage: Ptr;
 | behind: WindowPtr): DialogPtr;
 | Loads a DLOG resource template and creates a dialog from it.
@@ -238,10 +241,10 @@ GetNewDialog:
         MOVE.L  A1,-(SP)                        | push boundsRect pointer (DLOG template)
         PEA.L     20(A1)                        | push title string (at template+20)
         ADDQ.L  #0x8,A1                         | skip past boundsRect to window fields
-        MOVE.L  (A1)+,-(SP)                     | push behind window and visible flag
+        MOVE.L  (A1)+,-(SP)                     | push procID + visible (DLOG template +8)
         MOVE.L  8(A6),-(SP)                     | push behind window from caller
-        MOVE    (A1)+,-(SP)                     | push procID (window definition)
-        MOVE.L  (A1)+,-(SP)                     | push goAway flag + refCon
+        MOVE    (A1)+,-(SP)                     | push goAwayFlag (template +$C)
+        MOVE.L  (A1)+,-(SP)                     | push refCon (template +$E)
         MOVE    (A1)+,D0                        | D0 = DITL resource ID from template
         BSR.B   ALERT_CONT_5                    | load and copy DITL
         MOVE.L  A0,-(SP)                        | push items handle
@@ -253,7 +256,7 @@ GETNEWDIALOG_CONT:
         BRA.B   NEWDIALOG_CONT                  | -> $E68A (trampoline to CLEANUP_PARAMS)
 
 | ----------------------------------------------------------
-| NewDialog -- _NewDialog ($A97D). Plus resource_mgr.s 2081.
+| NewDialog -- _NewDialog ($A97D).
 | Pascal: function NewDialog(dStorage: Ptr; boundsRect: Rect;
 | title: Str255; visible: BOOLEAN;
 | procID: INTEGER; behind: WindowPtr;
@@ -282,7 +285,7 @@ NEWDIALOG_OK:
         MOVE.L  A4,0x26(A6)                     | store result dialog pointer
         MOVE.L  8(A6),A3                        | A3 = items handle from caller
         MOVE    #0x2,windowKind(A4)             | set windowKind = dialogKind (2)
-        MOVE.L  A3,windowSize(A4)               | store items handle in dialog record
+        MOVE.L  A3,items(A4)                    | store items handle in dialog record
         MOVE    (MinusOne).w,editField(A4)      | editField = -1 (no active text field)
         MOVE    (DlgFont).w,0x44(A4)            | set dialog font from global default
         SUBQ.W  #0x4,SP                         | space for GetPort result
@@ -327,7 +330,7 @@ NEWDIALOG_OK_2:
         RTS                                     | return target window in A4
 
 | ----------------------------------------------------------
-| IsDialogEvent -- _IsDialogEvent ($A97F). Plus resource_mgr.s 2156.
+| IsDialogEvent -- _IsDialogEvent ($A97F).
 | Pascal: function IsDialogEvent(event: EventRecord): BOOLEAN;
 | Returns true if the event is for a dialog window. mouseDown
 | events also require the click to land in the dialog's content
@@ -360,7 +363,7 @@ ISDIALOGEVENT_CONT:
         BRA.B   DIALOGSELECT_CONT               | epilogue, pop+return
 
 | ----------------------------------------------------------
-| DialogSelect -- _DialogSelect ($A980). Plus resource_mgr.s 2186.
+| DialogSelect -- _DialogSelect ($A980).
 | Pascal: function DialogSelect(event: EventRecord;
 | VAR theDialog: DialogPtr;
 | VAR itemHit: INTEGER): BOOLEAN; | call subroutine via A0 | call subroutine via A0
@@ -393,7 +396,7 @@ DIALOGSELECT_CONT:
         BRA.B   MODALDIALOG_CONT_2              | epilogue, pop+return result
 
 | ----------------------------------------------------------
-| ModalDialog -- _ModalDialog ($A991). Plus resource_mgr.s 2216.
+| ModalDialog -- _ModalDialog ($A991).
 | Pascal: procedure ModalDialog(filterProc: ProcPtr;
 | VAR itemHit: INTEGER);
 | Modal event loop for a dialog. Calls _SystemTask each iteration,
@@ -475,18 +478,18 @@ DrawDialog:
         BRA.B   CLOSEDIALOG_CONT                | skip CloseDialog body, go to common exit
 
 | ----------------------------------------------------------
-| CloseDialog -- _CloseDialog ($A982). Plus resource_mgr.s 2335.
+| CloseDialog -- _CloseDialog ($A982).
 | Pascal: procedure CloseDialog(theDialog: DialogPtr);
 | Disposes a dialog's items (controls + item handles), the
 | TextEdit record, and closes the underlying window -- but does
-| NOT free the DialogRecord storage itself (use DisposeDialog
+| NOT free the DialogRecord storage itself (use DisposDialog
 | for that).
 CloseDialog:
         BSR.B   MODALDIALOG_CONT_3              | dialog prologue: LINK frame, save regs
         MOVE.L  8(A6),A4                        | A4 = dialog pointer from param
         BSR.B   DRAWDIALOG_CONT_2               | set up port, load item list
-        MOVE.L  28(A4),-(SP)                    | push dialog's update region
-        _SetEmptyRgn                            | clear update region before close
+        MOVE.L  28(A4),-(SP)                    | push the dialog's clipRgn (+$1C)
+        _SetEmptyRgn                            | empty clipRgn: nothing draws while closing
         MOVEQ.L #0x2,D4                         | D4 = 2: dispose mode (free item handles)
         BSR.W   FINDDITEM_CONT                  | walk items, dispose controls/handles
         BSR.B   CLOSEDIALOG_NO_2_CONT_2         | restore port, clear lock
@@ -506,7 +509,7 @@ DRAWDIALOG_CONT_2:
         _GetPort                                | save current grafPort
         MOVE.L  A4,-(SP)                        | push dialog as new port
         _SetPort                                | set dialog as current port
-        MOVE.L  windowSize(A4),A3               | A3 = items handle
+        MOVE.L  items(A4),A3                    | A3 = items handle
         BSET    #0x7,(A3)                       | lock items handle (set hi bit)
         MOVEQ.L #-0x1,D3                        | D3 = -1 (no item found yet)
         MOVE    editField(A4),D2                | D2 = current edit field index
@@ -532,31 +535,40 @@ CLOSEDIALOG_NO_2_CONT_3:
         RTS                                     | return after port cleanup
 
 | ----------------------------------------------------------
-| _DisposeDialog ($A983)
+|
+| _DisposDialog ($A983): close a dialog and release its storage
+| Pascal: PROCEDURE DisposDialog(theDialog: DialogPtr);
+| Calls CloseDialog, then disposes the item list handle (items, $9C)
+| and the DialogRecord itself (_DisposPtr).
 | Called during boot.
-DisposeDialog:
+|
+DisposDialog:
         MOVE.L  0x4(SP),A0                      | A0 = dialog pointer from caller
-        MOVE.L  0x9C(A0),-(SP)                  | push item list handle (for DisposeHandle)
+        MOVE.L  0x9C(A0),-(SP)                  | push items handle ($9C) for later
         MOVE.L  A0,-(SP)                        | push dialog pointer
         _CloseDialog                            | close dialog (dispose items, window)
         MOVE.L  (SP)+,A0                        | A0 = item list handle
-        _DisposeHandle                          | dispose item list handle
+        _DisposeHandle                          | dispose the item list
         MOVE.L  (SP)+,A1                        | A1 = return address
         MOVE.L  (SP)+,A0                        | A0 = dialog storage pointer
         _DisposePtr                             | free dialog record memory
         JMP     (A1)                            | RTS
+| ----------------------------------------------------------
+| DISPOSEDIALOG_CONT_4 - A2 = ALRT template handle: get the DITL named by
+| its itemsID (offset 8) -> A2. Used by CouldAlert and FreeAlert; the
+| _GetResource tail (DISPOSEDIALOG_EXIT) is shared with FREEALERT_CONT_3.
 DISPOSEDIALOG_CONT_4:
-        MOVE.L  (A2),A0                         | A0 = ALRT/DLOG template data
+        MOVE.L  (A2),A0                         | A0 = ALRT template data
         SUBQ.W  #0x4,SP                         | space for GetResource result
         MOVE.L  #0x4449544C,-(SP)               | push 'DITL' resource type
-        MOVE    8(A0),-(SP)                     | push DITL ID from template
+        MOVE    8(A0),-(SP)                     | push itemsID (DITL ID) from template
 DISPOSEDIALOG_EXIT:
         _GetResource                            | load the DITL resource
         MOVE.L  (SP)+,A2                        | A2 = DITL resource handle
         RTS                                     | return DITL resource handle in A2
 
 | ----------------------------------------------------------
-| CouldAlert -- _CouldAlert ($A989). Plus resource_mgr.s 2487.
+| CouldAlert -- _CouldAlert ($A989).
 | Pascal: procedure CouldAlert(alertID: INTEGER);
 | Preloads an ALRT resource and its DITL into memory and makes
 | them non-purgeable. Used to ensure an alert can be displayed
@@ -594,7 +606,7 @@ COULDALERT_CONT_4:
         RTS                                     | return handle flags in CCR
 
 | ----------------------------------------------------------
-| FreeAlert -- _FreeAlert ($A98A). Plus resource_mgr.s 2547.
+| FreeAlert -- _FreeAlert ($A98A).
 | Pascal: procedure FreeAlert(alertID: INTEGER);
 | Releases an ALRT resource that was preloaded by CouldAlert,
 | making it and its sub-resources purgeable again. Plus 1986
@@ -631,7 +643,7 @@ FREEALERT_CONT_3:
         BRA.W   DISPOSEDIALOG_EXIT              | load WDEF resource and return
 
 | ----------------------------------------------------------
-| ParamText -- _ParamText ($A98B). Plus resource_mgr.s 2630 (approx).
+| ParamText -- _ParamText ($A98B). (approx).
 | Pascal: procedure ParamText(param0, param1, param2,
 | param3: Str255);
 | Updates DAStrings[0..3] with caller-supplied Pascal strings,
@@ -656,12 +668,19 @@ PARAMTEXT_SKIP:
         MOVE.L  (SP)+,(SP)                      | collapse stack to drop param
         DBRA    D2,PARAMTEXT_LOOP               | loop for all 4 ParamText slots
         RTS                                     | return after updating strings
+| ----------------------------------------------------------
+|
+| _ErrorSound ($A98C): set the sound procedure used by the alerts
+| Pascal: PROCEDURE ErrorSound(soundProc: ProcPtr);
+| Stores soundProc into DABeeper.
+|
+ErrorSound:
         MOVE.L  (SP)+,A0                        | A0 = caller return address
-        MOVE.L  (SP)+,(DABeeper).w              | install custom beeper proc
+        MOVE.L  (SP)+,(DABeeper).w              | DABeeper := soundProc
         JMP     (A0)                            | RTS
 
 | ----------------------------------------------------------
-| GetDItem -- _GetDItem ($A98D). Plus resource_mgr.s 2620.
+| GetDItem -- _GetDItem ($A98D).
 | Pascal: procedure GetDItem(theDialog: DialogPtr; itemNo: INTEGER;
 | VAR itemType: INTEGER;
 | VAR item: Handle;
@@ -692,7 +711,7 @@ GETDITEM_CONT:
         BRA.W   FREEALERT_CONT_2                | dispatch to common epilogue
 
 | ----------------------------------------------------------
-| SetDItem -- _SetDItem ($A98E). Plus resource_mgr.s 2652.
+| SetDItem -- _SetDItem ($A98E).
 | Pascal: procedure SetDItem(theDialog: DialogPtr; itemNo: INTEGER;
 | itemType: INTEGER; item: Handle;
 | box: Rect);
@@ -719,7 +738,7 @@ SETDITEM_CONT:
         BRA.B   GETDITEM_CONT                   | dispatch to common epilogue
 
 | ----------------------------------------------------------
-| GetIText -- _GetIText ($A990). Plus resource_mgr.s 2676.
+| GetIText -- _GetIText ($A990).
 | Pascal: procedure GetIText(item: Handle; VAR text: Str255);
 | Reads text from a dialog item's text handle and returns it as
 | a Pascal string (length-prefixed). Clamps to 255 bytes max.
@@ -742,7 +761,7 @@ GETITEXT_OK:
         BRA.B   SETITEXT_CONT                   | dispatch to common epilogue
 
 | ----------------------------------------------------------
-| SetIText -- _SetIText ($A98F). Plus resource_mgr.s 2696.
+| SetIText -- _SetIText ($A98F).
 | Pascal: procedure SetIText(item: Handle; text: Str255);
 | Replaces a dialog item's text handle contents with a new
 | Pascal string. Walks WindowList looking for dialogs that own
@@ -788,7 +807,7 @@ SETITEXT_CONT_2:
         BRA.B   SETDITEM_CONT                   | jump back to shared BRA -> cleanup
 
 | ----------------------------------------------------------
-| SelIText -- _SelIText ($A97E). Plus resource_mgr.s 2742.
+| SelIText -- _SelIText ($A97E).
 | Pascal: procedure SelIText(theDialog: DialogPtr; itemNo: INTEGER;
 | selStart, selEnd: INTEGER);
 | Selects a text range in a dialog's editable text item. The
@@ -987,7 +1006,7 @@ DLGMGR_SKIP_2:
 | ----------------------------------------------------------
 | Draw statText or editText item.
 | If this is the active editText field, erase and TEUpdate.
-| Otherwise, perform ParamText substitution (^0..^3) then TETextBox.
+| Otherwise, perform ParamText substitution (^0..^3) then TextBox.
 | After drawing, if editText, draw 3-pixel frame around display rect.
 | ----------------------------------------------------------
 DLGMGR_CONT_22:
@@ -1049,7 +1068,7 @@ DLGMGR_CONT_22_CONT_5:
         DBRA    D6,DLGMGR_CONT_22_LOOP          | loop for all 4 ParamText slots
         MOVE.L  D7,A0                           | A0 = working text handle
         BSET    #0x7,(A0)                       | lock handle (high bit of master)
-        MOVE.L  (A0),-(SP)                      | push text pointer for TETextBox
+        MOVE.L  (A0),-(SP)                      | push text pointer for TextBox
         _GetHandleSize                          | D0 = current text size
         MOVE.L  D0,-(SP)                        | push text length
         PEA.L     -0x28(A6)                     | push item rect for layout
@@ -1068,8 +1087,8 @@ DLGMGR_CONT_22_CONT_6:                          | ParamText substitution keys
 | ----------------------------------------------------------
 | Dispose item resources (D4=2).
 | Frees handles for text/icon/picture items, disposes controls.
-| Item type dispatch: userItem=RTS, ctrlItem=DisposeControl,
-| statText/editText=DisposeHandle, iconItem/picItem=DisposeHandle.
+| Item type dispatch: userItem=RTS, ctrlItem=DisposControl,
+| statText/editText=DisposHandle, iconItem/picItem=DisposHandle.
 | ----------------------------------------------------------
 DLGMGR_CONT_24:
         ROR     #0x3,D0                         | rotate type bits to test high
@@ -1124,7 +1143,7 @@ DLGMGR_EXIT:
         RTS                                     | return failure result
 DLGMGR_CONT_29:
         MOVE.L  A4,-(SP)                        | push dialog window
-        MOVE.L  (SP),-(SP)                      | dup for EndUpDate
+        MOVE.L  (SP),-(SP)                      | dup for EndUpdate
         MOVE.L  (SP),-(SP)                      | dup for DrawDialog
         _BeginUpDate                            | set visRgn=updateRgn for redraw
         BSR.W   DrawDialog                      | redraw all dialog items
@@ -1191,8 +1210,8 @@ DLGMGR_NEXT_3:
         BTST    #0x2,12(A2)                     | is this a ctrlItem?
         BEQ.B   DLGMGR_NO_5                     | no: check for editText click
         SUBQ.W  #0x2,SP                         | space for FindControl result
-        MOVE.L  -28(A6),-(SP)                   | A0 = teHandle from DialogRecord
-        MOVE.L  A4,-(SP)                        | A1 = dereferenced TERec pointer
+        MOVE.L  -28(A6),-(SP)                   | push click point (local coordinates)
+        MOVE.L  A4,-(SP)                        | push theWindow (the dialog)
         PEA.L     -24(A6)                       | push ptr for control handle result
         _FindControl                            | find which control was clicked
         MOVE    (SP)+,D0                        | D0 = partCode (zero = no hit)
@@ -1219,7 +1238,7 @@ DLGMGR_OK:
         MOVE.L  -28(A6),-(SP)                   | push click point
         BTST    #0x1,-0x3E(A6)                  | test shiftKey in event modifiers
         SNE     -(SP)                           | push extend flag (true if Shift held)
-        MOVE.L  0xA0(A4),-(SP)                  | push +D2 vertical
+        MOVE.L  0xA0(A4),-(SP)                  | push teHandle (+$A0) for TEClick
         _TEClick                                | handle text selection/insertion
 DLGMGR_EXIT_5:
         BTST    #0x7,12(A2)                     | test itemDisable bit
@@ -1229,7 +1248,7 @@ DLGMGR_EXIT_5:
 ENTRY_2:
         TST     0xA4(A4)                        | is there a current edit field?
         BMI.B   DLGMGR_SKIP_7                   | no current field: skip deactivation
-        MOVE.L  0xA0(A4),-(SP)                  | push pen width for PenSize
+        MOVE.L  0xA0(A4),-(SP)                  | push teHandle (+$A0) for TEDeactivate
         _TEDeactivate                           | hide caret/selection in old field
 DLGMGR_SKIP_7:
         BSR.B   DLGMGR_CONT_33                  | install new field's text into TERec
@@ -1328,166 +1347,3 @@ ENTRY_5_CONT_3:
         MOVE.L  A2,D0                           | set Z flag: Z=1 if A2 is nil
         RTS                                     | return with Z flag set if past end
 
-| ----------------------------------------------------------
-| Munger -- _Munger ($A9E0). Plus dialog_mgr.s 826.
-| Search and replace bytes within a handle.
-| Pascal: FUNCTION Munger(h: Handle; offset: LongInt; ptr1: Ptr;
-| len1: LongInt; ptr2: Ptr; len2: LongInt): LongInt;
-| Searches for ptr1[len1] starting at offset; replaces match
-| with ptr2[len2]. Returns offset past match.
-Munger:
-        LINK    A6,#0x0                         | no locals
-        MOVEM.L D2-D7/A2-A4,-(SP)               | save working registers
-        MOVE.L  28(A6),A2                       | A2 = target handle
-        MOVE.L  A2,A0                           | A0 = handle for GetHandleSize
-        _GetHandleSize                          | D0 = current handle size
-        MOVE.L  D0,D5                           | D5 = handle size
-        MOVE.L  24(A6),D2                       | D2 = offset
-        MOVE.L  20(A6),A3                       | A3 = ptr1 (search pattern)
-        MOVE.L  12(A6),A4                       | A4 = ptr2 (replacement)
-        MOVE.L  16(A6),D3                       | D3 = len1 (search length)
-        BEQ.B   GETFORECOLOR_NO_2               | len=0: skip search, just insert at offset
-        BPL.B   GETFORECOLOR_OK                 | positive length: use as-is
-GETFORECOLOR_CONT_2:
-        MOVE.L  D5,D3                           | negative len: search from offset to end
-        SUB.L   D2,D3                           | D3 = remaining bytes from offset
-GETFORECOLOR_OK:
-        MOVE.L  D5,D0                           | D0 = handle data size
-        SUB.L   D3,D0                           | D0 = size - searchLen
-        BLT.B   GETFORECOLOR_FOUND              | pattern longer than data: not found
-        SUB.L   D2,D0                           | D0 = bytes available after offset
-        BLT.B   GETFORECOLOR_CONT_2             | offset past valid range: clamp
-        MOVE.L  A3,D0                           | test search pointer
-        BEQ.B   GETFORECOLOR_EMPTY              | nil search ptr: delete D3 bytes at offset
-        MOVE.L  (A2),D6                         | D6 = dereferenced handle base address
-        MOVE.L  D5,D7                           | D7 = end limit for search
-        ADD.L   D6,D7                           | D7 = absolute end address
-        ADD.L   D2,D6                           | D6 = absolute start address (base+offset)
-GETFORECOLOR_RETRY:
-        MOVE.L  D3,D1                           | D1 = pattern length for comparison
-        MOVE.L  D6,A0                           | A0 = current position in handle data
-        MOVE.L  A3,A1                           | A1 = search pattern pointer
-GETFORECOLOR_LOOP:
-        CMP.L   D6,D7                           | past end of searchable region?
-        BCS.B   GETFORECOLOR_FOUND              | yes: pattern not found
-        CMPM.B  (A0)+,(A1)+                     | jump via A0
-        BNE.B   GETFORECOLOR_NEXT               | mismatch: advance to next position
-        SUBQ.L  #0x1,D1                         | decrement pattern bytes left
-        BNE.B   GETFORECOLOR_LOOP               | continue comparing pattern bytes
-        MOVE.L  D6,D2                           | match found: D2 = match address
-        SUB.L   (A2),D2                         | convert to offset from handle start
-        BRA.B   GETFORECOLOR_CONT_6             | go perform replacement
-GETFORECOLOR_NEXT:
-        ADDQ.L  #0x1,D6                         | move to next byte in handle data
-        BRA.B   GETFORECOLOR_RETRY              | retry pattern match from new position
-GETFORECOLOR_FOUND:
-        MOVEQ.L #-0x1,D2                        | D2 = -1 (not found sentinel)
-        BRA.B   ENTRY_5_CONT_13                 | return not-found result
-GETFORECOLOR_CONT_6:
-        MOVE.L  A4,D0                           | test replacement pointer
-        BEQ.B   ENTRY_5_CONT_13                 | nil: search-only, return offset
-GETFORECOLOR_EMPTY:
-        MOVE.L  D5,D0                           | D0 = handle data size
-        SUB.L   D3,D0                           | subtract search pattern length
-        MOVE.L  D0,D5                           | D5 = new size after deletion
-        SUB.L   D2,D0                           | D0 = bytes after match to move
-        MOVE.L  (A2),A1                         | A1 = handle base (dest for move)
-        ADDA.L  D2,A1                           | A1 = match position (destination)
-        MOVE.L  A1,A0                           | A0 = source: end of matched region
-        ADDA.L  D3,A0                           | advance past matched bytes
-        _BlockMove                              | move trailing data over deleted region
-        MOVE.L  A2,A0                           | A1 = source pointer
-        MOVE.L  D5,D0                           | D1 = byte count
-        _SetHandleSize                          | shrink handle to new (smaller) size
-GETFORECOLOR_NO_2:
-        MOVE.L  8(A6),D4                        | D4 = replacement length
-        BEQ.B   ENTRY_5_CONT_13                 | zero length: nothing to insert
-        MOVE.L  D5,D0                           | D0 = current handle size
-        ADD.L   D4,D0                           | D0 = new size after insertion
-        MOVE.L  A2,A0                           | dereference dest handle to data ptr
-        _SetHandleSize                          | grow handle to fit insertion
-        BNE.B   ENTRY_5_CONT_13                 | resize failed: abort
-        MOVE.L  (A2),A1                         | D0 = byte count for BlockMove
-        ADDA.L  D2,A1                           | A1 = insertion point
-        MOVE.L  A1,A0                           | restore handle in A0
-        ADDA.L  D4,A1                           | A1 = shifted dest past insertion
-        MOVE.L  D5,D0                           | D0 = trailing bytes to move
-        SUB.L   D2,D0                           | subtract offset from total
-        _BlockMove                              | shift trailing data forward
-        MOVE.L  (A2),A1                         | A1 = handle base (may have moved)
-        ADDA.L  D2,A1                           | A1 = dest for replacement data
-        MOVE.L  A4,A0                           | A0 = replacement data source
-        MOVE.L  D4,D0                           | D0 = replacement data length
-        _BlockMove                              | copy replacement data into handle
-ENTRY_5_CONT_13:
-        MOVE.L  D2,0x20(A6)                     | store result offset in return slot
-        MOVEM.L (SP)+,D2-D7/A2-A4               | restore working registers
-        UNLK    A6                              | tear down frame
-        MOVE.L  (SP)+,A0                        | pop return address
-        ADDA.W  #0x18,SP                        | strip 24 bytes of params
-        JMP     (A0)                            | RTS
-
-| ----------------------------------------------------------
-| HandToHand -- _HandToHand ($A9E1). Plus dialog_mgr.s 1072.
-| Make a copy of a handle. Entry: A0 = source handle.
-| Exit: A0 = new handle (copy).
-HandToHand:
-        MOVE.L  A0,A1                           | A1 = source handle (saved for deref)
-        _GetHandleSize                          | D0 = source size
-        MOVE.L  D0,D1                           | D1 = byte count
-        _NewHandle                              | A0 = new handle
-        MOVE.L  (A1),A1                         | A1 = source data ptr
-        BRA.B   PTRTOHAND_CONT                  | -> common copy path
-
-| ----------------------------------------------------------
-| PtrToXHand -- _PtrToXHand ($A9E2). Plus dialog_mgr.s 1093.
-| Copy D0 bytes from ptr A0 into existing handle A1.
-PtrToXHand:
-        EXG     A0,A1                           | A0 = dest handle, A1 = source ptr
-        MOVE.L  D0,D1                           | D1 = byte count
-        _SetHandleSize                          | resize handle to D1 bytes
-        BRA.B   PTRTOHAND_CONT                  | -> common copy path
-
-| ----------------------------------------------------------
-| PtrToHand -- _PtrToHand ($A9E3). Plus dialog_mgr.s 1103.
-| Create a new handle and copy D0 bytes from ptr A0.
-PtrToHand:
-        MOVE.L  A0,A1                           | A1 = source ptr
-        MOVE.L  D0,D1                           | D1 = byte count
-        _NewHandle                              | A0 = new handle
-PTRTOHAND_CONT:
-        BNE.B   PTRTOHAND_ERR                   | NewHandle/SetHandleSize failed: bail
-        MOVEQ.L #0x0,D2                         | dest offset = 0
-PTRTOHAND_CONT_2:
-        MOVE.L  A0,-(SP)                        | save dest handle for return
-        MOVE.L  (A0),A0                         | dereference dest handle to data ptr
-        ADDA.L  D2,A0                           | advance to dest offset
-        EXG     A0,A1                           | A0=src ptr, A1=dest data ptr
-        MOVE.L  D1,D0                           | D0 = byte count for BlockMove
-        _BlockMove                              | copy bytes from source to handle data
-        MOVE.L  (SP)+,A0                        | restore handle in A0
-PTRTOHAND_ERR:
-        RTS                                     | exit path (taken on BNE from $EF26)
-        _GetHandleSize                          | A-line trap (unreached tail)
-        MOVEA.L (A0),A0                         | A0 = *A0 (unreached tail)
-        MOVE.L  D0,D1                           | D1 = source byte count
-        EXG     A1,A0                           | A0=dest handle, A1=source ptr
-        _GetHandleSize                          | D0 = current dest size
-        MOVE.L  D0,D2                           | collapse stack frame
-        ADD.L   D1,D0                           | D0 = oldSize + addLen
-        _SetHandleSize                          | grow dest handle to new size
-        BNE.B   PTRTOHAND_ERR                   | SetHandleSize failed: abort
-        BRA.B   PTRTOHAND_CONT_2                | share copy path (D2 = old end)
-        MOVE.L  A3,-(SP)                        | save A3 (used as event-record ptr)
-        MOVE.L  8(SP),A3                        | A3 = event record ptr from caller
-        CLR     12(SP)                          | clear caller's result byte
-        SUBQ.W  #0x4,SP                         | space for GetPort result
-        MOVE.L  SP,-(SP)                        | push ptr for GetPort
-        _GetPort                                | save current grafPort on stack
-        MOVE    (A3),D0                         | D1 = DCE event mask
-        CMPI    #0x9,D0                         | event code in range 0..8?
-        BCC.B   SYSEVT_RESTORE                  | no -> bail to shared epilog
-        ADD     D0,D0                           | D0 *= 2 (word-index into jump table)
-        LEA     SYSEVT_DISPATCH(PC),A0          | A0 = jump table base
-        ADDA.W  0(A0,D0.W),A0                   | A0 = base + table[D0]
-        JMP     (A0)                            | dispatch to handler

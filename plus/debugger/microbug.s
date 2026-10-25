@@ -1,29 +1,29 @@
-| MicroBug -- built-in minimal ROM debugger (Plus-only)
+| MicroBug -- the built-in ROM debugger
 |
-| Entered from IconDispatch/SysErr2 in debugger.s when no external
-| debugger (MacsBug) is installed. Provides a hex expression parser
-| and a small command set:
+| Entered from SysErr2 (os/sys_error.s) when no external debugger
+| (MacsBug) is installed and the programmer's switch is pressed.
+| Provides a hex expression parser and a small command set:
 |
 | G   - resume (go)
 | DM  - display memory
-| FS  - fill memory (store)
-| TD  - toggle display radix
-| DAt - display A-reg
-| AAt - show all A-regs
+| SM  - set memory
+| TD  - total display (all saved registers)
 | PC  - display/set PC
 | SR  - display/set SR
+| Dn/An - display/set a data or address register
 |
-| Uses the serial port for I/O (selectable via PRAM: modem = 1,
-| printer = 2). Saved CPU state lives in SERegs at 0x3FFC80;
-| command buffer and MicroBug state live at 0x3FFCD4..0x3FFCFC.
+| Saved CPU state lives in SERegs at 0x3FFC80; the command buffer and
+| MicroBug state live at 0x3FFCD4..0x3FFCFC. The 128K/512K ROM has no ROM
+| debugger; the SE has the same MicroBug.
 |
-| This file is Plus-only -- the classic (128K/512K) ROM has no
-| interactive ROM debugger. Phase 10A stopped splitting debugger.s
-| here because everything preceding MicroBug in ROM (exception
-| machinery, IconDispatch/SysErr2, AllocFakeRgns + INSTALL_INF_RGN,
-| SysBeep, DSErrorHandler, DSERR_*, LOOKUP_*) is physically
-| contiguous and moving it to sad_mac.s/font_mgr.s to match classic
-| would shift ROM bytes.
+| MicroBug variables:
+| 0x3FFCF6 expression negate flag
+| 0x3FFCF8 dot address ("." in expressions)
+| 0x3FFCFC DM continuation address
+| 0x3FFCD4 serial port selection (1=modem, 2=printer)
+| 0x3FFCDA saved A-line trap vector
+| 0x3FFCDE trap watch range low
+| 0x3FFCE0 trap watch range high
 |
 | References:
 | Technical Note TN1136: MicroBug, The ROM Debugger
@@ -825,7 +825,7 @@ SERIAL_CMD_WATCH:
 SERIAL_UNWATCH:
         ADDQ.L  #0x4,SP                         | discard return address
         MOVEQ.L #0x0,D0                         | return 0 (success)
-        RTS                                     | return to caller
+        RTS                                     | return from SERIAL_UNWATCH
 
 | ----------------------------------------------------------
 |

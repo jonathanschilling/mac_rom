@@ -1,2838 +1,2689 @@
+| =========================================================================
+| PACK 4 -- FP68K, the SANE floating-point arithmetic package
+| =========================================================================
+| ROM offsets +0x1DF8C..+0x1F14B: the 8-byte header of the ROM resource at
+| +0x1DF8C, then the package, $11B8 bytes from +0x1DF94 (_PACK_4_ in
+| MacPlusROM.lst) on; type PACK, ID 4, no name, attributes $58 (resSysHeap,
+| resLocked, resProtected). The same in all three Plus ROMs.
 |
-| resource : 'PACK' 4 - SANE Floating-Point Arithmetic (FP68K)
-| IEEE 754 implementation for 68000 (no FPU)
-| Selector word on stack encodes: operation (bits 0-4), format (bits 13-14)
-| Formats: 0=extended(80-bit), 1=double(64-bit), 2=single(32-bit), 3=comp(64-bit int)
-| Operations: 0=add, 2=sub, 4=mul, 6=div, 8=cmp, $A=cvt, $C=rem,
-| $E=sqrt, $10=rint, $12=tint, $14=scalb, $16=logb, $18=class
-OPERATIONS:
-        BRA.B   FP68K_SKIP                      | skip resource header
-  .byte 0x00,0x00
-  .ascii "PACK"
-  .byte 0x00,0x04,0x00,0x02
-| FP68K entry point (from _FP68K trap)
-FP68K_SKIP:
-        LINK    A6,#-0x2                        | 2 bytes local
-        MOVEM.L D0-D7/A0-A4,-(SP)               | save all registers
-        MOVE    #0xA4A,A0                       | A0 = FPState address offset
-        BRA.B   FP68K_CONT_2                    | -> common dispatch
+| Version 2 (header word): Jerome Coonen's FP68K of 26 March 1985. The SE
+| ROMs have the same code, assembled with the MPW assembler ("18may86:
+| moved to MPW" in Apple's FP68K.a), which turns each CLR.L Dn into
+| MOVEQ #0,Dn: those 29 instructions are the only difference from the
+| Plus bytes. The code follows Apple's System 7.1 sources FP68K.a
+| (= FPEqus.a + FPCtrl.a + FPOps.a + FPBD.a) instruction for instruction;
+| the 7.1 source already has the two later fixes the ROM contains
+| ("Clear inexact if invalid" in IOFLOW, the saved modes in DBCORE).
+| Labels: Apple's names from these sources with the prefix FP68K_
+| (FP68K_UNPACK, FP68K_ARITHOP, the tables FP68K_ARITHTAB ...); the
+| targets of Apple's local labels are FP68K_<label>_<n> for the @n that
+| follows that label (e.g. FP68K_FPCOM_3).
+|
+| Calling convention (Apple Numerics Manual; IM IV): _FP68K = _Pack4
+| ($A9EB) with the operand addresses and then an opword pushed:
+|   (SP): return, 4(SP): opword, 6(SP): address 1 (destination), 10(SP):
+|   address 2 (source), 14(SP): address 3 (Bin2Dec: the DecForm);
+| the package pops opword and addresses; the CCR holds the result of a
+| compare. All registers are preserved.
+| Opword: bits 0-4 operation, bits 11-13 format of the operand that is
+| not extended (0 extended 80 bits, 1 double, 2 single, 4 int16, 5 int32,
+| 6 comp 64 bits). Even operations (OPMASKS/ARITHTAB): $00 add, $02 sub,
+| $04 mul, $06 div, $08 cmp, $0A cmpx (signals unordered), $0C rem, $0E
+| convert to extended, $10 convert from extended, $12 sqrt, $14 rint
+| (round to integral), $16 tint (truncate), $18 scalb, $1A logb, $1C
+| class. Odd operations (ODDBALL/ODDTAB): $01 setenv, $03 getenv, $05
+| sethv, $07 gethv, $09 dec2bin, $0B bin2dec, $0D neg, $0F abs, $11
+| copysign, $13 nextafter, $15 setxcp, $17 procentry, $19 procexit, $1B
+| testxcp.
+| The state (FPState, $A4A): the environment word, then the halt vector
+| (long). Environment high byte: bits 0-4 exception flags (invalid,
+| underflow, overflow, divide by zero, inexact), bits 5-6 rounding
+| direction (00 nearest, 01 upward, 10 downward, 11 toward zero); low
+| byte: bits 0-4 halt enables, bits 5-6 rounding precision (01 double,
+| 10 single), bit 7 "last round was up" (RNDINC).
+|
+| Internal registers (FPCtrl.a): D6.hi = decoded opword (bit 31 single
+| result, 30 double, 26 integer result, 23 dst in, 22 src in, 21 dst out,
+| 16 two addresses), D6.lo = new exception flags (bits 8-12) and the
+| signs (bit 7 src or result, 6 dst, 5 their XOR); unpacked operands:
+| last one in D4:D5 (significand) / A4 (exponent), first one in A1:A2 /
+| A3; D7 round/guard/sticky bits, later the CCR result in D7.hi; D2 NaN
+| case (2 src, 4 dst, 6 both), D3 number case (0 num, 2 zero, 4 infinity
+| per operand, combined 0..16 for two operands); A0 = FPState.
+|
+| Sources: Apple's FP68K.a, FPEqus.a, FPCtrl.a, FPOps.a, FPBD.a (Mac OS
+| 7.1 tree, Toolbox/SANE) and SANEMacs.a (NaN codes, environment bits),
+| the Apple Numerics Manual, Inside Macintosh IV ("SANE"). The same
+| package in the SE tree: src/se/resources/res_pack_4.s.
+| =========================================================================
 
+| -------------------------------------------------------------------------
+| ROM resource header: a Memory Manager style block header (tag $C0 and
+| the physical size, then a relative-handle field) in front of the
+| resource data, as for every ROM resource.
+| -------------------------------------------------------------------------
+        .long   0xC00011C0                      | ROM resource header: tag $C0, physical size $11C0 (8 + $11B8)
+        .long   0x0000007C                      | relative handle: master pointer at ROM zone + $7C
+| -------------------------------------------------------------------------
+| Package header: branch to the entry, flags word, 'PACK', ID, version.
+| -------------------------------------------------------------------------
+_PACK_4_:
+        BRA.B   FP68K_FPBEGIN                   | skip the package header to the entry FPBEGIN
+        .short  0x0000                          | flags word
+        .ascii  "PACK"                          | resource type
+        .short  0x0004                          | resource ID 4
+        .short  0x0002                          | version 2
+| -------------------------------------------------------------------------
+| FP68K_FPBEGIN -- the entry of _FP68K: a frame whose -2(A6)
+| word later holds the byte count to pop (LKCNT), all registers saved,
+| A0 = FPState.
+| -------------------------------------------------------------------------
+FP68K_FPBEGIN:
+        LINK    A6,#-0x2                        | frame; -2(A6) = LKCNT, the byte count to pop
+        MOVEM.L D0-D7/A0-A4,-(SP)               | save D0-D7/A0-A4: all registers are preserved
+        MOVEA.W #0xA4A,A0                       | A0 = FPState ($A4A): environment word, halt vector
+        BRA.B   FP68K_FPCOM                     | -> FPCOM
 | ----------------------------------------------------------
-|
-| FP68K_CONT: operation descriptor table (15 entries)
-| Each word: bits 7-0 = handler offset, bits 15-8 = operand requirements
-|
-FP68K_CONT:
-  .byte  0x00,0xE1,0x00,0xE1,0x00,0xE1
-  .byte 0x00,0xE1,0x00,0xC1,0x00,0xC1
-  .byte 0x00,0xE1,0x00,0x61,0x01,0x61
-  .byte 0x00,0xA0,0x00,0xA0,0x00,0xA0
-  .byte 0x00,0xA1,0x00,0xA0,0x00,0x41
-| FP68K_EMPTY: alternate FP68K entry (for internal calls)
-| Called by: FP68K_CONT_106, FP68K_DONE_13, FP68K_CONT_116, FP68K_OK_35, FP68K_OK_36 (and 2 more)
-FP68K_EMPTY:
-        LINK    A6,#-0x2                        | 2 bytes local
-        MOVEM.L D0-D7/A0-A4,-(SP)               | save all registers
-| common dispatch: parse selector and dispatch to operation handler
-FP68K_CONT_2:
-        MOVE    0x8(A6),D6                      | D6 = selector word from stack
+| FP68K_OPMASKS: information bits ORed into the opword,
+| per operation (index = opword AND $1E): $80 dst in, $40 src in, $20 dst
+| out, $100 the format field governs the dst, $01 two addresses.
+FP68K_OPMASKS:
+        .short  0x00E1                          | ADD: dst and src in, dst out, 2 addresses
+        .short  0x00E1                          | SUB
+        .short  0x00E1                          | MUL
+        .short  0x00E1                          | DIV
+        .short  0x00C1                          | CMP: no output (the result is the CCR)
+        .short  0x00C1                          | CMPX
+        .short  0x00E1                          | REM
+        .short  0x0061                          | 2EXT (to extended): src in, dst out
+        .short  0x0161                          | EXT2 (from extended): the format governs the dst
+        .short  0x00A0                          | SQRT: dst in and out, 1 address
+        .short  0x00A0                          | RINT
+        .short  0x00A0                          | TINT
+        .short  0x00A1                          | SCALB: like SQRT, the integer is the 2nd address
+        .short  0x00A0                          | LOGB
+        .short  0x0041                          | CLASS: src in, the integer result is the dst
+| ----------------------------------------------------------
+| FP68K_REFP68K -- second entry, for calls from inside the
+| package: like FPBEGIN, but A0 already points to the state.
+| Called by: FP68K_NEXTZ, FP68K_NXERR, FP68K_DBSTORE, FP68K_DBCORE_5, FP68K_NOTMINEXP (and 2 more)
+FP68K_REFP68K:
+        LINK    A6,#-0x2                        | frame; -2(A6) = LKCNT
+        MOVEM.L D0-D7/A0-A4,-(SP)               | save D0-D7/A0-A4
+| FP68K_FPCOM -- decode the opword: odd opwords go to
+| ODDBALL; for arithmetic add the OPMASKS bits, the precision control and
+| the format fields, unpack the operands, then dispatch (ARITHOP).
+FP68K_FPCOM:
+        MOVE.W  0x8(A6),D6                      | D6 = the opword (LKOP)
 | decode selector: extract operation code and operand format
-        MOVEQ.L #0x1E,D7                        | mask for operation code (bits 1-4)
-        AND     D6,D7                           | D7 = operation * 2 (table index)
-        BCLR    #0x0,D6                         | test/clear environment access bit
-        BNE     FP68K_CONT_95                   | environment op (get/set flags) ->
-| look up operation descriptor from FP68K_CONT table
-        BCLR    #0x7,0x1(A0)                    | clear FP state flag
-        OR      FP68K_CONT(PC,D7.W),D6          | merge handler info into D6
-| extract rounding mode from FP state
-        MOVEQ.L #0x60,D0                        | rounding mode bits mask
-        AND.B   0x1(A0),D0                      | get current rounding mode
-        ROR     #0x7,D0                         | position for dispatch
-        OR      D0,D6                           | merge into D6
-| handle two-operand format encoding
-        BTST    #0x8,D6                         | two-operand format?
-        BEQ.B   FP68K_NO                        | no ->
-        MOVE    D6,D0                           | copy selector for format split
-        ANDI    #0xFF,D6                        | isolate handler offset
-        ANDI    #0x3800,D0                      | isolate source format bits
-        MOVE    D0,D1                           | copy source format
-        LSL     #0x3,D1                         | shift for dest format
-        ROR     #0x3,D0                         | position source format
-        OR      D0,D6                           | merge formats
-        OR      D1,D6                           | add dest format to descriptor
-| set up operand registers
-FP68K_NO:
-        SWAP    D6                              | operation info to high word
-        CLR.L   D2                              | clear accumulator
-        MOVE.L  D2,D3                           | clear extended mantissa
-        MOVE    D2,D6                           | clear flags
-        BTST    #0x17,D6                        | has destination operand?
-        BEQ.B   FP68K_NO_2                      | no ->
-        MOVE.L  D6,D0                           | copy for format extraction
-        SWAP    D0                              | get high word
-        ROR     #0x7,D0                         | extract dest format code
-        MOVE.L  0xA(A6),A3                      | A3 = dest operand ptr
-        BSR     FP68K_CONT_5                    | unpack dest to D4:D5, exp in A4
-FP68K_NO_2:
-        BTst    #0x16,D6                        | has source operand?
-        BEQ.B   FP68K_NO_3                      | no ->
-        MOVE.L  D4,A1                           | save dest mantissa high
-        MOVE.L  D5,A2                           | save dest mantissa low
-        MOVE.L  A4,-(SP)                        | save dest exponent
-        ROR.B   #0x1,D6                         | shift sign into carry
-        ADD     D2,D2                           | D2 = D2 * 2 (NaN count shift)
-        MOVE    D3,D0                           | save D3 class code
-        ADD     D3,D3                           | D3 = D3 * 2
-        ADD     D0,D3                           | D3 = D3 * 3 (interleave classes)
-        MOVE.L  D6,D0                           | copy for format extraction
-        SWAP    D0                              | get high word
-        ROL     #0x6,D0                         | extract source format code
-        MOVE.L  0xE(A6),A3                      | A3 = source operand ptr
-        BSR     FP68K_CONT_5                    | unpack source to D4:D5
-        MOVE.L  (SP)+,A3                        | restore dest exponent to A3
-FP68K_NO_3:
-        ASL.B   #0x1,D6                         | combine sign bits
-        BVC.B   FP68K_SKIP_2                    | same sign -> skip
-        BSET    #0x6,D6                         | set opposite-signs flag
-FP68K_SKIP_2:
-        ROXR.B  #0x1,D6                         | finalize sign encoding
-        MOVE    D7,D0                           | D0 = operation index
-        CLR.L   D7                              | clear guard bits
-        PEA.L   FP68K_EXIT(PC)                  | push return address (pack result)
-        TST     D2                              | any NaN operands?
-        BNE     FP68K_OK_4                      | yes, propagate NaN ->
-| FP operation dispatch: D0 = operation * 2 -> jump to handler
-FP68K_CONT_3:
-        MOVE    FP68K_CONT_4(PC,D0.W),D0        | get handler offset from table
-        JMP     FP68K_CONT_3(PC,D0.W)           | dispatch to FP operation
-
-| FP operation handler table (offsets from FP68K_CONT_3):
-| 0=add, 1=sub, 2=mul, 3=div, 4=cmp, 5=cmpunord,
-| 6=cvt, 7=sqrt, 8=rem, 9=rint, 10=tint, 11=scalb,
-| 12=logb, 13=class, 14=setenv
-FP68K_CONT_4:
-  .byte  0x04,0xBC,0x04,0xB8,0x05,0x56
-  .byte 0x05,0xF6,0x07,0x0C,0x07,0x0C
-  .byte 0x06,0x8E,0x07,0x78,0x07,0xEC
-  .byte 0x08,0x54,0x07,0x80,0x07,0x8C
-  .byte 0x09,0x30,0x08,0xFA,0x09,0x40
-| FP68K_EXIT: return from FP operation - pack result and clean up
-FP68K_EXIT:
-        BTst    #0x15,D6                        | need to pack result?
-        BEQ.B   FP68K_EXIT_2                    | no, already packed ->
-        MOVE.L  D6,D0                           | copy for format extraction
-        SWAP    D0                              | get high word
-        ROR     #0x7,D0                         | extract destination format
-        BSR     FP68K_CONT_31                   | pack to destination format
-FP68K_EXIT_2:
-        SWAP    D7                              | D7 high = condition codes
-        MOVE    (A0),D0                         | get SANE exception flags
-        CLR.B   D6                              | clear low byte for OR
-        OR      D6,D0                           | merge pending exceptions
-        MOVE    D0,(A0)+                        | update exception state
-        ROR     #0x8,D6                         | extract halt enable mask
-        AND     D6,D0                           | masked halts pending?
-        BEQ.B   FP68K_NO_4                      | no halts ->
-        MOVE    D7,-(SP)                        | push condition codes
-        MOVE    D0,-(SP)                        | push halt exceptions
-        PEA.L   (SP)                            | push halt info ptr
-        MOVEM.L 0x6(A6),D0-D3                   | restore original params
-        MOVEM.L D0-D3,-(SP)                     | pass to halt handler
-        ADDQ.L  #0x2,SP                         | adjust stack alignment
-        MOVE.L  (A0),A0                         | A0 = halt vector
-        JSR     (A0)                            | call halt handler
-        MOVE.L  (SP)+,D7                        | recover condition codes
-FP68K_NO_4:
-        BTst    #0x10,D6                        | three-operand operation?
-        BEQ.B   FP68K_EXIT_4                    | no, two-operand return ->
-FP68K_EXIT_3:
-        MOVEQ.L #0x10,D0                        | stack cleanup = 16 bytes
-        MOVEQ.L #0xE,D1                         | return address offset = 14
-        BRA.B   FP68K_EXIT_5                    | -> common return
-
+        MOVEQ.L #0x1E,D7                        | OPAMASK: operation index bits 1-4
+        AND.W   D6,D7                           | D7 = operation * 2: table index
+        BCLR    #0x0,D6                         | odd opword (bit 0)? clear the bit
+        BNE.W   FP68K_ODDBALL                   | yes: environment and other odd operations (ODDBALL) ->
+| look up operation descriptor from FP68K_OPMASKS table
+        BCLR    #0x7,0x1(A0)                    | clear RNDINC (last round up) in the environment
+        OR.W    FP68K_OPMASKS(PC,D7.W),D6       | add the information bits of the operation (OPMASKS)
+| precision control to D6 bits 15-14; the format of the non-extended
+| operand: source field (bits 11-13), or moved to the destination field
+| (bits 8-10) when bit 8 says so; then that format overrides bits 15-14
+        MOVEQ.L #0x60,D0                        | PRECMSK: precision control bits 5-6
+        AND.B   0x1(A0),D0                      | of the environment low byte
+        ROR.W   #0x7,D0                         | $0060 -> $C000: bit 15 single, bit 14 double
+        OR.W    D0,D6                           | into the opword
+| conversions from extended: the format field describes the destination
+        BTST    #0x8,D6                         | bit 8: the format is the destination's (EXT2)?
+        BEQ.B   FP68K_DEREF_OP                  | no ->
+        MOVE.W  D6,D0                           | save the format bits
+        ANDI.W  #0xFF,D6                        | clear all format bits in D6
+        ANDI.W  #0x3800,D0                      | D0 = the format field (bits 11-13)
+        MOVE.W  D0,D1                           | copy for the control bits
+        LSL.W   #0x3,D1                         | its 2 low bits to bits 15-14 (single/double)
+        ROR.W   #0x3,D0                         | the format into the destination field (bits 8-10)
+        OR.W    D0,D6                           | destination format
+        OR.W    D1,D6                           | single/double bits from the format
+FP68K_DEREF_OP:
+        SWAP.W  D6                              | the decoded opword to D6.hi, where it stays
+        CLR.L   D2                              | D2 := 0: NaN case index (2 src NaN, 4 dst NaN, 6 both)
+        MOVE.L  D2,D3                           | D3 := 0: number case index (num/zero/inf pairs)
+        MOVE.W  D2,D6                           | D6.W := 0: signs and exception flags
+        BTST    #0x17,D6                        | destination is an input (DSTIN)?
+        BEQ.B   FP68K_FPCOM_3                   | no ->
+        MOVE.L  D6,D0                           | opword ...
+        SWAP.W  D0                              | ... in the low word ...
+        ROR.W   #0x7,D0                         | ... destination format * 2 in bits 3-1
+        MOVEA.L 0xA(A6),A3                      | A3 = address 1, the destination (LKADR1)
+        BSR.W   FP68K_UNPACK                    | UNPACK the dst into D4:D5/A4
+FP68K_FPCOM_3:
+        BTST    #0x16,D6                        | source is an input (SRCIN)?
+        BEQ.B   FP68K_FPCOM_4                   | no ->
+        MOVEA.L D4,A1                           | A1:A2 := the dst significand
+        MOVEA.L D5,A2                           | (low half)
+        MOVE.L  A4,-(SP)                        | save the dst exponent across UNPACK
+        ROR.B   #0x1,D6                         | dst sign to bit 6, bit 7 free for the src sign
+        ADD.W   D2,D2                           | NaN index * 2: dst NaN = 4
+        MOVE.W  D3,D0                           | number index of the dst ...
+        ADD.W   D3,D3                           | ...
+        ADD.W   D0,D3                           | ... * 3: 0, 6, 12 (the src adds 0, 2, 4)
+        MOVE.L  D6,D0                           | opword ...
+        SWAP.W  D0                              | ... in the low word ...
+        ROL.W   #0x6,D0                         | ... source format * 2 in bits 3-1
+        MOVEA.L 0xE(A6),A3                      | A3 = address 2, the source (LKADR2)
+        BSR.W   FP68K_UNPACK                    | UNPACK the src into D4:D5/A4
+        MOVEA.L (SP)+,A3                        | A3 = the dst exponent
+FP68K_FPCOM_4:
+        ASL.B   #0x1,D6                         | V := src sign XOR dst sign
+        BVC.B   FP68K_FPCOM_6                   | equal ->
+        BSET    #0x6,D6                         | different: XOR bit (becomes bit 5)
+FP68K_FPCOM_6:
+        ROXR.B  #0x1,D6                         | back: bit 7 src sign, 6 dst sign, 5 XOR
+        MOVE.W  D7,D0                           | D0 = operation * 2
+        CLR.L   D7                              | D7 := 0: round/sticky bits, later the CCR result
+        PEA.L   FP68K_PREPACK(PC)               | the operation returns to PREPACK
+        TST.W   D2                              | NaN operands?
+        BNE.W   FP68K_NANS                      | yes: NANS ->
+| FP68K_ARITHOP: jump to the operation, D0 = opword AND
+| $1E; the operation returns to FP68K_PREPACK.
+FP68K_ARITHOP:
+        MOVE.W  FP68K_ARITHTAB(PC,D0.W),D0      | D0 = offset of the operation (ARITHTAB)
+        JMP     FP68K_ARITHOP(PC,D0.W)          | -> the operation routine
+| FP68K_ARITHTAB: operation routines, offsets from
+| FP68K_ARITHOP.
+FP68K_ARITHTAB:
+        .short  FP68K_ADDTOP-FP68K_ARITHOP      | add (ADDTOP)
+        .short  FP68K_SUBTOP-FP68K_ARITHOP      | sub (SUBTOP)
+        .short  FP68K_MULTOP-FP68K_ARITHOP      | mul (MULTOP)
+        .short  FP68K_DIVTOP-FP68K_ARITHOP      | div (DIVTOP)
+        .short  FP68K_CMPTOP-FP68K_ARITHOP      | cmp (CMPTOP)
+        .short  FP68K_CMPTOP-FP68K_ARITHOP      | cmpx (CMPTOP as well)
+        .short  FP68K_REMTOP-FP68K_ARITHOP      | rem (REMTOP)
+        .short  FP68K_CVT2E-FP68K_ARITHOP       | convert to extended (CVT2E)
+        .short  FP68K_CVTE2-FP68K_ARITHOP       | convert from extended (CVTE2)
+        .short  FP68K_SQRTTOP-FP68K_ARITHOP     | sqrt (SQRTTOP)
+        .short  FP68K_RINT-FP68K_ARITHOP        | rint (RINT)
+        .short  FP68K_TINT-FP68K_ARITHOP        | tint (TINT)
+        .short  FP68K_SCALBTOP-FP68K_ARITHOP    | scalb (SCALBTOP)
+        .short  FP68K_LOGBTOP-FP68K_ARITHOP     | logb (LOGBTOP)
+        .short  FP68K_CLASSTOP-FP68K_ARITHOP    | class (CLASSTOP)
+| FP68K_PREPACK -- the operation is done: store the result in
+| the destination format unless the operation has no output (compares).
+FP68K_PREPACK:
+        BTST    #0x15,D6                        | a result to store (DSTOUT)?
+        BEQ.B   FP68K_CHKERR                    | no (compare) ->
+        MOVE.L  D6,D0                           | opword ...
+        SWAP.W  D0                              | ... in the low word ...
+        ROR.W   #0x7,D0                         | ... destination format * 2
+        BSR.W   FP68K_PACK                      | PACK the result to address 1
+FP68K_CHKERR:
+        SWAP.W  D7                              | CHKERR: the CCR result to D7.lo
+        MOVE.W  (A0),D0                         | D0 = the environment
+        CLR.B   D6                              | drop the signs
+        OR.W    D6,D0                           | OR in the new exceptions (bits 8-12)
+        MOVE.W  D0,(A0)+                        | store; A0 -> the halt vector
+        ROR.W   #0x8,D6                         | new exceptions to bits 0-4, beside the halt enables
+        AND.W   D6,D0                           | any of them with its halt enabled?
+        BEQ.B   FP68K_PASTHALT                  | no ->
+        MOVE.W  D7,-(SP)                        | halt: the CCR word ...
+        MOVE.W  D0,-(SP)                        | ... and the halting exceptions: a 2-word record
+        PEA.L   (SP)                            | push its address
+        MOVEM.L 0x6(A6),D0-D3                   | opword and the 3 addresses (plus one word) ...
+        MOVEM.L D0-D3,-(SP)                     | ... copied for the halt procedure
+        ADDQ.L  #0x2,SP                         | drop the extra word
+        MOVEA.L (A0),A0                         | A0 = the halt vector
+        JSR     (A0)                            | call the halt procedure (Pascal conventions)
+        MOVE.L  (SP)+,D7                        | D7 = the CCR word again
+FP68K_PASTHALT:
+        BTST    #0x10,D6                        | PASTHALT: two addresses (TWOADRS)?
+        BEQ.B   FP68K_POP1                      | no: one address (POP1) ->
+| FP68K_POP2: two addresses -- pop 10 bytes.
+FP68K_POP2:
+        MOVEQ.L #0x10,D0                        | STKREM2: 16 bytes to pop
+        MOVEQ.L #0xE,D1                         | the return address goes to LKADR2
+        BRA.B   FP68K_POPIT                     | -> POPIT
 | ----------------------------------------------------------
-|
-| FP68K_EXIT_4
-|
-| FP68K_EXIT_4: two-operand return (pop 12 bytes of params)
-FP68K_EXIT_4:
-        MOVEQ.L #0xC,D0                         | stack cleanup size
-        MOVEQ.L #0xA,D1                         | return address offset
-| FP68K_EXIT_5: common FP return - clean stack and restore regs
-FP68K_EXIT_5:
-        MOVE    D0,-0x2(A6)                     | save stack cleanup size
-        MOVE.L  0x4(A6),0x0(A6,D1.W)            | relocate return address
-        MOVE.L  (A6),A6                         | unlink frame
-        MOVE    D7,CCR                          | restore condition codes
-        MOVEM.L (SP)+,D0-D7/A0-A4               | restore all registers
-        ADDA    (SP),SP                         | pop params per size
-        RTS                                     | return to caller
-
+| FP68K_POP1: one address -- pop opword and address.
+FP68K_POP1:
+        MOVEQ.L #0xC,D0                         | STKREM1: 12 bytes to pop
+        MOVEQ.L #0xA,D1                         | the return address goes to LKADR1
+| FP68K_POPIT -- D0 = bytes to pop at the end (LKCNT), D1 =
+| frame offset of the slot that gets the return address (the last address
+| parameter); unlink by hand, set the CCR, restore the registers, pop.
+FP68K_POPIT:
+        MOVE.W  D0,-0x2(A6)                     | LKCNT := bytes to pop
+        MOVE.L  0x4(A6),0x0(A6,D1.W)            | return address over the last parameter
+        MOVEA.L (A6),A6                         | unlink by hand: A6 = the caller's
+        MOVE.W  D7,CCR                          | the CCR result (compares)
+        MOVEM.L (SP)+,D0-D7/A0-A4               | restore the registers (CCR not affected)
+        ADDA.W  (SP),SP                         | pop LKCNT bytes: SP -> the return address
+        RTS                                     | return to the FP68K caller, its operands popped
 | ----------------------------------------------------------
-|
-| FP68K_EXIT_6: three-operand return (pop 20 bytes of params)
-|
-FP68K_EXIT_6:
-        MOVEQ.L #0x14,D0                        | stack cleanup = 20 bytes
-        MOVEQ.L #0x12,D1                        | return address offset = 18
-        BRA.B   FP68K_EXIT_5                    | -> common return
-
+| FP68K_POP3: three addresses (binary to decimal only).
+FP68K_POP3:
+        MOVEQ.L #0x14,D0                        | STKREM3: 20 bytes to pop
+        MOVEQ.L #0x12,D1                        | the return address goes to LKADR3
+        BRA.B   FP68K_POPIT                     | -> POPIT
 | ----------------------------------------------------------
-|
-| FP68K_CONT_5
-|
-| FP68K_CONT_5: unpack source operand to extended format (80-bit)
-| Dispatches by format code to extract sign, exponent, mantissa
-| D0 bits 1-3 = format: 0=extended, 1=double, 2=single, 3=extended, 4=integer, 5=long, 6=comp
-FP68K_CONT_5:
-        CLR.L   D4                              | clear mantissa high
-        MOVE.L  D4,D5                           | clear mantissa low
-        ANDI    #0xE,D0                         | mask to format * 2
-        MOVE    FP68K_CONT_6(PC,D0.W),D0        | get handler offset
-        JMP     FP68K_CONT_5(PC,D0.W)           | dispatch by format
-
-| FP68K_CONT_5 format dispatch table (offsets from FP68K_CONT_5)
-FP68K_CONT_6:
-  .byte  0x00,0x68,0x00,0xF2,0x00,0xC8
-  .byte 0x00,0x68,0x00,0x1E,0x00,0x26
-  .byte 0x00,0x2C
-| format 4: unpack 16-bit integer to extended
-FP68K_CONT_7:
-        MOVEQ.L #0xF,D0                         | 16-bit exponent bias
-        MOVE    (A3),D4                         | load 16-bit integer
-        SWAP    D4                              | shift to high word
-        BRA.B   FP68K_NO_5                      | -> normalize
-| format 5: unpack 32-bit long integer to extended
-FP68K_CONT_8:
-        MOVEQ.L #0x1F,D0                        | 32-bit exponent bias
-        MOVE.L  (A3),D4                         | load 32-bit integer
-        BRA.B   FP68K_NO_5                      | -> normalize
-
+| FP68K_UNPACK -- unpack the operand at A3, format
+| code * 2 in D0 (dirty), into the internal form: sign in D6 bit 7,
+| significand in D4:D5 (normalized, integer bit 31 of D4), exponent in A4
+| (biased $3FFF, 32 bits). Integers are converted to extended. Sets D2 +=
+| 2 for a NaN, D3 += 2 for zero, += 4 for infinity, D3 bit 31 for an
+| unnormalized operand (for CLASS); a signaling NaN signals invalid and
+| is made quiet. A3 is preserved.
+| Called by: FP68K_FPCOM (twice), FP68K_B2D.
+FP68K_UNPACK:
+        CLR.L   D4                              | D4 := 0: clear the significand D4:D5 (UNPACK)
+        MOVE.L  D4,D5                           | D5 := 0
+        ANDI.W  #0xE,D0                         | D0 = format * 2
+        MOVE.W  FP68K_UNPCASE(PC,D0.W),D0       | offset of the format's routine (UNPCASE)
+        JMP     FP68K_UNPACK(PC,D0.W)           | -> it
+| FP68K_UNPCASE: unpack routine per format, offsets from
+| FP68K_UNPACK.
+FP68K_UNPCASE:
+        .short  FP68K_UNPEXT-FP68K_UNPACK       | format 0 extended (UNPEXT)
+        .short  FP68K_UNPDBL-FP68K_UNPACK       | format 1 double (UNPDBL)
+        .short  FP68K_UNPSGL-FP68K_UNPACK       | format 2 single (UNPSGL)
+        .short  FP68K_UNPEXT-FP68K_UNPACK       | format 3: as extended
+        .short  FP68K_UNPI16-FP68K_UNPACK       | format 4 int16 (UNPI16)
+        .short  FP68K_UNPI32-FP68K_UNPACK       | format 5 int32 (UNPI32)
+        .short  FP68K_UNPC64-FP68K_UNPACK       | format 6 comp (UNPC64)
+| FP68K_UNPI16: int16 -- left-aligned in D4, exponent 15.
+FP68K_UNPI16:
+        MOVEQ.L #0xF,D0                         | D0 = 15: exponent of the integer once left-aligned in D4 (UNPI16)
+        MOVE.W  (A3),D4                         | D4.W = the 16-bit integer operand
+        SWAP.W  D4                              | left-align it
+        BRA.B   FP68K_UNPIGEN                   | -> UNPIGEN
+| FP68K_UNPI32: int32 -- in D4, exponent 31.
+FP68K_UNPI32:
+        MOVEQ.L #0x1F,D0                        | D0 = 31: exponent of the int32 in D4
+        MOVE.L  (A3),D4                         | D4 = the int32 operand
+        BRA.B   FP68K_UNPIGEN                   | -> UNPIGEN
 | ----------------------------------------------------------
-|
-| FP68K_CONT_9
-|
-| format 6: unpack 64-bit comp (integer) to extended
-FP68K_CONT_9:
-        MOVEQ.L #0x3F,D0                        | 64-bit exponent bias
-        MOVE.L  (A3),D4                         | load high 32 bits
-        MOVE.L  0x4(A3),D5                      | load low 32 bits
-        BEQ.B   FP68K_CONT_10                   | low = 0, check for special values ->
-        TST.L   D4                              | set flags for high word
-        BRA.B   FP68K_CONT_11                   | -> normalize
-
+| FP68K_UNPC64: comp -- in D4:D5, exponent 63; the comp NaN
+| $80000000:00000000 becomes a quiet NaN with code 20 (NANCOMP).
+FP68K_UNPC64:
+        MOVEQ.L #0x3F,D0                        | D0 = 63: exponent of the comp in D4:D5
+        MOVE.L  (A3),D4                         | high half
+        MOVE.L  0x4(A3),D5                      | low half
+        BEQ.B   FP68K_UNPC64_7                  | low half 0: maybe the comp NaN ->
+        TST.L   D4                              | sign of the comp
+        BRA.B   FP68K_UNPCGEN                   | -> UNPCGEN
 | ----------------------------------------------------------
-|
-| comp special case: check for NaN encoding ($80000000:00000000)
-|
-FP68K_CONT_10:
-        CMPI.L  #0x80000000,D4                  | comp NaN?
-        BNE.B   FP68K_NO_5                      | no, normalize normally ->
+| FP68K_UNPC64_7 (Apple UNPC64 @7): low half 0 -- the comp NaN?
+FP68K_UNPC64_7:
+        CMPI.L  #0x80000000,D4                  | the comp NaN $80000000:00000000?
+        BNE.B   FP68K_UNPIGEN                   | no: maybe 0 -> UNPIGEN
 | comp NaN: encode as extended NaN
-        MOVE    #0x7FFF,A4                      | max exponent = NaN/Inf
-        MOVEQ.L #0x14,D4                        | NaN payload
-        SWAP    D4                              | move payload to high word
-        BSET    #0x1E,D4                        | set NaN signaling bit
-        BRA.B   FP68K_DONE                      | -> done unpacking
-
+        MOVEA.W #0x7FFF,A4                      | NaN exponent
+        MOVEQ.L #0x14,D4                        | NaN code 20 (NANCOMP) ...
+        SWAP.W  D4                              | ... in bits 16-23
+        BSET    #0x1E,D4                        | quiet NaN (QNANBIT)
+        BRA.B   FP68K_UNPNAN                    | -> UNPNAN
 | ----------------------------------------------------------
-|
-| normalize integer mantissa: find MSB and set exponent
-|
-FP68K_NO_5:
-        TST.L   D4                              | mantissa zero?
-        BEQ.B   FP68K_EMPTY_3                   | yes -> zero result
-FP68K_CONT_11:
-        BPL.B   FP68K_CONT_12                   | positive -> normalize
-        BSET    #0x7,D6                         | set sign flag for negative
-        NEG.L   D5                              | negate to get absolute value
-        NEGX.L  D4                              | negate high with borrow
-FP68K_CONT_12:
-        ADDI    #0x3FFF,D0                      | add extended exponent bias
-        TST.L   D4                              | MSB set? (already normalized)
-        BMI.B   FP68K_OK                        | yes -> store exponent
-        BRA.B   FP68K_LOOP                      | no -> shift left to normalize
-
+| FP68K_UNPIGEN: integer -- 0 is a zero; else take the
+| magnitude (sign to D6), bias the exponent and normalize.
+FP68K_UNPIGEN:
+        TST.L   D4                              | integer 0?
+        BEQ.B   FP68K_UNP0                      | yes: zero (UNP0) ->
+FP68K_UNPCGEN:
+        BPL.B   FP68K_UNPCGEN_9                 | positive ->
+        BSET    #0x7,D6                         | minus sign
+        NEG.L   D5                              | magnitude: negate the 64 bits
+        NEGX.L  D4                              | (high half)
+FP68K_UNPCGEN_9:
+        ADDI.W  #0x3FFF,D0                      | bias the exponent
+        TST.L   D4                              | leading bit set?
+        BMI.B   FP68K_UNPNRM                    | yes: normalized (UNPNRM) ->
+        BRA.B   FP68K_UNPCUNR                   | normalize, not marked unnormal (UNPCUNR) ->
 | ----------------------------------------------------------
-|
-| FP68K_CONT_13: unpack extended (80-bit) to internal format
-| Already in native format; just extract sign and check for special values
-|
-FP68K_CONT_13:
-        MOVE    (A3),D0                         | D0 = exponent+sign word
-        BPL.B   FP68K_SKIP_3                    | positive -> skip sign
-        BSET    #0x7,D6                         | record negative sign
-        BCLR    #0xF,D0                         | clear sign from exponent
-FP68K_SKIP_3:
-        MOVE.L  PORTBITS(A3),D4                 | D4 = mantissa high 32 bits
-        MOVE.L  0x6(A3),D5                      | D5 = mantissa low 32 bits
-        CMPI    #0x7FFF,D0                      | max exponent (NaN/Inf)?
-        BEQ.B   FP68K_OK_2                      | yes -> handle special
-        TST.L   D4                              | explicit integer bit set?
-        BMI.B   FP68K_OK                        | yes, already normalized ->
-FP68K_EMPTY_2:
-        TST.L   D4                              | high mantissa zero?
-        BNE.B   FP68K_NO_6                      | no, denormalized ->
-        TST.L   D5                              | low mantissa zero?
-        BNE.B   FP68K_NO_6                      | no, denormalized ->
-| both mantissa halves zero = true zero
-FP68K_EMPTY_3:
-        SUBA.L  A4,A4                           | exponent = 0
-        ADDQ.W  #0x2,D3                         | class = zero
-        RTS                                     | return to caller
-
+| FP68K_UNPEXT: extended -- split off the sign, check for
+| $7FFF (infinity, NaN), zero and unnormalized values.
+FP68K_UNPEXT:
+        MOVE.W  (A3),D0                         | D0 = sign and exponent
+        BPL.B   FP68K_UNPEXT_13                 | positive ->
+        BSET    #0x7,D6                         | minus sign
+        BCLR    #0xF,D0                         | D0 = exponent
+FP68K_UNPEXT_13:
+        MOVE.L  0x2(A3),D4                      | D4 = significand, high 32 bits (with the integer bit)
+        MOVE.L  0x6(A3),D5                      | D5 = low 32 bits
+        CMPI.W  #0x7FFF,D0                      | maximum exponent?
+        BEQ.B   FP68K_UNPNIN                    | yes: infinity or NaN (UNPNIN) ->
+        TST.L   D4                              | integer bit set?
+        BMI.B   FP68K_UNPNRM                    | yes: normalized (UNPNRM) ->
+| FP68K_UNPZUN: zero or unnormalized?
+FP68K_UNPZUN:
+        TST.L   D4                              | high bits 0?
+        BNE.B   FP68K_UNPUNR                    | no: unnormalized ->
+        TST.L   D5                              | low bits 0?
+        BNE.B   FP68K_UNPUNR                    | no: unnormalized ->
+| FP68K_UNP0: zero -- A4 = 0, D3 += 2.
+FP68K_UNP0:
+        SUBA.L  A4,A4                           | exponent 0
+        ADDQ.W  #0x2,D3                         | number case: zero
+        RTS                                     | return: operand is zero (A4 = 0, D3 += 2)
 | ----------------------------------------------------------
-|
-| FP68K_NO_6: denormalized number - left-shift until MSB set
-|
-FP68K_NO_6:
-        BSet    #0x1F,D3                        | mark as denormal
-FP68K_LOOP:
-        SUBQ.W  #0x1,D0                         | decrement exponent
-        ADD.L   D5,D5                           | left-shift mantissa
-        ADDX.L  D4,D4                           | propagate carry to high
-        BPL.B   FP68K_LOOP                      | loop until MSB set
-FP68K_OK:
-        EXT.L   D0                              | sign-extend exponent to long
-        MOVE.L  D0,A4                           | store exponent in A4
-        RTS                                     | return to caller
-
+| FP68K_UNPUNR: unnormalized -- mark D3 bit 31, normalize
+| (FP68K_UNPCUNR, Apple UNPCUNR, also the entry for integers).
+FP68K_UNPUNR:
+        BSET    #0x1F,D3                        | mark the operand unnormalized (for CLASS)
+FP68K_UNPCUNR:
+        SUBQ.W  #0x1,D0                         | exponent - 1 ...
+        ADD.L   D5,D5                           | ... significand * 2
+        ADDX.L  D4,D4                           | (high half)
+        BPL.B   FP68K_UNPCUNR                   | until the leading bit is set
+FP68K_UNPNRM:
+        EXT.L   D0                              | 32-bit exponent ...
+        MOVEA.L D0,A4                           | ... in A4
+        RTS                                     | return: normalized operand, exponent in A4 (UNPNRM)
 | ----------------------------------------------------------
-|
-| FP68K_OK_2
-|
-| FP68K_OK_2: exponent = $7FFF - classify as NaN or infinity
-FP68K_OK_2:
-        MOVE    #0x7FFF,A4                      | store max exponent
-        BCLR    #0x1F,D4                        | clear explicit integer bit
-        TST.L   D4                              | mantissa high nonzero?
-        BNE.B   FP68K_DONE                      | yes -> NaN
-        TST.L   D5                              | mantissa low nonzero?
-        BNE.B   FP68K_DONE                      | yes -> NaN
-        ADDQ.W  #0x4,D3                         | class = infinity (D3 += 4)
-        RTS                                     | return to caller
-
+| FP68K_UNPNIN: maximum exponent -- infinity (D3 += 4) or NaN.
+FP68K_UNPNIN:
+        MOVEA.W #0x7FFF,A4                      | exponent $7FFF
+        BCLR    #0x1F,D4                        | ignore the integer bit
+        TST.L   D4                              | any significand bits?
+        BNE.B   FP68K_UNPNAN                    | yes: NaN ->
+        TST.L   D5                              | (low half)
+        BNE.B   FP68K_UNPNAN                    | NaN ->
+        ADDQ.W  #0x4,D3                         | number case: infinity
+        RTS                                     | return: operand is infinite (A4 = $7FFF, D3 += 4)
 | ----------------------------------------------------------
-|
-| FP68K_DONE: NaN detected - set signaling/quiet flag
-|
-FP68K_DONE:
-        BSet    #0x1E,D4                        | test/set quiet NaN bit
-        BNE.B   FP68K_CONT_14                   | already quiet NaN ->
-        BSET    #0x8,D6                         | flag signaling NaN (invalid)
-FP68K_CONT_14:
-        ADDQ.W  #0x2,D2                         | class = NaN (D2 += 2)
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| FP68K_CONT_15: unpack IEEE single (32-bit) to internal extended
-| Extracts sign, 8-bit exponent, 23-bit mantissa
-|
-FP68K_CONT_15:
-        CLR.L   D0                              | clear exponent accumulator
-        MOVE.L  (A3),D4                         | load 32-bit single value
-        ADD.B   D6,D6                           | shift sign flag left
-        ADD.L   D4,D4                           | shift out sign bit into X
-        ROXR.B  #0x1,D6                         | capture sign in D6 bit 7
-        ROL.L   #0x8,D4                         | rotate exponent to low byte
+| FP68K_UNPNAN: NaN -- set the quiet bit (bit 30); if it was
+| clear the NaN was signaling: invalid. D2 += 2.
+FP68K_UNPNAN:
+        BSET    #0x1E,D4                        | quiet bit (bit 30): test and set
+        BNE.B   FP68K_UNPNAN_1                  | was set: a quiet NaN ->
+        BSET    #0x8,D6                         | signaling NaN: invalid (ERRI)
+FP68K_UNPNAN_1:
+        ADDQ.W  #0x2,D2                         | NaN case
+        RTS                                     | return: operand is a NaN, made quiet (D2 += 2)
+| FP68K_UNPSGL: single -- sign to D6, 8-bit exponent
+| rebiased by $3F80, implicit leading 1; exponent 0 is zero or denormal,
+| $FF infinity or NaN.
+FP68K_UNPSGL:
+        CLR.L   D0                              | D0 := 0: receives the 8-bit exponent of the single (UNPSGL)
+        MOVE.L  (A3),D4                         | D4 = the single
+        ADD.B   D6,D6                           | make room for the sign in D6 bit 0 ...
+        ADD.L   D4,D4                           | sign of the single into X
+        ROXR.B  #0x1,D6                         | ... and into D6 bit 7
+        ROL.L   #0x8,D4                         | exponent to the low byte
         MOVE.B  D4,D0                           | D0 = biased exponent
-        BEQ.B   FP68K_EMPTY_4                   | zero exponent -> denorm/zero
-        MOVE.B  #0x1,D4                         | set implicit leading 1 bit
-        ROR.L   #0x1,D4                         | position mantissa MSB at bit 31
-        CMPI.B  #0xFF,D0                        | max exponent?
-        BEQ.B   FP68K_OK_2                      | yes -> NaN or infinity
-        ADDI    #0x3F80,D0                      | rebias: single(127) -> ext(16383)
-        BRA.B   FP68K_OK                        | -> store exponent
-
+        BEQ.B   FP68K_UNPSGL_21                 | 0: zero or denormal ->
+        MOVE.B  #0x1,D4                         | replace the exponent by the implicit 1 ...
+        ROR.L   #0x1,D4                         | ... and rotate it to bit 31
+        CMPI.B  #0xFF,D0                        | maximum exponent?
+        BEQ.B   FP68K_UNPNIN                    | yes: infinity or NaN ->
+        ADDI.W  #0x3F80,D0                      | rebias: $7F -> $3FFF
+        BRA.B   FP68K_UNPNRM                    | -> UNPNRM
+| ----------------------------------------------------------
+| FP68K_UNPSGL_21 (Apple UNPSGL @21): single with exponent 0 -- zero or
+| denormal (no implicit bit, exponent $3F81).
+FP68K_UNPSGL_21:
+        MOVE.W  #0x3F81,D0                      | exponent of a single denormal
+        ROR.L   #0x1,D4                         | align the fraction (no implicit 1)
+        BRA.B   FP68K_UNPZUN                    | -> UNPZUN: zero or unnormalized
+| ----------------------------------------------------------
+| FP68K_UNPDBL: double -- sign to D6, align the 52-bit
+| fraction left by 11, 11-bit exponent rebiased by $3C00, implicit 1.
+FP68K_UNPDBL:
+        MOVE.L  (A3),D4                         | D4 = high half of the double
+        BPL.B   FP68K_UNPDBL_25                 | positive ->
+        BSET    #0x7,D6                         | minus sign
+FP68K_UNPDBL_25:
+        MOVE.L  0x4(A3),D5                      | D5 = low half
+        ROL.L   #0x8,D5                         | low half: rotate left by 11 ...
+        ROL.L   #0x3,D5                         | ...
+        ROL.L   #0x8,D4                         | high half: rotate left by 12: exponent to the low bits
+        ROL.L   #0x4,D4                         | ...
+        MOVE.W  D4,D0                           | D0 = exponent (with extra bits)
+        LSR.L   #0x1,D4                         | make room for the leading bit
+        ANDI.W  #0xF800,D4                      | clear the low 11 bits
+        MOVE.W  D5,D1                           | the 11 bits rotated out of the low half ...
+        ANDI.W  #0x7FF,D1                       | ...
+        OR.W    D1,D4                           | ... go into the high half
+        ANDI.W  #0xF800,D5                      | and are cleared in the low half
+        ANDI.W  #0x7FF,D0                       | D0 = 11-bit exponent
+        BNE.B   FP68K_UNPDBL_31                 | not 0 ->
+        MOVE.W  #0x3C01,D0                      | exponent of a double denormal
+        BRA.W   FP68K_UNPZUN                    | -> UNPZUN: zero or unnormalized
+| ----------------------------------------------------------
+| FP68K_UNPDBL_31 (Apple UNPDBL @31): nonzero exponent -- infinity/NaN or
+| normalized.
+FP68K_UNPDBL_31:
+        CMPI.W  #0x7FF,D0                       | maximum exponent?
+        BEQ.W   FP68K_UNPNIN                    | yes: infinity or NaN ->
+        BSET    #0x1F,D4                        | the implicit leading 1
+        ADDI.W  #0x3C00,D0                      | rebias: $3FF -> $3FFF
+        BRA.W   FP68K_UNPNRM                    | -> UNPNRM
+| FP68K_INVALIDOP -- target of all invalid operations: signal
+| invalid, deliver a quiet NaN with the code byte in D0 (NANADD 2, NANDIV
+| 4, NANMUL 8, NANREM 9, NANSQRT 1, ...).
+FP68K_INVALIDOP:
+        BSET    #0x8,D6                         | signal invalid (ERRI)
+        SWAP.W  D0                              | the NaN code byte to bits 16-23
+        BSET    #0x1E,D0                        | quiet NaN
+        MOVE.L  D0,D4                           | significand high half
+        CLR.L   D5                              | D5 := 0: low half of the new NaN (INVALIDOP)
+        MOVEA.W #0x7FFF,A4                      | NaN exponent
+        BRA.B   FP68K_NANSRC                    | -> NANCOERCE
+| ----------------------------------------------------------
+| FP68K_NANS -- at least one NaN operand: one NaN is the
+| result; of two the one with the larger code byte (the src if equal).
+FP68K_NANS:
+        CMPI.W  #0x2,D2                         | only the src a NaN?
+        BEQ.B   FP68K_NANSRC                    | yes: it is in D4:D5 already (NANSRC) ->
+        CMPI.W  #0x4,D2                         | only the dst?
+        BEQ.B   FP68K_NANDST                    | yes: NANDST ->
+        MOVE.L  #0xFF0000,D0                    | both: mask of the code byte
+        MOVE.L  A1,D1                           | dst high half
+        AND.L   D0,D1                           | dst code
+        AND.L   D4,D0                           | src code
+        CMP.L   D0,D1                           | dst code - src code
+        BLE.B   FP68K_NANSRC                    | not larger: the src NaN ->
+| FP68K_NANDST: the dst NaN is the result.
+FP68K_NANDST:
+        ROL.B   #0x1,D6                         | the dst sign to bit 7
+        MOVEA.L A3,A4                           | dst exponent
+        MOVE.L  A2,D5                           | dst significand
+        MOVE.L  A1,D4                           | (high half)
+| FP68K_NANSRC (Apple NANSRC/NANCOERCE) -- fit the NaN to the destination:
+| an integer result gets the largest negative integer (invalid), a
+| compare the result unordered, CLASS its class, a float result the NaN
+| chopped to the format.
+FP68K_NANSRC:
+        BTST    #0x1A,D6                        | integer result (DSTINT: int16, int32, comp)?
+        BEQ.B   FP68K_NANFLOAT                  | no: NANFLOAT ->
+        CLR.L   D4                              | integer result of a NaN: D4 := 0 (int16 $8000, int32 $80000000, comp $80000000:0)
+        MOVEQ.L #0x1,D5                         | D5 := $80000000 ...
+        ROR.L   #0x1,D5                         | ...
+        BTST    #0x18,D6                        | dst format low bit (5 = int32)?
+        BNE.B   FP68K_NANCOERCE_21              | int32: $80000000 ->
+        BTST    #0x19,D6                        | middle bit (6 = comp)?
+        BNE.B   FP68K_NANCOERCE_41              | comp ->
+        SWAP.W  D5                              | int16: $00008000
+FP68K_NANCOERCE_21:
+        BSET    #0x8,D6                         | invalid
+        RTS                                     | return: int16/int32 NaN result in D5, invalid signaled
+| ----------------------------------------------------------
+| FP68K_NANCOERCE_41 (Apple NANCOERCE @41): comp result -- $80000000:00000000.
+FP68K_NANCOERCE_41:
+        EXG     D4,D5                           | D4:D5 = $80000000:00000000
+        RTS                                     | return: comp NaN $80000000:00000000 in D4:D5
+| ----------------------------------------------------------
+| FP68K_NANFLOAT: a floating result, or none (CMP, CLASS).
+FP68K_NANFLOAT:
+        BTST    #0x15,D6                        | a floating result (DSTOUT)?
+        BNE.B   FP68K_FPNANOUT                  | yes: FPNANOUT ->
+        BTST    #0x14,D6                        | opcode high bit (OPHIBIT): 0 compare, 1 class
+        BNE.B   FP68K_NANFLOAT_5                | CLASS ->
+        MOVEQ.L #0x2,D0                         | compare: CMPU ($02), unordered
+        BRA.W   FP68K_CMPFIN                    | -> CMPFIN
+| ----------------------------------------------------------
+| FP68K_NANFLOAT_5 (Apple NANFLOAT @5): CLASS of a NaN -- 1 signaling (invalid
+| was set by UNPACK: clear it again), 2 quiet.
+FP68K_NANFLOAT_5:
+        MOVEQ.L #0x1,D0                         | class 1: signaling NaN ...
+        BCLR    #0x8,D6                         | ... if UNPACK signaled invalid (clear it)
+        BNE.B   FP68K_NANFLOAT_7                | yes ->
+        ADDQ.W  #0x1,D0                         | class 2: quiet NaN
+FP68K_NANFLOAT_7:
+        BRA.W   FP68K_CLASSFIN                  | -> CLASSFIN
+| ----------------------------------------------------------
+| FP68K_FPNANOUT: chop the NaN to the precision of the result;
+| a NaN chopped to all-zero becomes code 21 (NANZERO).
+FP68K_FPNANOUT:
+        BTST    #0x1F,D6                        | single result (SPREC)?
+        BEQ.B   FP68K_FPNANOUT_1                | no ->
+        MOVEQ.L #0x0,D5                         | single: no low half ...
+        MOVE.B  D5,D4                           | ... and only 24 bits
+        BRA.B   FP68K_FPNANOUT_2                | -> check for zero
+| ----------------------------------------------------------
+| FP68K_FPNANOUT_1 (Apple FPNANOUT @1): double result?
+FP68K_FPNANOUT_1:
+        BTST    #0x1E,D6                        | double result (DPREC)?
+        BEQ.B   FP68K_FPNANOUT_2                | no: extended ->
+        ANDI.W  #0xF800,D5                      | double: 53 bits
+FP68K_FPNANOUT_2:
+        MOVE.L  D4,D0                           | significand without ...
+        BCLR    #0x1E,D0                        | ... the quiet bit ...
+        OR.L    D5,D0                           | ... all zero?
+        BNE.B   FP68K_FPNANOUT_3                | no ->
+        MOVEQ.L #0x15,D4                        | NaN code 21 (NANZERO) ...
+        SWAP.W  D4                              | ... in bits 16-23
+        BSET    #0x1E,D4                        | quiet
+FP68K_FPNANOUT_3:
+        RTS                                     | return: NaN cut to the destination precision, never all-zero (FPNANOUT)
+| ----------------------------------------------------------
+| FP68K_RDSTSGN: result := the dst operand with its sign;
+| FP68K_RDST: the dst without its sign; FP68K_RSRCSGN (RSRC):
+| the src, which is in D4:D5/A4 already. Case routines for "the result
+| is one of the operands".
+FP68K_RDSTSGN:
+        ADD.B   D6,D6                           | the dst sign (bit 6) to bit 7
+FP68K_RDST:
+        MOVE.L  A1,D4                           | result := the dst significand ...
+        MOVE.L  A2,D5                           | ...
+        MOVEA.L A3,A4                           | ... and exponent
+FP68K_RSRCSGN:
+        RTS                                     | return (RSRC: the src is the result already)
+| ----------------------------------------------------------
+| FP68K_RTSHIFT -- shift D4:D5 right D0 bits (at most 66)
+| into D7; the bits shifted out of D7 are sticky in D7 bit 0.
+| FP68K_QRTSHIFT: without the limit.
+FP68K_RTSHIFT:
+        CMPI.W  #0x42,D0                        | more than 66 bits?
+        BLS.B   FP68K_QRTSHIFT                  | no ->
+        MOVE.W  #0x42,D0                        | shift 66 bits: everything sticky
+FP68K_QRTSHIFT:
+        LSR.L   #0x1,D4                         | QRTSHIFT: shift a 0 in
+        ROXR.L  #0x1,D5                         | through the low half
+        ROXR.W  #0x1,D7                         | into the round bits
+        SCS.B   D1                              | D1 = $FF if a bit fell out of D7
+        OR.B    D1,D7                           | keep it sticky
+        SUBQ.W  #0x1,D0                         | count
+        BNE.B   FP68K_QRTSHIFT                  | more ->
+        RTS                                     | return: D4:D5 shifted right, lost bits sticky in D7 (RTSHIFT)
+| ----------------------------------------------------------
+| FP68K_ZNORMCOERCE -- a zero result keeps exponent 0 and
+| is never coerced; anything else is normalized and coerced.
+FP68K_ZNORMCOERCE:
+        TST.L   D4                              | high half 0?
+        BNE.B   FP68K_NORMCOERCE                | no ->
+        TST.L   D5                              | low half 0?
+        BNE.B   FP68K_NORMCOERCE                | no ->
+        TST.W   D7                              | round bits 0 too?
+        BNE.B   FP68K_NORMCOERCE                | no ->
+        SUBA.L  A4,A4                           | zero: exponent 0
+        RTS                                     | return: zero result (A4 = 0), no coercion (ZNORMCOERCE)
+| ----------------------------------------------------------
+| FP68K_NORMCOERCE: normalize a nonzero D4:D5:D7 (shift left,
+| exponent - 1), then COERCE.
+| Called by: FP68K_ZNORMCOERCE, FP68K_SUBMAG_7, FP68K_BOTH32
+FP68K_NORMCOERCE:
+        TST.L   D4                              | leading 1?
+        BRA.B   FP68K_NORMCOERCE_2              | -> test
 | ----------------------------------------------------------
 |
-| FP68K_EMPTY_4
+| FP68K_NORMCOERCE_1: normalize loop - left-shift until MSB set
 |
-FP68K_EMPTY_4:
-        MOVE    #0x3F81,D0                      | min single exponent (rebiased)
-        ROR.L   #0x1,D4                         | shift mantissa right (no implicit 1)
-        BRA.B   FP68K_EMPTY_2                   | -> check for zero/denorm
-
+FP68K_NORMCOERCE_1:
+        SUBQ.L  #0x1,A4                         | exponent - 1
+        ADD.W   D7,D7                           | shift D4:D5:D7 left
+        ADDX.L  D5,D5                           | ...
+        ADDX.L  D4,D4                           | ...
+FP68K_NORMCOERCE_2:
+        BPL.B   FP68K_NORMCOERCE_1              | until normalized, then COERCE
+| FP68K_COERCE -- round the result D4:D5/A4 (round bits in
+| D7) to the precision of the operation: single and double have their
+| own sequences (SCOERCE, DCOERCE); for extended: underflow check
+| (UFLOW, threshold exponent 0), round (ROUND), overflow check (OFLOW,
+| threshold $7FFE; "huge" = the largest finite value when the rounding
+| direction demands it instead of infinity).
+| Called by: FP68K_ADDNUM_15, FP68K_ADDD0, FP68K_DIVNUM_9, FP68K_CVT2E, FP68K_COMINT (and 2 more)
+FP68K_COERCE:
+        TST.L   D6                              | single precision (bit 31)?
+        BMI.W   FP68K_SCOERCE                   | yes: SCOERCE ->
+        BTST    #0x1E,D6                        | double precision?
+        BNE.W   FP68K_DCOERCE                   | yes: DCOERCE ->
+        SUBA.L  A3,A3                           | extended underflow threshold: exponent 0
+        BSR.B   FP68K_UFLOW                     | UFLOW
+        CLR.L   D1                              | D1:D2 = 0:1: rounding increment = LSB of an extended
+        MOVEQ.L #0x1,D2                         | (low half 1)
+        BTST    #0x0,D5                         | Z = NOT LSB for ROUND
+        BSR.B   FP68K_ROUND                     | ROUND
+        MOVEA.W #0x7FFE,A3                      | extended overflow threshold
+        BSR.B   FP68K_OFLOW                     | OFLOW
+        BEQ.B   FP68K_COERCE_1                  | EQ: keep the value (or infinity) ->
+        MOVEA.L A3,A4                           | huge: the largest finite extended
+        MOVEQ.L #-0x1,D4                        | significand all ones
+        MOVE.L  D4,D5                           | (low half)
+FP68K_COERCE_1:
+        RTS                                     | return: rounded extended in D4:D5/A4 (COERCE)
 | ----------------------------------------------------------
-|
-| FP68K_CONT_16: unpack IEEE double (64-bit) to internal extended
-| Extracts sign, 11-bit exponent, 52-bit mantissa
-|
-FP68K_CONT_16:
-        MOVE.L  (A3),D4                         | load double high word
-        BPL.B   FP68K_SKIP_4                    | positive -> skip sign
-        BSET    #0x7,D6                         | record negative sign
-FP68K_SKIP_4:
-        MOVE.L  0x4(A3),D5                      | load double low word
-        ROL.L   #0x8,D5                         | rotate mantissa bits
-        ROL.L   #0x3,D5                         | align low mantissa
-        ROL.L   #0x8,D4                         | rotate high word
-        ROL.L   #0x4,D4                         | align high mantissa
-        MOVE    D4,D0                           | save for exponent extraction
-        LSR.L   #0x1,D4                         | shift mantissa right
-        ANDI    #-0x800,D4                      | mask high mantissa bits
-        MOVE    D5,D1                           | get low bits for merge
-        ANDI    #0x7FF,D1                       | isolate bits to merge up
-        OR      D1,D4                           | combine into high mantissa
-        ANDI    #-0x800,D5                      | mask low mantissa bits
-        ANDI    #0x7FF,D0                       | extract 11-bit exponent
-        BNE.B   FP68K_CONT_17                   | nonzero -> normal or special
-        MOVE    #0x3C01,D0                      | min double exponent (rebiased)
-        BRA     FP68K_EMPTY_2                   | -> check for zero/denorm
-
+| FP68K_UFLOW -- if the exponent A4 is below the threshold
+| A3, signal underflow and denormalize: shift right to exponent A3. (The
+| signal is withdrawn by ROUND if the result is exact.)
+FP68K_UFLOW:
+        MOVE.L  A3,D0                           | threshold ...
+        SUB.L   A4,D0                           | ... - exponent
+        BGT.B   FP68K_UFLOW_1                   | below the threshold: tiny ->
+        RTS                                     | not tiny: return
 | ----------------------------------------------------------
-|
-| FP68K_CONT_17
-|
-FP68K_CONT_17:
-        CMPI    #0x7FF,D0                       | max double exponent?
-        BEQ     FP68K_OK_2                      | yes -> NaN or infinity
-        BSET    #0x1F,D4                        | set implicit leading 1 bit
-        ADDI    #0x3C00,D0                      | rebias: double(1023) -> ext(16383)
-        BRA     FP68K_OK                        | -> store exponent
-
+| FP68K_UFLOW_1 (Apple UFLOW @1): tiny result.
+FP68K_UFLOW_1:
+        BSET    #0x9,D6                         | signal underflow (ERRU)
+        MOVEA.L A3,A4                           | exponent := threshold
+        BRA.B   FP68K_RTSHIFT                   | shift right threshold - exponent bits (RTSHIFT)
 | ----------------------------------------------------------
-|
-| FP68K_OK_3: construct NaN result with payload from D0
-|
-FP68K_OK_3:
-        BSet    #0x8,D6                         | flag invalid operation
-        SWAP    D0                              | payload to high word
-        BSET    #0x1E,D0                        | set quiet NaN bit
-        MOVE.L  D0,D4                           | mantissa high = NaN payload
-        CLR.L   D5                              | mantissa low = 0
-        MOVE    #0x7FFF,A4                      | exponent = NaN
-        BRA.B   FP68K_OK_6                      | -> NaN result path
-
+| FP68K_ROUND -- round D4:D5 by the guard and sticky bits
+| in D7.W; Z = NOT LSB on entry (BTST by the caller), D1:D2 = the
+| increment for one LSB. Exact: clear the underflow signal; else signal
+| inexact and round by the direction in the environment.
+FP68K_ROUND:
+        SNE.B   D0                              | D0 = $FF if the LSB is 1
+        TST.W   D7                              | any round or sticky bits?
+        BNE.B   FP68K_ROUND_1                   | yes: inexact ->
+        BCLR    #0x9,D6                         | exact: no underflow signal (clear ERRU)
+        RTS                                     | return: exact, nothing to round (ROUND)
 | ----------------------------------------------------------
-|
-| FP68K_OK_4: NaN propagation - select NaN with largest payload
-|
-FP68K_OK_4:
-        CMPI    #0x2,D2                         | only source is NaN?
-        BEQ.B   FP68K_OK_6                      | yes, use source NaN as result
-        CMPI    #0x4,D2                         | only dest is NaN?
-        BEQ.B   FP68K_OK_5                      | yes, use dest NaN ->
-        MOVE.L  #0xFF0000,D0                    | mask for NaN payload comparison
-        MOVE.L  A1,D1                           | D1 = dest mantissa high
-        AND.L   D0,D1                           | isolate dest NaN payload
-        AND.L   D4,D0                           | isolate source NaN payload
-        CMP.L   D0,D1                           | compare payloads
-        BLE.B   FP68K_OK_6                      | source >= dest, keep source
-FP68K_OK_5:
-        ROL.B   #0x1,D6                         | swap sign to match dest
-        MOVE.L  A3,A4                           | use dest exponent
-        MOVE.L  A2,D5                           | use dest mantissa low
-        MOVE.L  A1,D4                           | use dest mantissa high
-FP68K_OK_6:
-        BTst    #0x1A,D6                        | convert-to-integer operation?
-        BEQ.B   FP68K_NO_7                      | no -> normal NaN result
-        CLR.L   D4                              | clear mantissa high
-        MOVEQ.L #0x1,D5                         | prepare integer NaN result
-        ROR.L   #0x1,D5                         | D5 = $80000000
-        BTST    #0x18,D6                        | target is 16-bit int?
-        BNE.B   FP68K_EXIT_7                    | yes -> return $8000
-        BTST    #0x19,D6                        | target is 32-bit long?
-        BNE.B   FP68K_EXIT_8                    | yes -> return $80000000
-        SWAP    D5                              | D5 = $00008000 for 16-bit
-FP68K_EXIT_7:
-        BSet    #0x8,D6                         | flag invalid operation
-        RTS                                     | return to caller
-
+| FP68K_ROUND_1 (Apple ROUND @1): inexact -- by rounding direction.
+FP68K_ROUND_1:
+        BSET    #0xC,D6                         | signal inexact (ERRX)
+        BTST    #0x5,(A0)                       | rounding direction low bit (RNDLO)?
+        BEQ.B   FP68K_ROUND_5                   | 00 nearest or 10 downward ->
+        BTST    #0x6,(A0)                       | high bit (RNDHI)?
+        BEQ.B   FP68K_ROUND_3                   | 01 upward ->
+        RTS                                     | 11 toward zero: truncated already
 | ----------------------------------------------------------
-|
-| FP68K_EXIT_8
-|
-| FP68K_EXIT_8: comp NaN result - return $80000000:00000000
-FP68K_EXIT_8:
-        exg     D4,D5                           | swap for 64-bit comp NaN
-        RTS                                     | return to caller
-
+| FP68K_ROUND_3 (Apple ROUND @3): upward -- round up if positive.
+FP68K_ROUND_3:
+        TST.B   D6                              | positive?
+        BPL.B   FP68K_ROUNDUP                   | yes: round up (ROUNDUP) ->
+        RTS                                     | negative: truncate
 | ----------------------------------------------------------
-|
-| FP68K_NO_7: NaN result post-processing - handle pack/return
-|
-FP68K_NO_7:
-        BTst    #0x15,D6                        | need to pack result?
-        BNE.B   FP68K_OK_8                      | yes -> truncate NaN for format
-        BTST    #0x14,D6                        | compare operation?
-        BNE.B   FP68K_EXIT_9                    | yes -> return unordered
-        MOVEQ.L #0x2,D0                         | condition = unordered
-        BRA     FP68K_CONT_71                   | -> set condition code
-
+| FP68K_ROUND_5 (Apple ROUND @5): to nearest or downward.
+FP68K_ROUND_5:
+        BTST    #0x6,(A0)                       | RNDHI?
+        BNE.B   FP68K_ROUND_7                   | 10 downward ->
+        CMPI.W  #0x8000,D7                      | nearest: the rest vs one half
+        BCC.B   FP68K_ROUND_51                  | at least one half ->
+        RTS                                     | below one half: truncate
 | ----------------------------------------------------------
-|
-| FP68K_EXIT_9: NaN in compare - return unordered, flag if signaling
-|
-FP68K_EXIT_9:
-        MOVEQ.L #0x1,D0                         | assume ordered compare
-        BCLR    #0x8,D6                         | was signaling NaN?
-        BNE.B   FP68K_OK_7                      | yes -> flag invalid
-        ADDQ.W  #0x1,D0                         | no -> unordered (D0 = 2)
-FP68K_OK_7:
-        BRA     FP68K_NO_33                     | -> store class result
-
+| FP68K_ROUND_51 (Apple ROUND @51): at least one half -- more: up; exactly
+| one half: up only if the LSB is 1 (to even).
+FP68K_ROUND_51:
+        BHI.B   FP68K_ROUNDUP                   | above one half: round up ->
+        TST.B   D0                              | exactly one half: LSB 1?
+        BNE.B   FP68K_ROUNDUP                   | yes: up to even ->
+        RTS                                     | LSB 0: even already
 | ----------------------------------------------------------
-|
-| FP68K_OK_8: truncate NaN mantissa for target format (single/double)
-|
-FP68K_OK_8:
-        BTst    #0x1F,D6                        | single precision target?
-        BEQ.B   FP68K_NO_8                      | no -> check double
-        MOVEQ.L #0x0,D5                         | clear low mantissa
-        MOVE.B  D5,D4                           | clear low byte of high mantissa
-        BRA.B   FP68K_NO_9                      | -> ensure nonzero payload
-
+| FP68K_ROUND_7 (Apple ROUND @7): downward -- round up the magnitude if
+| negative.
+FP68K_ROUND_7:
+        TST.B   D6                              | negative?
+        BMI.B   FP68K_ROUNDUP                   | yes: round the magnitude up ->
+        RTS                                     | positive: truncate
 | ----------------------------------------------------------
-|
-| FP68K_NO_8: truncate NaN for double precision
-|
-FP68K_NO_8:
-        BTst    #0x1E,D6                        | double precision target?
-        BEQ.B   FP68K_NO_9                      | no -> extended, no truncation
-        ANDI    #-0x800,D5                      | mask low 11 bits (double limit)
-FP68K_NO_9:
-        MOVE.L  D4,D0                           | copy mantissa high
-        BCLR    #0x1E,D0                        | clear quiet NaN bit for test
-        OR.L    D5,D0                           | combine with low mantissa
-        BNE.B   FP68K_DONE_2                    | payload nonzero -> done
-        MOVEQ.L #0x15,D4                        | default NaN payload = 21
-        SWAP    D4                              | shift to high word
-        BSET    #0x1E,D4                        | set quiet NaN bit
-FP68K_DONE_2:
-        RTS                                     | return to caller
-
+| FP68K_ROUNDUP -- add the increment D1:D2; a carry out shifts
+| right and bumps the exponent; RNDINC records the increment.
+FP68K_ROUNDUP:
+        BSET    #0x7,0x1(A0)                    | RNDINC: the last rounding went up
+        ADD.L   D2,D5                           | add the increment D1:D2
+        ADDX.L  D1,D4                           | (high half)
+        BCC.B   FP68K_ROUNDUP_9                 | no carry out ->
+        ROXR.L  #0x1,D4                         | carry: shift it back in
+        ADDQ.L  #0x1,A4                         | exponent + 1
+FP68K_ROUNDUP_9:
+        RTS                                     | return: significand rounded up, carry into the exponent (ROUNDUP)
 | ----------------------------------------------------------
-|
-| FP68K_CONT_18
-|
-| FP68K_CONT_18/FP68K_CONT_19: propagate source operand as result (identity op)
-FP68K_CONT_18:
-        ADD.B   D6,D6                           | use source sign (shift left)
-FP68K_CONT_19:
-        MOVE.L  A1,D4                           | result = source mantissa high
-        MOVE.L  A2,D5                           | result = source mantissa low
-        MOVE.L  A3,A4                           | result = source exponent
-FP68K_CONT_20:
-        RTS                                     | identity: return operand as-is
-
+| FP68K_OFLOW -- if the exponent A4 is above the threshold
+| A3: signal overflow and inexact, result infinity; returns EQ to keep
+| infinity, NE if the largest finite value ("huge") must be stored
+| instead (toward zero, or directed away from the sign).
+FP68K_OFLOW:
+        CMPA.L  A4,A3                           | threshold - exponent
+        BLT.B   FP68K_OFLOW_1                   | above the threshold: overflow ->
+        CLR.W   D0                              | EQ: no overflow
+        RTS                                     | return EQ: no overflow (OFLOW)
+FP68K_OFLOW_1:
+        BSET    #0xA,D6                         | signal overflow (ERRO)
+        BSET    #0xC,D6                         | and inexact
+        MOVEA.W #0x7FFF,A4                      | infinity, with the sign of the result
+        CLR.L   D4                              | D4 := 0: significand of infinity
+        MOVE.L  D4,D5                           | (low half)
+        MOVE.B  (A0),D1                         | rounding direction ...
+        ANDI.B  #0x60,D1                        | ... bits 5-6
+        BNE.B   FP68K_OFLOW_2                   | directed ->
+        RTS                                     | nearest: return EQ, infinity
 | ----------------------------------------------------------
-|
-| FP68K_CONT_21: right-shift mantissa D4:D5:D7 by D0 bits
-| Shifts out bits are OR'd into D7 for rounding decisions
-|
-FP68K_CONT_21:
-        CMPI    #0x42,D0                        | clamp shift count to 66 max
-        BLS.B   FP68K_DONE_3                    | within range ->
-        MOVE    #0x42,D0                        | cap at 66 bits
-FP68K_DONE_3:
-        LSR.L   #0x1,D4                         | shift mantissa high right
-        ROXR.L  #0x1,D5                         | propagate through mantissa low
-        ROXR    #0x1,D7                         | shift into guard bits
-        SCS.B   D1                              | D1 = $FF if bit shifted out
-        OR.B    D1,D7                           | accumulate sticky bit
-        SUBQ.W  #0x1,D0                         | decrement shift count
-        BNE.B   FP68K_DONE_3                    | loop until done
-        RTS                                     | return to caller
-
+| FP68K_OFLOW_2 (Apple OFLOW @2): directed rounding.
+FP68K_OFLOW_2:
+        CMPI.B  #0x60,D1                        | toward zero?
+        BNE.B   FP68K_OFLOW_4                   | no: upward or downward ->
+        TST.B   D1                              | NE: huge
+        RTS                                     | return NE: toward zero gives the largest finite value
 | ----------------------------------------------------------
-|
-| FP68K_CONT_22: normalize result - check for zero, then left-shift to MSB
-|
-FP68K_CONT_22:
-        TST.L   D4                              | mantissa high nonzero?
-        BNE.B   FP68K_OK_9                      | yes -> normalize
-        TST.L   D5                              | mantissa low nonzero?
-        BNE.B   FP68K_OK_9                      | yes -> normalize
-        TST     D7                              | guard bits nonzero?
-        BNE.B   FP68K_OK_9                      | yes -> normalize
-        SUBA.L  A4,A4                           | all zero: result is zero
-        RTS                                     | return to caller
-
+| FP68K_OFLOW_4 (Apple OFLOW @4): upward or downward -- depends on the sign.
+FP68K_OFLOW_4:
+        TST.B   D6                              | sign of the result
+        BMI.B   FP68K_OFLOW_5                   | negative ->
+        CMPI.B  #0x20,D1                        | positive: EQ (infinity) if upward, else NE (huge)
+        RTS                                     | return
 | ----------------------------------------------------------
-|
-| FP68K_OK_9
-|
-FP68K_OK_9:
-        TST.L   D4                              | test mantissa high
-        BRA.B   FP68K_CONT_23                   | -> check if normalized
-
+| FP68K_OFLOW_5 (Apple OFLOW @5): negative overflow.
+FP68K_OFLOW_5:
+        CMPI.B  #0x40,D1                        | negative: EQ (-infinity) if downward, else NE (huge)
+        RTS                                     | return EQ (keep -inf) only if rounding downward
 | ----------------------------------------------------------
-|
-| FP68K_LOOP_2: normalize loop - left-shift until MSB set
-|
-FP68K_LOOP_2:
-        SUBQ.L  #0x1,A4                         | decrement exponent
-        ADD     D7,D7                           | shift guard bits left
-        ADDX.L  D5,D5                           | shift mantissa low left
-        ADDX.L  D4,D4                           | shift mantissa high left
-FP68K_CONT_23:
-        BPL.B   FP68K_LOOP_2                    | loop until MSB set
-| FP68K_EXIT_10: round result per precision mode and check overflow
-FP68K_EXIT_10:
-        TST.L   D6                              | single precision mode?
-        BMI     FP68K_OK_13                     | yes -> round to single
-        BTST    #0x1E,D6                        | double precision mode?
-        BNE     FP68K_OK_14                     | yes -> round to double
-        SUBA.L  A3,A3                           | A3 = 0 (min extended exponent)
-        BSR.B   FP68K_CONT_24                   | denormalize if exponent < min
-        CLR.L   D1                              | rounding increment high = 0
-        MOVEQ.L #0x1,D2                         | rounding increment low = 1
-        BTST    #0x0,D5                         | test LSB for round-to-even
-        BSR.B   FP68K_CONT_26                   | apply rounding
-        MOVE    #0x7FFE,A3                      | max extended exponent
-        BSR.B   FP68K_CONT_29                   | check for overflow
-        BEQ.B   FP68K_DONE_4                    | no overflow -> done
-        MOVE.L  A3,A4                           | set exponent to max
-        MOVEQ.L #-0x1,D4                        | mantissa = all ones
-        MOVE.L  D4,D5                           | (largest finite value)
-FP68K_DONE_4:
-        RTS                                     | return to caller
-
+| FP68K_SCOERCE -- coerce to single: underflow threshold
+| $3F81, 24-bit significand (bits below into the sticky bits), increment
+| $100, overflow threshold $407E, huge = 24 ones.
+FP68K_SCOERCE:
+        MOVEA.W #0x3F81,A3                      | single underflow threshold
+        BSR.W   FP68K_UFLOW                     | UFLOW
+        TST.L   D5                              | any bits in the low half?
+        SNE.B   D0                              | D0 = $FF if so
+        OR.B    D0,D7                           | sticky
+        ADD.B   D4,D4                           | bit 7 of D4 (the guard bit) to X
+        ROXR.W  #0x1,D7                         | X into the guard position of D7
+        OR.B    D4,D7                           | the other low bits: sticky
+        CLR.L   D5                              | D5 := 0: a single has no low significand bits (SCOERCE)
+        CLR.B   D4                              | clear the 8 bits below the 24-bit significand
+        MOVE.L  #0x100,D1                       | D1:D2 = $100:0: rounding increment = LSB of a single
+        CLR.L   D2                              | low half of the increment = 0
+        BTST    #0x8,D4                         | Z = NOT LSB (bit 8)
+        BSR.W   FP68K_ROUND                     | ROUND
+        MOVEA.W #0x407E,A3                      | single overflow threshold
+        BSR.B   FP68K_OFLOW                     | OFLOW
+        BEQ.B   FP68K_SCOERCE_3                 | EQ ->
+        MOVEA.L A3,A4                           | huge: the largest finite single
+        MOVEQ.L #-0x1,D4                        | 24 ones ...
+        CLR.B   D4                              | ... (low byte 0)
+FP68K_SCOERCE_3:
+        RTS                                     | return: rounded single in D4/A4 (SCOERCE)
 | ----------------------------------------------------------
-|
-| FP68K_CONT_24: align mantissa by shifting right (A4-A3) bits
-| Used to align operands before addition/subtraction
-|
-FP68K_CONT_24:
-        MOVE.L  A3,D0                           | D0 = min exponent
-        SUB.L   A4,D0                           | D0 = min - current (shift needed)
-        BGT.B   FP68K_CONT_25                   | positive -> need to denormalize
-        RTS                                     | no shift needed
-
+| FP68K_DCOERCE -- coerce to double: underflow threshold
+| $3C01, 53-bit significand, increment $800 in D5, overflow threshold
+| $43FE, huge = 53 ones.
+FP68K_DCOERCE:
+        MOVEA.W #0x3C01,A3                      | double underflow threshold
+        BSR.W   FP68K_UFLOW                     | UFLOW
+        MOVE.W  #0x7FF,D0                       | the 11 bits below a double ...
+        AND.W   D5,D0                           | ...
+        ANDI.W  #0xF800,D5                      | ... cleared in the significand
+        LSL.W   #0x5,D0                         | and left-aligned
+        LSR.W   #0x1,D7                         | make room for the guard bit
+        BCC.B   FP68K_DCOERCE_1                 | no stray sticky bit ->
+        BSET    #0x0,D7                         | keep it
+FP68K_DCOERCE_1:
+        OR.W    D0,D7                           | the 11 bits into the round bits
+        CLR.L   D1                              | D1:D2 = 0:$800: rounding increment = LSB of a double (DCOERCE)
+        MOVE.L  #0x800,D2                       | (low half $800)
+        BTST    #0xB,D5                         | Z = NOT LSB (bit 11)
+        BSR.W   FP68K_ROUND                     | ROUND
+        MOVEA.W #0x43FE,A3                      | double overflow threshold
+        BSR.W   FP68K_OFLOW                     | OFLOW
+        BEQ.B   FP68K_DCOERCE_5                 | EQ ->
+        MOVEA.L A3,A4                           | huge: the largest finite double
+        MOVEQ.L #-0x1,D4                        | 53 ones: 32 ...
+        MOVE.L  #0xFFFFF800,D5                  | ... and 21
+FP68K_DCOERCE_5:
+        RTS                                     | return: rounded double in D4:D5/A4 (DCOERCE)
 | ----------------------------------------------------------
-|
-| FP68K_CONT_25
-|
-FP68K_CONT_25:
-        BSet    #0x9,D6                         | set denormalized result flag
-        MOVE.L  A3,A4                           | use min exponent
-        BRA.B   FP68K_CONT_21                   | -> right-shift by D0 bits
-
+| FP68K_PACK -- store the result (sign D6 bit 7, exponent
+| A4, significand D4:D5) at the dst address in the format code * 2 in
+| D0; EQ on entry to the format routine means infinity or NaN.
+FP68K_PACK:
+        ANDI.W  #0xE,D0                         | D0 = format * 2
+        MOVE.W  FP68K_PACKCASE(PC,D0.W),D0      | offset of the format's routine (PACKCASE)
+        MOVEA.L 0xA(A6),A3                      | A3 = address 1, the destination
+        MOVE.W  A4,D3                           | D3 = exponent
+        CMPI.W  #0x7FFF,D3                      | EQ: infinity or NaN
+        JMP     FP68K_PACK(PC,D0.W)             | -> the format routine
+| FP68K_PACKCASE: pack routine per format, offsets from
+| FP68K_PACK.
+FP68K_PACKCASE:
+        .short  FP68K_PACKEXT-FP68K_PACK        | format 0 extended (PACKEXT)
+        .short  FP68K_PACKDBL-FP68K_PACK        | format 1 double (PACKDBL)
+        .short  FP68K_PACKSGL-FP68K_PACK        | format 2 single (PACKSGL)
+        .short  0                               | format 3: not used
+        .short  FP68K_PACKI16-FP68K_PACK        | format 4 int16 (PACKI16)
+        .short  FP68K_PACKI32-FP68K_PACK        | format 5 int32 (PACKI32)
+        .short  FP68K_PACKC64-FP68K_PACK        | format 6 comp (PACKC64)
+| FP68K_PACKI16: int16.
+FP68K_PACKI16:
+        MOVE.W  D5,(A3)                         | store the 16-bit integer result (PACKI16)
+        RTS                                     | return: int16 stored
 | ----------------------------------------------------------
-|
-| FP68K_CONT_26: apply IEEE rounding based on guard/round/sticky bits
-| D7 = guard bits, D6 bit 7 = sign; rounds per SANE mode
-|
-FP68K_CONT_26:
-        SNE.B   D0                              | D0 = $FF if LSB was set (for even)
-        TST     D7                              | any guard/round/sticky bits?
-        BNE.B   FP68K_OK_10                     | yes -> rounding needed
-        BCLR    #0x9,D6                         | clear denorm flag (exact result)
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| FP68K_OK_10: result is inexact - apply rounding mode
-|
-FP68K_OK_10:
-        BSet    #0xC,D6                         | set inexact exception flag
-        BTST    #0x5,(A0)                       | rounding mode bit 5 set?
-        BEQ.B   FP68K_NO_10                     | no -> round-to-nearest or up
-        BTST    #0x6,(A0)                       | rounding mode bit 6 set?
-        BEQ.B   FP68K_SKIP_5                    | mode=01: round toward zero -> skip
-        RTS                                     | mode=11: round down (negative)
-
-| ----------------------------------------------------------
-|
-| FP68K_SKIP_5: round toward +infinity - round up if positive
-|
-FP68K_SKIP_5:
-        TST.B   D6                              | check sign
-        BPL.B   FP68K_OK_11                     | positive -> round up
-        RTS                                     | negative -> truncate
-
-| ----------------------------------------------------------
-|
-| FP68K_NO_10: round-to-nearest or round up
-|
-FP68K_NO_10:
-        BTst    #0x6,(A0)                       | rounding mode bit 6 set?
-        BNE.B   FP68K_CONT_28                   | mode=10: round toward -inf ->
-        CMPI    #-0x8000,D7                     | guard bit exactly 0.5?
-        BCC.B   FP68K_CONT_27                   | >= 0.5 -> check for tie
-        RTS                                     | < 0.5 -> truncate (round down)
-
-| ----------------------------------------------------------
-|
-| FP68K_CONT_27: round-to-nearest tie-breaking (round to even)
-|
-FP68K_CONT_27:
-        BHI.B   FP68K_OK_11                     | > 0.5 -> round up
-        TST.B   D0                              | LSB was odd?
-        BNE.B   FP68K_OK_11                     | yes -> round up (to even)
-        RTS                                     | even -> truncate (already even)
-
-| ----------------------------------------------------------
-|
-| FP68K_CONT_28: round toward -infinity - round up if negative
-|
-FP68K_CONT_28:
-        TST.B   D6                              | check sign
-        BMI.B   FP68K_OK_11                     | negative -> round up magnitude
-        RTS                                     | positive -> truncate
-
-| ----------------------------------------------------------
-|
-| FP68K_OK_11: perform the rounding increment
-|
-FP68K_OK_11:
-        BSet    #0x7,0x1(A0)                    | set "rounded up" flag in state
-        ADD.L   D2,D5                           | add rounding increment low
-        ADDX.L  D1,D4                           | propagate carry to high
-        BCC.B   FP68K_DONE_5                    | no mantissa overflow -> done
-        ROXR.L  #0x1,D4                         | overflow: shift right
-        ADDQ.L  #0x1,A4                         | bump exponent
-FP68K_DONE_5:
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| FP68K_CONT_29: check for overflow - compare exponent A4 against max A3
-| Returns Z=1 if no overflow, else sets overflow/infinity
-|
-FP68K_CONT_29:
-        CMPA.L  A4,A3                           | result exponent > max?
-        BLT.B   FP68K_OK_12                     | yes -> overflow
-        CLR     D0                              | Z=1: no overflow
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| FP68K_OK_12: overflow - set infinity or max finite per rounding mode
-|
-FP68K_OK_12:
-        BSet    #0xA,D6                         | set overflow exception
-        BSET    #0xC,D6                         | set inexact exception
-        MOVE    #0x7FFF,A4                      | exponent = infinity
-        CLR.L   D4                              | mantissa = 0 (infinity default)
-        MOVE.L  D4,D5                           | clear low mantissa
-        MOVE.B  (A0),D1                         | get rounding mode
-        ANDI.B  #0x60,D1                        | isolate mode bits
-        BNE.B   FP68K_NO_11                     | not round-to-nearest -> check
-        RTS                                     | round-to-nearest: return infinity
-
-| ----------------------------------------------------------
-|
-| FP68K_NO_11: overflow with directed rounding - may saturate to max finite
-|
-FP68K_NO_11:
-        CMPI.B  #0x60,D1                        | round toward zero?
-        BNE.B   FP68K_NO_12                     | no -> check direction
-        TST.B   D1                              | Z=0: return max finite (not inf)
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| FP68K_NO_12: overflow with round up/down - depends on sign
-|
-FP68K_NO_12:
-        TST.B   D6                              | check result sign
-        BMI.B   FP68K_CONT_30                   | negative -> check round down
-        CMPI.B  #0x20,D1                        | round toward +inf? (Z=1 if yes)
-        RTS                                     | +inf+positive: overflow to inf
-
-| ----------------------------------------------------------
-|
-| FP68K_CONT_30: negative overflow - round toward -inf gives infinity
-|
-FP68K_CONT_30:
-        CMPI.B  #0x40,D1                        | round toward -inf? (Z=1 if yes)
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| FP68K_OK_13: round to single precision (24-bit mantissa)
-|
-FP68K_OK_13:
-        MOVE    #0x3F81,A3                      | min single exponent (rebiased)
-        BSR     FP68K_CONT_24                   | denormalize if needed
-        TST.L   D5                              | any bits in low mantissa?
-        SNE.B   D0                              | D0 = sticky bits from D5
-        OR.B    D0,D7                           | merge into guard word
-        ADD.B   D4,D4                           | shift out guard bit from D4
-        ROXR    #0x1,D7                         | guard bit into D7 MSB
-        OR.B    D4,D7                           | merge remaining low bits
-        CLR.L   D5                              | clear low mantissa (single=32-bit)
-        CLR.B   D4                              | clear low byte of mantissa high
-        MOVE.L  #0x100,D1                       | rounding increment = bit 8
-        CLR.L   D2                              | high increment = 0
-        BTST    #0x8,D4                         | test LSB for round-to-even
-        BSR     FP68K_CONT_26                   | apply rounding
-        MOVE    #0x407E,A3                      | max single exponent (rebiased)
-        BSR.B   FP68K_CONT_29                   | check overflow
-        BEQ.B   FP68K_DONE_6                    | no overflow -> done
-        MOVE.L  A3,A4                           | set exponent to max
-        MOVEQ.L #-0x1,D4                        | mantissa = $FFFFFF00
-        CLR.B   D4                              | (max single mantissa)
-FP68K_DONE_6:
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| FP68K_OK_14: round to double precision (53-bit mantissa)
-|
-FP68K_OK_14:
-        MOVE    #0x3C01,A3                      | min double exponent (rebiased)
-        BSR     FP68K_CONT_24                   | denormalize if needed
-        MOVE    #0x7FF,D0                       | mask for low 11 bits
-        AND     D5,D0                           | extract bits to become guard
-        ANDI    #-0x800,D5                      | truncate mantissa to 53 bits
-        LSL     #0x5,D0                         | position guard bits
-        LSR     #0x1,D7                         | make room for guard bit
-        BCC.B   FP68K_SKIP_6                    | no bit shifted out -> skip
-        BSET    #0x0,D7                         | preserve shifted-out bit
-FP68K_SKIP_6:
-        OR      D0,D7                           | merge guard bits into D7
-        CLR.L   D1                              | rounding increment high = 0
-        MOVE.L  #0x800,D2                       | rounding increment = bit 11
-        BTST    #0xB,D5                         | test LSB for round-to-even
-        BSR     FP68K_CONT_26                   | apply rounding
-        MOVE    #0x43FE,A3                      | max double exponent (rebiased)
-        BSR     FP68K_CONT_29                   | check overflow
-        BEQ.B   FP68K_DONE_7                    | no overflow -> done
-        MOVE.L  A3,A4                           | set exponent to max
-        MOVEQ.L #-0x1,D4                        | mantissa high = all ones
-        MOVE.L  #0xFFFFF800,D5                  | mantissa low = max double bits
-FP68K_DONE_7:
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| FP68K_CONT_31: pack result into destination format
-| D0 bits 1-3 = format code, dispatches via FP68K_CONT_32
-|
-FP68K_CONT_31:
-        ANDI    #0xE,D0                         | mask format * 2 for table index
-        MOVE    FP68K_CONT_32(PC,D0.W),D0       | get handler offset
-        MOVE.L  0xA(A6),A3                      | A3 = dest operand ptr
-        MOVE    A4,D3                           | D3 = result exponent
-        CMPI    #0x7FFF,D3                      | is NaN or infinity?
-        JMP     FP68K_CONT_31(PC,D0.W)          | dispatch to format packer
-
-| Jump Table
-FP68K_CONT_32:
-  .byte  0x00,0x32,0x00,0x86,0x00,0x60
-  .byte 0x00,0x00,0x00,0x24,0x00,0x28
-  .byte 0x00,0x2C
-| FP68K_CONT_33: pack to 16-bit integer
-FP68K_CONT_33:
-        MOVE    D5,(A3)                         | store 16-bit integer result
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| FP68K_CONT_34: pack to 32-bit long integer
-|
-FP68K_CONT_34:
+| FP68K_PACKI32: int32.
+FP68K_PACKI32:
         MOVE.L  D5,(A3)                         | store 32-bit long integer result
-        RTS                                     | return to caller
-
+        RTS                                     | return: int32 stored (PACKI32)
 | ----------------------------------------------------------
-|
-| FP68K_CONT_35: pack to 64-bit comp (integer)
-|
-FP68K_CONT_35:
+| FP68K_PACKC64: comp.
+FP68K_PACKC64:
         MOVE.L  D4,(A3)+                        | store comp high 32 bits
         MOVE.L  D5,(A3)                         | store comp low 32 bits
-        RTS                                     | return to caller
-
+        RTS                                     | return: comp stored (PACKC64)
 | ----------------------------------------------------------
-|
-| FP68K_CONT_36: pack to extended (80-bit) - denormalize if needed
-|
-FP68K_CONT_36:
-        BTst    #0x9,D6                         | denormalized result?
-        BEQ.B   FP68K_NO_13                     | no -> store directly
-        TST     D3                              | exponent zero?
-        BEQ.B   FP68K_NO_13                     | yes -> already denorm format
-        TST.L   D4                              | mantissa high nonzero?
-        BNE.B   FP68K_OK_15                     | yes -> renormalize
-        TST.L   D5                              | mantissa low nonzero?
-        BNE.B   FP68K_LOOP_3                    | yes -> renormalize
-        CLR.L   D3                              | both zero -> true zero exponent
-        BRA.B   FP68K_NO_13                     | -> store
-
+| FP68K_PACKEXT: extended -- an underflowed (single or
+| double precision control) denormal is normalized again first.
+FP68K_PACKEXT:
+        BTST    #0x9,D6                         | underflow signaled (an S/D denormal)?
+        BEQ.B   FP68K_PACKEXT_7                 | no: store ->
+        TST.W   D3                              | exponent 0?
+        BEQ.B   FP68K_PACKEXT_7                 | yes: an extended denormal as it is ->
+        TST.L   D4                              | normalize it again: high half
+        BNE.B   FP68K_PACKEXT_5                 | nonzero ->
+        TST.L   D5                              | low half
+        BNE.B   FP68K_PACKEXT_1                 | nonzero: unnormal by more than 32 bits ->
+        CLR.L   D3                              | zero significand: biased exponent 0 (a true zero)
+        BRA.B   FP68K_PACKEXT_7                 | -> store
 | ----------------------------------------------------------
-|
-| FP68K_LOOP_3
-|
-FP68K_LOOP_3:
-        SUBQ.W  #0x1,D3                         | decrement exponent
-        ADD.L   D5,D5                           | shift mantissa left
-        ADDX.L  D4,D4                           | propagate carry
-FP68K_OK_15:
-        BPL.B   FP68K_LOOP_3                    | loop until MSB set
-FP68K_NO_13:
-        TST.B   D6                              | check result sign
-        BPL.B   FP68K_SKIP_7                    | positive -> skip
-        ADDI    #-0x8000,D3                     | set sign bit in exponent word
-FP68K_SKIP_7:
-        MOVE    D3,(A3)+                        | store exponent+sign word
-        MOVE.L  D4,(A3)+                        | store mantissa high
-        MOVE.L  D5,(A3)                         | store mantissa low
-        RTS                                     | return to caller
-
+| FP68K_PACKEXT_1 (Apple PACKEXT @1): normalize.
+FP68K_PACKEXT_1:
+        SUBQ.W  #0x1,D3                         | exponent - 1
+        ADD.L   D5,D5                           | significand * 2
+        ADDX.L  D4,D4                           | (high half)
+FP68K_PACKEXT_5:
+        BPL.B   FP68K_PACKEXT_1                 | until normalized
+FP68K_PACKEXT_7:
+        TST.B   D6                              | negative?
+        BPL.B   FP68K_PACKEXT_11                | no ->
+        ADDI.W  #0x8000,D3                      | sign bit into the exponent word
+FP68K_PACKEXT_11:
+        MOVE.W  D3,(A3)+                        | sign and exponent
+        MOVE.L  D4,(A3)+                        | significand high
+        MOVE.L  D5,(A3)                         | significand low
+        RTS                                     | return: 10-byte extended stored (PACKEXT)
 | ----------------------------------------------------------
-|
-| FP68K_CONT_37: pack to IEEE single (32-bit) - encode sign/exp/mantissa
-|
-FP68K_CONT_37:
-        BNE.B   FP68K_NO_14                     | not NaN/Inf -> normal pack
-        MOVE    #0x4080,D3                      | infinity: single exp = $FF << 1
-        BRA.B   FP68K_NO_15                     | -> encode
-
+| FP68K_PACKSGL: single -- exponent rebiased, the integer
+| bit dropped (a denormal decrements the exponent to 0), sign inserted;
+| infinity and NaN get an exponent that becomes $FF.
+FP68K_PACKSGL:
+        BNE.B   FP68K_PACKSGL_1                 | finite ->
+        MOVE.W  #0x4080,D3                      | infinity/NaN: becomes exponent $FF (decremented: no integer bit)
+        BRA.B   FP68K_PACKSGL_5                 | -> pack
 | ----------------------------------------------------------
-|
-| FP68K_NO_14: pack normal single - adjust exponent
-|
-FP68K_NO_14:
-        TST     D3                              | exponent zero (denorm)?
-        BNE.B   FP68K_NO_15                     | no -> normal
-        MOVE    #0x3F81,D3                      | force min single exponent
-FP68K_NO_15:
-        SUBI    #0x3F80,D3                      | remove extended bias, add single
-        ADD.L   D4,D4                           | shift out implicit integer bit
-        BCS.B   FP68K_SKIP_8                    | had integer bit -> skip
-        SUBQ.W  #0x1,D3                         | no integer bit: adjust exponent
-FP68K_SKIP_8:
-        OR      D3,D4                           | merge exponent into mantissa
-        ROR.L   #0x8,D4                         | position exponent field
-        ADD.B   D6,D6                           | shift sign into carry
-        ROXR.L  #0x1,D4                         | insert sign bit
-        MOVE.L  D4,(A3)                         | store 32-bit single result
-        RTS                                     | return to caller
-
+| FP68K_PACKSGL_1 (Apple PACKSGL @1): finite.
+FP68K_PACKSGL_1:
+        TST.W   D3                              | exponent 0?
+        BNE.B   FP68K_PACKSGL_5                 | no ->
+        MOVE.W  #0x3F81,D3                      | zero: the denormal exponent (becomes 0)
+FP68K_PACKSGL_5:
+        SUBI.W  #0x3F80,D3                      | rebias: $3FFF -> $7F
+        ADD.L   D4,D4                           | drop the integer bit
+        BCS.B   FP68K_PACKSGL_7                 | it was 1: normal ->
+        SUBQ.W  #0x1,D3                         | denormal (or zero): exponent - 1 = 0
+FP68K_PACKSGL_7:
+        OR.W    D3,D4                           | exponent into the low bits
+        ROR.L   #0x8,D4                         | rotate into place
+        ADD.B   D6,D6                           | sign to X
+        ROXR.L  #0x1,D4                         | insert the sign
+        MOVE.L  D4,(A3)                         | store the single
+        RTS                                     | return: single stored (PACKSGL)
 | ----------------------------------------------------------
-|
-| FP68K_CONT_38: pack to IEEE double (64-bit) - encode sign/exp/mantissa
-|
-FP68K_CONT_38:
-        BNE.B   FP68K_NO_16                     | not NaN/Inf -> normal pack
-        MOVE    #0x4400,D3                      | infinity: double exp = $7FF << 1
-        BRA.B   FP68K_NO_17                     | -> encode
-
+| FP68K_PACKDBL: double -- likewise with 11 exponent bits,
+| the significand shifted right by 11.
+FP68K_PACKDBL:
+        BNE.B   FP68K_PACKDBL_1                 | finite ->
+        MOVE.W  #0x4400,D3                      | infinity/NaN: becomes exponent $7FF
+        BRA.B   FP68K_PACKDBL_5                 | -> pack
 | ----------------------------------------------------------
-|
-| FP68K_NO_16: pack normal double - adjust exponent
-|
-FP68K_NO_16:
-        TST     D3                              | exponent zero (denorm)?
-        BNE.B   FP68K_NO_17                     | no -> normal
-        MOVE    #0x3C01,D3                      | force min double exponent
-FP68K_NO_17:
-        SUBI    #0x3C00,D3                      | remove extended bias, add double
-        TST.L   D4                              | implicit integer bit set?
-        BMI.B   FP68K_SKIP_9                    | yes -> skip adjust
-        SUBQ.W  #0x1,D3                         | no integer bit: adjust exponent
-FP68K_SKIP_9:
-        MOVE.L  #0x7FF,D0                       | mask for low 11 bits
-        AND.L   D4,D0                           | extract bits to merge into D5
-        OR.L    D0,D5                           | combine with low mantissa
-        ROR.L   #0x8,D5                         | position low word
-        ROR.L   #0x3,D5                         | finish positioning
-        ANDI    #-0x800,D4                      | mask out bits moved to D5
-        ADD.L   D4,D4                           | shift out implicit integer bit
-        OR      D3,D4                           | merge exponent into high word
-        ROR.L   #0x8,D4                         | position high word
-        ROR.L   #0x3,D4                         | finish positioning
-        ADD.B   D6,D6                           | shift sign into carry
-        ROXR.L  #0x1,D4                         | insert sign bit
-        MOVE.L  D4,(A3)+                        | store double high word
-        MOVE.L  D5,(A3)                         | store double low word
-        RTS                                     | return to caller
-
+| FP68K_PACKDBL_1 (Apple PACKDBL @1): finite.
+FP68K_PACKDBL_1:
+        TST.W   D3                              | exponent 0?
+        BNE.B   FP68K_PACKDBL_5                 | no ->
+        MOVE.W  #0x3C01,D3                      | zero: the denormal exponent
+FP68K_PACKDBL_5:
+        SUBI.W  #0x3C00,D3                      | rebias: $3FFF -> $3FF
+        TST.L   D4                              | integer bit?
+        BMI.B   FP68K_PACKDBL_7                 | set: normal ->
+        SUBQ.W  #0x1,D3                         | denormal: exponent - 1 = 0
+FP68K_PACKDBL_7:
+        MOVE.L  #0x7FF,D0                       | the low 11 bits of the high half ...
+        AND.L   D4,D0                           | ...
+        OR.L    D0,D5                           | ... go to the low half
+        ROR.L   #0x8,D5                         | rotate right by 11 ...
+        ROR.L   #0x3,D5                         | ...: the low 32 bits are ready
+        ANDI.W  #0xF800,D4                      | clear the bits just moved
+        ADD.L   D4,D4                           | drop the integer bit
+        OR.W    D3,D4                           | exponent into the low bits
+        ROR.L   #0x8,D4                         | rotate right by 11 ...
+        ROR.L   #0x3,D4                         | ...
+        ADD.B   D6,D6                           | sign to X
+        ROXR.L  #0x1,D4                         | insert the sign
+        MOVE.L  D4,(A3)+                        | store the double: high half
+        MOVE.L  D5,(A3)                         | low half
+        RTS                                     | return: double stored (PACKDBL)
 | ----------------------------------------------------------
-|
-| FP68K_CONT_39: FP subtract - negate source sign then fall into add
-|
-FP68K_CONT_39:
-        EORI.B  #0xA0,D6                        | negate source: flip sign+xor flags
-FP68K_CONT_40:
-        MOVE    FP68K_CONT_41(PC,D3.W),D3       | get class-dispatch offset
-        JMP     FP68K_CONT_40(PC,D3.W)          | dispatch by operand class pair
-
-| Jump Table
-FP68K_CONT_41:
-  .byte  0x00,0x1A,0x00,0x80,0xFD,0xB8
-  .byte 0x00,0x88,0x00,0x66,0xFD,0xB8
-  .byte 0xFD,0xB0,0xFD,0xB0,0x00,0x8C
-| FP68K_CONT_42: add core - align exponents and add/subtract mantissas
-FP68K_CONT_42:
-        MOVE.L  D4,D3                           | D3 = source mantissa high
-        MOVE.L  A1,D4                           | D4 = dest mantissa high
-        EXG     D5,A2                           | swap mantissa low halves
-        MOVE    A4,D0                           | D0 = source exponent
-        SUB     A3,D0                           | D0 = exponent difference
-        BEQ.B   FP68K_CONT_44                   | same exponent, add directly ->
-        BGT.B   FP68K_CONT_43                   | source > dest, shift dest ->
-        EXG     D5,A2                           | swap so larger-exp is in D4:D5
-        EXG     D4,D3                           | swap mantissa high halves
-        NEG     D0                              | negate shift count
-        MOVE.L  A3,A4                           | use larger exponent as result
-        ADD.B   D6,D6                           | swap sign sense
-        ASR.B   #0x1,D6                         | restore sign with new sense
-FP68K_CONT_43:
-        BSR     FP68K_CONT_21                   | right-shift smaller operand by D0
-FP68K_CONT_44:
-        BTst    #0x5,D6                         | opposite signs?
-        BNE.B   FP68K_OK_16                     | yes, subtract ->
+| FP68K_SUBTOP -- subtract: flip the src sign (bit 7) and
+| the XOR (bit 5), then add.
+FP68K_SUBTOP:
+        EORI.B  #0xA0,D6                        | flip the src sign (bit 7) and the XOR (bit 5)
+FP68K_ADDTOP:
+        MOVE.W  FP68K_ADDCASE(PC,D3.W),D3       | ADDTOP: offset of the case routine
+        JMP     FP68K_ADDTOP(PC,D3.W)           | -> it
+| FP68K_ADDCASE: case routines by the number cases of
+| (dst, src), offsets from FP68K_ADDTOP.
+FP68K_ADDCASE:
+        .short  FP68K_ADDNUM-FP68K_ADDTOP       | num, num: ADDNUM
+        .short  FP68K_ADDS0-FP68K_ADDTOP        | num, 0: ADDS0: num + 0 = the dst
+        .short  FP68K_RSRCSGN-FP68K_ADDTOP      | num, inf: RSRC: num + inf = inf
+        .short  FP68K_ADDD0-FP68K_ADDTOP        | 0, num: ADDD0: 0 + num = the src
+        .short  FP68K_ADD00-FP68K_ADDTOP        | 0, 0: ADD00: 0 + 0
+        .short  FP68K_RSRCSGN-FP68K_ADDTOP      | 0, inf: RSRC: 0 + inf = inf
+        .short  FP68K_RDSTSGN-FP68K_ADDTOP      | inf, num: RDSTSGN: inf + num = inf
+        .short  FP68K_RDSTSGN-FP68K_ADDTOP      | inf, 0: RDSTSGN: inf + 0 = inf
+        .short  FP68K_ADDINF-FP68K_ADDTOP       | inf, inf: ADDINF: inf + inf
+| FP68K_ADDNUM -- two finite nonzero numbers: the operand
+| with the larger exponent to D3:A2/A4, the other shifted right in D4:D5;
+| add the magnitudes (carry: shift back) or subtract (SUBMAG), coerce.
+FP68K_ADDNUM:
+        MOVE.L  D4,D3                           | D3 = src high (ADDX needs a data register)
+        MOVE.L  A1,D4                           | D4 = dst high
+        EXG     D5,A2                           | D5 = dst low, A2 = src low
+        MOVE.W  A4,D0                           | src exponent ...
+        SUB.W   A3,D0                           | ... - dst exponent
+        BEQ.B   FP68K_ADDNUM_3                  | equal: no shift ->
+        BGT.B   FP68K_ADDNUM_1                  | src larger: shift the dst (in D4:D5) ->
+        EXG     D5,A2                           | dst larger: swap the operands
+        EXG     D4,D3                           | (high halves)
+        NEG.W   D0                              | shift count
+        MOVEA.L A3,A4                           | the larger exponent
+        ADD.B   D6,D6                           | the dst sign to bit 7 ...
+        ASR.B   #0x1,D6                         | ... XOR bit back in place
+FP68K_ADDNUM_1:
+        BSR.W   FP68K_RTSHIFT                   | align the smaller operand (RTSHIFT)
+FP68K_ADDNUM_3:
+        BTST    #0x5,D6                         | signs differ?
+        BNE.B   FP68K_SUBMAG                    | yes: subtract the magnitudes ->
 | same signs: add mantissas
-        ADD.L   A2,D5                           | add low mantissa halves
-        ADDX.L  D3,D4                           | add high with carry
-        BCC.B   FP68K_NO_18                     | no overflow ->
-        ROXR.L  #0x1,D4                         | overflow: shift right and increment exp
-        ROXR.L  #0x1,D5                         | propagate through low
-        ROXR    #0x1,D7                         | shift into guard bits
-        ADDQ.L  #0x1,A4                         | bump result exponent
-FP68K_NO_18:
-        BRA     FP68K_EXIT_10                   | -> round and pack
-
+        ADD.L   A2,D5                           | add the magnitudes
+        ADDX.L  D3,D4                           | (high halves)
+        BCC.B   FP68K_ADDNUM_15                 | no carry out ->
+        ROXR.L  #0x1,D4                         | carry: shift right
+        ROXR.L  #0x1,D5                         | ...
+        ROXR.W  #0x1,D7                         | ... (no sticky bits can be lost)
+        ADDQ.L  #0x1,A4                         | exponent + 1
+FP68K_ADDNUM_15:
+        BRA.W   FP68K_COERCE                    | -> COERCE
 | ----------------------------------------------------------
-|
-| FP68K_OK_16: subtraction path - negate and subtract mantissas
-|
-FP68K_OK_16:
-        NOT.B   D6                              | tentatively flip sign for subtract
-        SUB.L   A2,D5                           | subtract low mantissa halves
-        SUBX.L  D3,D4                           | subtract high with borrow
-        BEQ.B   FP68K_EMPTY_5                   | high zero -> check for cancellation
-        BCC.B   FP68K_CONT_45                   | result positive -> normalize
-        NEG     D7                              | negate guard bits
-        NEGX.L  D5                              | negate result (was negative)
-        NEGX.L  D4                              | negate high mantissa
-        NOT.B   D6                              | restore original sign (flip back)
-FP68K_CONT_45:
-        BRA     FP68K_OK_9                      | -> normalize result
-
+| FP68K_SUBMAG -- subtract the larger from the smaller; zero
+| -> a signed zero; a borrow means the guess was wrong: negate back.
+FP68K_SUBMAG:
+        NOT.B   D6                              | assume |larger| > |smaller|: flip the sign
+        SUB.L   A2,D5                           | smaller - larger
+        SUBX.L  D3,D4                           | (high halves)
+        BEQ.B   FP68K_ZEROSUM                   | all 64 bits 0: exact zero (ZEROSUM) ->
+        BCC.B   FP68K_SUBMAG_7                  | no borrow ->
+        NEG.W   D7                              | borrow: negate the difference ...
+        NEGX.L  D5                              | ...
+        NEGX.L  D4                              | ...
+        NOT.B   D6                              | ... and flip the sign back
+FP68K_SUBMAG_7:
+        BRA.W   FP68K_NORMCOERCE                | -> NORMCOERCE
 | ----------------------------------------------------------
-|
-| FP68K_CONT_46: add special case - both operands zero, pick sign per IEEE
-|
-FP68K_CONT_46:
-        BTst    #0x5,D6                         | opposite signs?
-        BEQ.B   FP68K_EMPTY_6                   | no, same sign -> keep sign
-FP68K_EMPTY_5:
-        SUBA.L  A4,A4                           | result exponent = 0 (zero)
-        CLR.B   D6                              | default: positive zero
-        BTST    #0x6,(A0)                       | rounding toward -inf?
-        BEQ.B   FP68K_EMPTY_6                   | no -> positive zero
-        BTST    #0x5,(A0)                       | round toward zero?
-        BNE.B   FP68K_EMPTY_6                   | yes -> positive zero
-        NOT.B   D6                              | round toward -inf: negative zero
-FP68K_EMPTY_6:
-        RTS                                     | return to caller
-
+| FP68K_ADD00 -- 0 + 0: signs equal: that zero; else +0,
+| or -0 when rounding downward. FP68K_ZEROSUM: an exact zero sum.
+FP68K_ADD00:
+        BTST    #0x5,D6                         | signs differ?
+        BEQ.B   FP68K_ADDQ00                    | no: that zero ->
+FP68K_ZEROSUM:
+        SUBA.L  A4,A4                           | exponent 0
+        CLR.B   D6                              | +0 ...
+        BTST    #0x6,(A0)                       | ... unless rounding downward (10)
+        BEQ.B   FP68K_ADDQ00                    | no -> positive zero
+        BTST    #0x5,(A0)                       | RNDLO set: toward zero (11)?
+        BNE.B   FP68K_ADDQ00                    | yes: +0 ->
+        NOT.B   D6                              | downward: -0
+FP68K_ADDQ00:
+        RTS                                     | return: zero sum, not coerced (ADDQ00)
 | ----------------------------------------------------------
-|
-| FP68K_CONT_47: add - infinity + finite = infinity (propagate infinity)
-|
-FP68K_CONT_47:
-        MOVE.L  A2,D5                           | result = source mantissa low
-        MOVE.L  A1,D4                           | result = source mantissa high
-        MOVE.L  A3,A4                           | result = source exponent
-        ADD.B   D6,D6                           | use source sign
-FP68K_CONT_48:
-        BRA     FP68K_EXIT_10                   | -> round and pack
-
+| FP68K_ADDS0: num + 0 -- the result is the dst; then
+| coerce. FP68K_ADDD0: 0 + num -- the src; coerce.
+FP68K_ADDS0:
+        MOVE.L  A2,D5                           | result := the dst (low half)
+        MOVE.L  A1,D4                           | (high half)
+        MOVEA.L A3,A4                           | (exponent)
+        ADD.B   D6,D6                           | with the dst sign (bit 6 -> 7)
+FP68K_ADDD0:
+        BRA.W   FP68K_COERCE                    | ADDD0: -> COERCE
 | ----------------------------------------------------------
-|
-| FP68K_CONT_49: add - inf + inf; same sign = inf, opposite = invalid NaN
-|
-FP68K_CONT_49:
-        BTst    #0x5,D6                         | inf + inf: same signs?
-        BNE.B   FP68K_CONT_50                   | opposite signs -> invalid
-        RTS                                     | same signs -> return infinity
-
+| FP68K_ADDINF: inf + inf -- equal signs: inf; else invalid.
+FP68K_ADDINF:
+        BTST    #0x5,D6                         | signs differ?
+        BNE.B   FP68K_ADDINF_25                 | yes: invalid ->
+        RTS                                     | no: infinity
 | ----------------------------------------------------------
-|
-| FP68K_CONT_50: inf + (-inf) = invalid - generate NaN with payload 2
-|
-FP68K_CONT_50:
-        MOVEQ.L #0x2,D0                         | invalid NaN payload = 2 (inf-inf)
-        BRA     FP68K_OK_3                      | -> construct NaN result
-
+| FP68K_ADDINF_25 (Apple ADDINF @25): +inf + -inf: invalid, NaN code 2
+| (NANADD).
+FP68K_ADDINF_25:
+        MOVEQ.L #0x2,D0                         | NaN code 2 (NANADD)
+        BRA.W   FP68K_INVALIDOP                 | -> INVALIDOP
 | ----------------------------------------------------------
-|
-| FP68K_CONT_51: FP multiply - dispatch by operand class combination
-|
-FP68K_CONT_51:
-        ROL.B   #0x2,D6                         | combine signs via XOR (A*B sign)
-        MOVEQ.L #0x8,D0                         | invalid NaN payload = 8 (0*inf)
-        MOVE    FP68K_CONT_52(PC,D3.W),D3       | get class-dispatch offset
-        JMP     FP68K_CONT_51(PC,D3.W)          | dispatch by operand class pair
-
-| Jump Table
-FP68K_CONT_52:
-  .byte  0x00,0x1E,0xFD,0x1E,0xFD,0x1E
-  .byte 0xFD,0x18,0xFD,0x1E,0xFC,0x70
-  .byte 0xFD,0x18,0xFC,0x70,0xFD,0x1E
-| FP68K_CONT_53: multiply core - 64x64 bit multiply using four 32x32 partial products
-FP68K_CONT_53:
-        ADDA.L  A3,A4                           | result exponent = exp_a + exp_b - bias
-        SUBA    #0x3FFE,A4                      | subtract extended bias - 1
-        MOVEM.L D5-D6/A0,-(SP)                  | save src_lo/flags/state ptr
-        MOVE.L  D4,A3                           | A3 = source mantissa high
-        CLR.L   D4                              | clear product accumulator high
-        MOVE.L  D4,D5                           | clear product accumulator low
-        MOVE.L  D4,A0                           | clear overflow accumulator
-        MOVE.L  (SP),D1                         | D1 = source mantissa low
-        BNE.B   FP68K_CONT_54                   | nonzero -> do full multiply
-        MOVE.L  A2,D0                           | D0 = dest mantissa low
-        BEQ.B   FP68K_SKIP_11                   | both low zero -> skip partials
-        BRA.B   FP68K_SKIP_10                   | -> skip first partial product
-
+| FP68K_MULTOP -- multiply: sign = XOR of the signs, NaN code
+| 8 (NANMUL) in case of 0 * inf; dispatch by the number cases.
+FP68K_MULTOP:
+        ROL.B   #0x2,D6                         | XOR of the signs (bit 5) to bit 7: the result sign
+        MOVEQ.L #0x8,D0                         | NaN code 8 (NANMUL), for 0 * inf
+        MOVE.W  FP68K_MULCASE(PC,D3.W),D3       | offset of the case routine
+        JMP     FP68K_MULTOP(PC,D3.W)           | -> it
+| FP68K_MULCASE: case routines by (dst, src), offsets from
+| FP68K_MULTOP.
+FP68K_MULCASE:
+        .short  FP68K_MULNUM-FP68K_MULTOP       | num, num: MULNUM
+        .short  FP68K_RSRCSGN-FP68K_MULTOP      | num, 0: RSRC: num * 0 = 0
+        .short  FP68K_RSRCSGN-FP68K_MULTOP      | num, inf: RSRC: num * inf = inf
+        .short  FP68K_RDST-FP68K_MULTOP         | 0, num: RDST: 0 * num = 0
+        .short  FP68K_RSRCSGN-FP68K_MULTOP      | 0, 0: RSRC: 0 * 0 = 0
+        .short  FP68K_INVALIDOP-FP68K_MULTOP    | 0, inf: INVALIDOP: 0 * inf
+        .short  FP68K_RDST-FP68K_MULTOP         | inf, num: RDST: inf * num = inf
+        .short  FP68K_INVALIDOP-FP68K_MULTOP    | inf, 0: INVALIDOP: inf * 0
+        .short  FP68K_RSRCSGN-FP68K_MULTOP      | inf, inf: RSRC: inf * inf = inf
+| FP68K_MULNUM -- two finite nonzero numbers: exponent =
+| sum - ($3FFF - 1); the 64 x 64 bit product from four 32 x 32 products
+| (MULU32), with shortcuts when the low halves are 0 (SRC32, BOTH32);
+| the low 64 bits only feed the sticky bits. A0 counts carries.
+FP68K_MULNUM:
+        ADDA.L  A3,A4                           | exponent sum ...
+        SUBA.W  #0x3FFE,A4                      | ... - (bias - 1): the point is right of the 2 leading product bits
+        MOVEM.L D5-D6/A0,-(SP)                  | save src low, D6, A0 (A0 counts carries)
+        MOVEA.L D4,A3                           | A3 = src high
+        CLR.L   D4                              | D4 := 0: clear the product D4:D5 (and A0, the carry count)
+        MOVE.L  D4,D5                           | (low half)
+        MOVEA.L D4,A0                           | A0 := 0: carries out of D4
+        MOVE.L  (SP),D1                         | D1 = src low
+        BNE.B   FP68K_SRC64                     | nonzero: 64-bit src (SRC64) ->
+        MOVE.L  A2,D0                           | D0 = dst low
+        BEQ.B   FP68K_BOTH32                    | both low halves 0: one 32 x 32 product (BOTH32) ->
+        BRA.B   FP68K_SRC32                     | 64 x 32 (SRC32) ->
+FP68K_SRC64:
+        MOVE.L  A2,D0                           | SRC64: dst low ...
+        BSR.B   FP68K_MULU32                    | ... * src low (MULU32)
+        TST.L   D5                              | its low 32 bits ...
+        SNE.B   D7                              | ... only sticky
+        MOVE.L  D4,D5                           | shift the product right 32 bits
+        CLR.L   D4                              | low partial product shifted down 32 bits: D4 := 0
+        MOVE.L  (SP),D1                         | src low ...
+        MOVE.L  A1,D0                           | ... * dst high
+        BSR.B   FP68K_MULU32                    | MULU32
+FP68K_SRC32:
+        MOVE.L  A3,D1                           | SRC32: src high ...
+        MOVE.L  A2,D0                           | ... * dst low
+        BSR.B   FP68K_MULU32                    | MULU32
+        TST.W   D5                              | more sticky bits ...
+        SNE.B   D0                              | ...
+        OR.B    D0,D7                           | ... on top of the earlier ones
+        SWAP.W  D5                              | the next 16 bits ...
+        OR.W    D5,D7                           | ... become the round bits
+        MOVE.L  D4,D5                           | shift right 32 bits
+        MOVE.L  A0,D4                           | the carries
+FP68K_BOTH32:
+        MOVE.L  A3,D1                           | BOTH32: src high ...
+        MOVE.L  A1,D0                           | ... * dst high
+        BSR.B   FP68K_MULU32                    | MULU32
+        MOVEM.L (SP)+,D0/D6/A0                  | restore D6, A0 (D0 = the saved src low, discarded)
+        BRA.W   FP68K_NORMCOERCE                | -> NORMCOERCE
 | ----------------------------------------------------------
-|
-| FP68K_CONT_54
-|
-FP68K_CONT_54:
-        MOVE.L  A2,D0                           | D0 = dest mantissa low
-        BSR.B   FP68K_CONT_55                   | partial product: src_lo * dst_lo
-        TST.L   D5                              | any overflow bits?
-        SNE.B   D7                              | set sticky if nonzero
-        MOVE.L  D4,D5                           | shift accumulator down
-        CLR.L   D4                              | clear high accumulator
-        MOVE.L  (SP),D1                         | D1 = source mantissa low
-        MOVE.L  A1,D0                           | D0 = dest mantissa high
-        BSR.B   FP68K_CONT_55                   | partial product: src_lo * dst_hi
-FP68K_SKIP_10:
-        MOVE.L  A3,D1                           | D1 = source mantissa high
-        MOVE.L  A2,D0                           | D0 = dest mantissa low
-        BSR.B   FP68K_CONT_55                   | partial product: src_hi * dst_lo
-        TST     D5                              | low bits of partial result?
-        SNE.B   D0                              | set sticky if nonzero
-        OR.B    D0,D7                           | merge sticky bits
-        SWAP    D5                              | get high word of low accumulator
-        OR      D5,D7                           | merge into guard bits
-        MOVE.L  D4,D5                           | shift accumulator down
-        MOVE.L  A0,D4                           | get overflow word
-FP68K_SKIP_11:
-        MOVE.L  A3,D1                           | D1 = source mantissa high
-        MOVE.L  A1,D0                           | D0 = dest mantissa high
-        BSR.B   FP68K_CONT_55                   | partial product: src_hi * dst_hi
-        MOVEM.L (SP)+,D0/D6/A0                  | restore saved regs
-        BRA     FP68K_OK_9                      | -> normalize result
-
+| FP68K_MULU32 -- D4:D5 += D0 * D1 (32 x 32 bits, from four
+| 16 x 16 MULUs), a carry out of D4 increments A0. Uses D2, D3, D6.
+FP68K_MULU32:
+        MOVE.W  D1,D2                           | Y (D0 = A:B, D1 = X:Y)
+        MOVE.W  D1,D3                           | Y
+        MULU.W  D0,D2                           | D2 = B * Y
+        MOVE.W  D0,D6                           | B
+        SWAP.W  D0                              | A
+        SWAP.W  D1                              | X
+        MULU.W  D1,D6                           | D6 = B * X
+        MULU.W  D0,D3                           | D3 = A * Y
+        MULU.W  D0,D1                           | D1 = A * X
+        SWAP.W  D2                              | (B * Y).hi to the low word
+        CLR.L   D0                              | D0 := 0: (B*Y).hi zero-extended into it next (MULU32)
+        MOVE.W  D2,D0                           | D0 = (B * Y).hi
+        ADD.L   D0,D3                           | A * Y + (B * Y).hi: no carry possible
+        ADD.L   D6,D3                           | + B * X; the carry stays in X
+        MOVE.W  D3,D2                           | low word of the sum ...
+        SWAP.W  D2                              | ... above (B * Y).lo: D2 = low 32 bits of the product
+        CLR.W   D3                              | replace the low half of the sum ...
+        ADDX.W  D3,D3                           | ... by the carry X
+        SWAP.W  D3                              | D3 = carry:sum.hi
+        ADD.L   D3,D1                           | D1 = high 32 bits of the product
+        ADD.L   D2,D5                           | add the product to D4:D5
+        ADDX.L  D1,D4                           | (high half)
+        BCC.B   FP68K_MULU32_1                  | no carry out ->
+        ADDQ.W  #0x1,A0                         | count the carry
+FP68K_MULU32_1:
+        RTS                                     | return: 32x32 product added into D4:D5, carry-out counted in A0
 | ----------------------------------------------------------
-|
-| FP68K_CONT_55: 32x32->64 unsigned multiply, accumulating into D4:D5
-| D0 * D1 -> added to D4:D5:A0 (128-bit running total)
-| Uses four 16x16 partial products via MULU
-|
-FP68K_CONT_55:
-        MOVE    D1,D2                           | D2 = D1.lo (multiplicand low)
-        MOVE    D1,D3                           | D3 = D1.lo (for cross product)
-        MULU    D0,D2                           | D2 = D0.lo * D1.lo
-        MOVE    D0,D6                           | D6 = D0.lo
-        SWAP    D0                              | D0 = D0.hi
-        SWAP    D1                              | D1 = D1.hi
-        MULU    D1,D6                           | D6 = D0.lo * D1.hi
-        MULU    D0,D3                           | D3 = D0.hi * D1.lo
-        MULU    D0,D1                           | D1 = D0.hi * D1.hi
-        SWAP    D2                              | D2.hi = low product high word
-        CLR.L   D0                              | clear for carry propagation
-        MOVE    D2,D0                           | D0 = carry from low product
-        ADD.L   D0,D3                           | add carry to cross product
-        ADD.L   D6,D3                           | add other cross product
-        MOVE    D3,D2                           | D2 = cross product low word
-        SWAP    D2                              | position for 64-bit result
-        CLR     D3                              | clear for carry capture
-        ADDX    D3,D3                           | capture carry from cross add
-        SWAP    D3                              | position carry
-        ADD.L   D3,D1                           | add carry to high product
-        ADD.L   D2,D5                           | accumulate into result low
-        ADDX.L  D1,D4                           | accumulate into result high
-        BCC.B   FP68K_DONE_8                    | no overflow -> done
-        ADDQ.W  #0x1,A0                         | count overflow
-FP68K_DONE_8:
-        RTS                                     | return to caller
-
+| FP68K_DIVTOP -- divide: sign = XOR of the signs, NaN code
+| 4 (NANDIV); dispatch by the number cases.
+FP68K_DIVTOP:
+        ROL.B   #0x2,D6                         | XOR of the signs to bit 7: the result sign
+        MOVEQ.L #0x4,D0                         | NaN code 4 (NANDIV), for 0/0 and inf/inf
+        MOVE.W  FP68K_DIVCASE(PC,D3.W),D3       | offset of the case routine
+        JMP     FP68K_DIVTOP(PC,D3.W)           | -> it
+| FP68K_DIVCASE: case routines by (dst, src), offsets from
+| FP68K_DIVTOP.
+FP68K_DIVCASE:
+        .short  FP68K_DIVNUM-FP68K_DIVTOP       | num, num: DIVNUM
+        .short  FP68K_DIVBY0-FP68K_DIVTOP       | num, 0: DIVBY0: num / 0 = inf
+        .short  FP68K_DIVBYI-FP68K_DIVTOP       | num, inf: DIVBYI: num / inf = 0
+        .short  FP68K_RDST-FP68K_DIVTOP         | 0, num: RDST: 0 / num = 0
+        .short  FP68K_INVALIDOP-FP68K_DIVTOP    | 0, 0: INVALIDOP: 0 / 0
+        .short  FP68K_RDST-FP68K_DIVTOP         | 0, inf: RDST: 0 / inf = 0
+        .short  FP68K_RDST-FP68K_DIVTOP         | inf, num: RDST: inf / num = inf
+        .short  FP68K_RDST-FP68K_DIVTOP         | inf, 0: RDST: inf / 0 = inf
+        .short  FP68K_INVALIDOP-FP68K_DIVTOP    | inf, inf: INVALIDOP: inf / inf
+| FP68K_DIVBY0: num / 0 -- divide by zero, infinity.
+FP68K_DIVBY0:
+        BSET    #0xB,D6                         | signal divide by zero (ERRZ)
+        MOVEA.W #0x7FFF,A4                      | infinity
+        CLR.L   D4                              | D4 := 0: significand of infinity (x / 0)
+        MOVE.L  D4,D5                           | (low half)
+        RTS                                     | return: infinity, division by zero signaled (DIVBY0)
 | ----------------------------------------------------------
-|
-| FP68K_CONT_56: FP divide - dispatch by operand class combination
-|
-FP68K_CONT_56:
-        ROL.B   #0x2,D6                         | combine signs via XOR (A/B sign)
-        MOVEQ.L #0x4,D0                         | invalid NaN payload = 4 (0/0)
-        MOVE    FP68K_CONT_57(PC,D3.W),D3       | get class-dispatch offset
-        JMP     FP68K_CONT_56(PC,D3.W)          | dispatch by operand class pair
-
-| Jump Table
-FP68K_CONT_57:
-  .byte  0x00,0x34,0x00,0x1E,0x00,0x2C
-  .byte 0xFC,0x78,0xFB,0xD0,0xFC,0x78
-  .byte 0xFC,0x78,0xFC,0x78,0xFB,0xD0
-| FP68K_CONT_58: multiply/divide - result is infinity (overflow)
-FP68K_CONT_58:
-        BSet    #0xB,D6                         | set divide-by-zero exception
-        MOVE    #0x7FFF,A4                      | exponent = infinity
-        CLR.L   D4                              | mantissa = 0 (infinity)
-        MOVE.L  D4,D5                           | clear low mantissa
-        RTS                                     | return to caller
-
+| FP68K_DIVBYI: num / inf -- zero.
+FP68K_DIVBYI:
+        SUBA.L  A4,A4                           | zero: exponent 0
+        MOVE.L  A4,D4                           | significand 0
+        MOVE.L  D4,D5                           | (low half)
+        RTS                                     | return: zero (finite / infinity, DIVBYI)
 | ----------------------------------------------------------
-|
-| FP68K_CONT_59: multiply/divide - result is zero (underflow)
-|
-FP68K_CONT_59:
-        SUBA.L  A4,A4                           | exponent = 0
-        MOVE.L  A4,D4                           | mantissa = 0 (zero result)
-        MOVE.L  D4,D5                           | clear low mantissa
-        RTS                                     | return to caller
-
+| FP68K_DIVNUM -- two finite nonzero numbers: exponent =
+| difference + $3FFF; 65 quotient bits by restoring division (33 for a
+| single operation), one more if the dividend is smaller; the remainder
+| gives the sticky bit; coerce.
+FP68K_DIVNUM:
+        EXG     A3,A4                           | A4 = dst exponent, A3 = src exponent
+        SUBA.L  A3,A4                           | difference
+        ADDA.W  #0x3FFF,A4                      | rebias
+        MOVEQ.L #0x41,D0                        | 65 quotient bits (the last one for rounding)
+        TST.L   D6                              | single operation?
+        BPL.B   FP68K_DIVNUM_3                  | no ->
+        MOVEQ.L #0x21,D0                        | single: 33 bits
+FP68K_DIVNUM_3:
+        CMP.L   A1,D4                           | divisor - dividend (high halves)
+        BNE.B   FP68K_DIVNUM_5                  | ...
+        CMP.L   A2,D5                           | (low halves)
+FP68K_DIVNUM_5:
+        BLS.B   FP68K_DIVNUM_7                  | divisor <= dividend ->
+        ADDQ.W  #0x1,D0                         | dividend smaller: one more quotient bit ...
+        SUBQ.L  #0x1,A4                         | ... and exponent - 1
+FP68K_DIVNUM_7:
+        MOVE.L  A1,D1                           | D1:D2 = dividend (dst)
+        MOVE.L  A2,D2                           | (low half)
+        MOVE.L  D4,D3                           | D3:A2 = divisor (src)
+        MOVEA.L D5,A2                           | (low half)
+        BSR.B   FP68K_RESTORE                   | RESTORE: quotient in D4:D5, remainder in D1:D2
+        TST.L   D6                              | single operation?
+        BPL.B   FP68K_DIVNUM_9                  | no ->
+        MOVE.L  D5,D4                           | single: left-align the 32-bit quotient
+        CLR.L   D5                              | single: 32 quotient bits now in D4, D5 := 0
+FP68K_DIVNUM_9:
+        MOVE.W  #0x10,CCR                       | X := 1: the leading quotient bit, shifted out ...
+        ROXR.L  #0x1,D4                         | ... comes back in, the last bit becomes the round bit
+        ROXR.L  #0x1,D5                         | ...
+        ROXR.W  #0x1,D7                         | ...
+        OR.L    D2,D1                           | remainder nonzero ...
+        SNE.B   D7                              | ... sticky
+        BRA.W   FP68K_COERCE                    | -> COERCE
 | ----------------------------------------------------------
-|
-| FP68K_CONT_60
-|
-| FP68K_CONT_60: divide core - restoring division, 64 quotient bits
-FP68K_CONT_60:
-        exg     A3,A4                           | swap exponents for subtraction
-        SUBA.L  A3,A4                           | A4 = exp_dst - exp_src
-        ADDA    #0x3FFF,A4                      | add extended bias
-        MOVEQ.L #0x41,D0                        | 65 iterations for extended
-        TST.L   D6                              | single precision mode?
-        BPL.B   FP68K_NO_19                     | no -> 65 iterations
-        MOVEQ.L #0x21,D0                        | 33 iterations for single
-FP68K_NO_19:
-        CMP.L   A1,D4                           | compare dividend vs divisor high
-        BNE.B   FP68K_NO_20                     | not equal -> check order
-        CMP.L   A2,D5                           | compare low halves
-FP68K_NO_20:
-        BLS.B   FP68K_OK_17                     | dividend <= divisor -> ok
-        ADDQ.W  #0x1,D0                         | need one extra iteration
-        SUBQ.L  #0x1,A4                         | adjust exponent accordingly
-FP68K_OK_17:
-        MOVE.L  A1,D1                           | D1 = dividend high (dest mant hi)
-        MOVE.L  A2,D2                           | D2 = dividend low (dest mant lo)
-        MOVE.L  D4,D3                           | D3 = divisor high (src mant hi)
-        MOVE.L  D5,A2                           | A2 = divisor low (src mant lo)
-        BSR.B   FP68K_LOOP_4                    | perform division loop
-        TST.L   D6                              | single precision mode?
-        BPL.B   FP68K_NO_21                     | no -> result in D4:D5
-        MOVE.L  D5,D4                           | single: quotient in low word
-        CLR.L   D5                              | clear low mantissa
-FP68K_NO_21:
-        MOVE    #0x10,CCR                       | set X flag for first shift
-        ROXR.L  #0x1,D4                         | shift quotient right with guard
-        ROXR.L  #0x1,D5                         | propagate through low
-        ROXR    #0x1,D7                         | shift into guard bits
-        OR.L    D2,D1                           | any remainder bits?
-        SNE.B   D7                              | set sticky if remainder nonzero
-        BRA     FP68K_EXIT_10                   | -> round and pack
-
+| FP68K_RESTORE -- restoring division: D0 quotient bits of
+| D1:D2 / D3:A2 into D4:D5 (the leading ones are shifted out), remainder
+| left in D1:D2. Also used by REM and binary-to-decimal.
+| Called by: FP68K_DIVNUM, FP68K_REMDIV, FP68K_BD9_7.
+FP68K_RESTORE:
+        CLR.L   D4                              | D4 := 0: clear the quotient D4:D5 (RESTORE)
+        MOVE.L  D4,D5                           | (low half)
+        BRA.B   FP68K_RESTORE_2                 | no shift before the first step
 | ----------------------------------------------------------
-|
-| FP68K_LOOP_4: division loop - D0 iterations of shift-and-subtract
-| Divides D1:D2 by D3:A2, quotient in D4:D5
-|
-FP68K_LOOP_4:
-        CLR.L   D4                              | clear quotient high
-        MOVE.L  D4,D5                           | clear quotient low
-        BRA.B   FP68K_CONT_61                   | -> first comparison
-
+| FP68K_RESTORE_1 (Apple RESTORE @1): shift quotient and remainder left.
+FP68K_RESTORE_1:
+        ADD.L   D5,D5                           | quotient * 2
+        ADDX.L  D4,D4                           | (carry out ignored)
+        ADD.L   D2,D2                           | remainder * 2
+        ADDX.L  D1,D1                           | (high half)
+        BCS.B   FP68K_RESTORE_4                 | carry out: certainly >= divisor ->
+FP68K_RESTORE_2:
+        CMP.L   D3,D1                           | remainder - divisor (high halves)
+        BNE.B   FP68K_RESTORE_3                 | ...
+        CMP.L   A2,D2                           | (low halves)
+FP68K_RESTORE_3:
+        BCS.B   FP68K_RESTORE_5                 | smaller: quotient bit 0 ->
+FP68K_RESTORE_4:
+        ADDQ.B  #0x1,D5                         | quotient bit 1
+        SUB.L   A2,D2                           | remainder - divisor
+        SUBX.L  D3,D1                           | (high halves)
+FP68K_RESTORE_5:
+        SUBQ.W  #0x1,D0                         | count
+        BNE.B   FP68K_RESTORE_1                 | more bits ->
+        RTS                                     | return: quotient in D4:D5, remainder in D1:D2
 | ----------------------------------------------------------
-|
-| FP68K_DONE_9: division loop iteration - shift and conditionally subtract
-|
-FP68K_DONE_9:
-        ADD.L   D5,D5                           | shift quotient left
-        ADDX.L  D4,D4                           | propagate carry
-        ADD.L   D2,D2                           | shift dividend left
-        ADDX.L  D1,D1                           | propagate carry
-        BCS.B   FP68K_CONT_62                   | overflow means dividend >= divisor
-FP68K_CONT_61:
-        CMP.L   D3,D1                           | compare dividend vs divisor high
-        BNE.B   FP68K_NO_22                     | not equal -> check result
-        CMP.L   A2,D2                           | compare low halves
-FP68K_NO_22:
-        BCS.B   FP68K_SKIP_12                   | dividend < divisor -> skip sub
-FP68K_CONT_62:
-        ADDQ.B  #0x1,D5                         | set quotient bit
-        SUB.L   A2,D2                           | subtract divisor low from dividend
-        SUBX.L  D3,D1                           | subtract divisor high with borrow
-FP68K_SKIP_12:
-        SUBQ.W  #0x1,D0                         | decrement iteration count
-        BNE.B   FP68K_DONE_9                    | loop until done
-        RTS                                     | return to caller
-
+| FP68K_REMTOP -- IEEE remainder dst REM src, at most half
+| the divisor in magnitude; the low 7 bits of the integer quotient, with
+| its sign, go to the caller in D0 (the saved D0.W at 6(SP)). Precision
+| control is not applied. NaN code 9 (NANREM).
+FP68K_REMTOP:
+        CLR.W   0x6(SP)                         | quotient := 0 (the saved D0.W)
+        ADD.B   D6,D6                           | dst sign to bit 7 (the result's), the quotient sign to bit 6
+        MOVEQ.L #0x9,D0                         | NaN code 9 (NANREM)
+        ANDI.L  #0x3FFFFFFF,D6                  | no precision control: extended (P754)
+        MOVE.W  FP68K_REMCASE(PC,D3.W),D3       | offset of the case routine
+        JMP     FP68K_REMTOP(PC,D3.W)           | -> it
+| FP68K_REMCASE: case routines by (dst, src), offsets from
+| FP68K_REMTOP.
+FP68K_REMCASE:
+        .short  FP68K_REMNUM-FP68K_REMTOP       | num, num: REMNUM
+        .short  FP68K_INVALIDOP-FP68K_REMTOP    | num, 0: INVALIDOP: num rem 0
+        .short  FP68K_REMDST-FP68K_REMTOP       | num, inf: REMDST: num rem inf = num
+        .short  FP68K_RDST-FP68K_REMTOP         | 0, num: RDST: 0 rem num = 0
+        .short  FP68K_INVALIDOP-FP68K_REMTOP    | 0, 0: INVALIDOP: 0 rem 0
+        .short  FP68K_RDST-FP68K_REMTOP         | 0, inf: RDST: 0 rem inf = 0
+        .short  FP68K_INVALIDOP-FP68K_REMTOP    | inf, num: INVALIDOP: inf rem num
+        .short  FP68K_INVALIDOP-FP68K_REMTOP    | inf, 0: INVALIDOP: inf rem 0
+        .short  FP68K_INVALIDOP-FP68K_REMTOP    | inf, inf: INVALIDOP: inf rem inf
+| FP68K_REMNUM: finite / finite -- DEXP - SEXP + 2 quotient
+| bits are needed; none: the dst is the remainder.
+FP68K_REMNUM:
+        MOVE.L  A3,D0                           | dst exponent ...
+        ADDQ.L  #0x2,D0                         | ...
+        SUB.L   A4,D0                           | ... - src exponent + 2: quotient bits to compute
+        BGT.B   FP68K_REMDIV                    | some: divide (REMDIV) ->
+| FP68K_REMDST: the dst is the remainder.
+FP68K_REMDST:
+        MOVE.L  A1,D4                           | result := the dst
+        MOVE.L  A2,D5                           | ...
+        MOVEA.L A3,A4                           | ...
+        BRA.B   FP68K_REMFIN                    | -> REMFIN
 | ----------------------------------------------------------
-|
-| FP68K_CONT_63: FP compare - dispatch by operand class combination
-|
-FP68K_CONT_63:
-        CLR     0x6(SP)                         | clear quotient word (for remainder)
-        ADD.B   D6,D6                           | extract sign to carry
-        MOVEQ.L #0x9,D0                         | invalid NaN payload = 9
-        ANDI.L  #0x3FFFFFFF,D6                  | clear precision mode bits
-        MOVE    FP68K_CONT_64(PC,D3.W),D3       | get class-dispatch offset
-        JMP     FP68K_CONT_63(PC,D3.W)          | dispatch by operand class pair
-
-| Jump Table
-FP68K_CONT_64:
-  .byte  0x00,0x28,0xFB,0x38,0x00,0x30
-  .byte 0xFB,0xE0,0xFB,0x38,0xFB,0xE0
-  .byte 0xFB,0x38,0xFB,0x38,0xFB,0x38
-| FP68K_CONT_65: FP remainder core - iterative shift-subtract
-FP68K_CONT_65:
-        MOVE.L  A3,D0                           | D0 = dest exponent
-        ADDQ.L  #0x2,D0                         | add 2 for iteration count
-        SUB.L   A4,D0                           | D0 = iterations needed
-        BGT.B   FP68K_CONT_67                   | divisor < dividend, iterate ->
-| FP68K_CONT_66: |dividend| < |divisor|, remainder = dividend
-FP68K_CONT_66:
-        MOVE.L  A1,D4                           | result = dest mantissa high
-        MOVE.L  A2,D5                           | result = dest mantissa low
-        MOVE.L  A3,A4                           | result = dest exponent
-        BRA.B   FP68K_CONT_69                   | -> normalize remainder
-
+| FP68K_REMDIV -- divide through the first fraction bit;
+| low quotient bit 1 and remainder > 0 (or = 0 with an odd quotient): the
+| remainder becomes divisor - remainder with the sign flipped and the
+| quotient + 1.
+FP68K_REMDIV:
+        SUBQ.L  #0x1,A4                         | remainder exponent: src - 1 (at most half the divisor)
+        MOVE.L  A1,D1                           | dividend: the dst
+        MOVE.L  A2,D2                           | ...
+        MOVE.L  D4,D3                           | divisor: the src
+        MOVEA.L D5,A2                           | ...
+        BSR.B   FP68K_RESTORE                   | RESTORE: all quotient bits through the first fraction bit
+        BTST    #0x0,D5                         | first fraction bit of the quotient
+        BEQ.B   FP68K_REMQUO                    | 0: remainder < half the divisor, done ->
+        TST.L   D1                              | remainder 0 (exactly half)?
+        BNE.B   FP68K_REMDIV_3                  | no: > half ->
+        TST.L   D2                              | ...
+        BNE.B   FP68K_REMDIV_3                  | no: > half ->
+        BTST    #0x1,D5                         | exactly half: low integer quotient bit
+        BEQ.B   FP68K_REMDIV_5                  | even: keep the quotient ->
+FP68K_REMDIV_3:
+        BCHG    #0x7,D6                         | flip the remainder sign
+        ADDQ.W  #0x2,D5                         | quotient + 1 (in bit 1)
+FP68K_REMDIV_5:
+        EXG     D2,A2                           | swap divisor and remainder
+        EXG     D1,D3                           | ...
+        SUB.L   A2,D2                           | remainder := divisor - remainder
+        SUBX.L  D3,D1                           | (high halves)
+| FP68K_REMQUO: store the quotient bits (sign from D6 bit 6).
+FP68K_REMQUO:
+        LSR.B   #0x1,D5                         | drop the fraction bit: low 7 integer quotient bits
+        BTST    #0x6,D6                         | quotient negative (signs differed)?
+        BEQ.B   FP68K_REMQUO_9                  | no ->
+        NEG.B   D5                              | negate it
+FP68K_REMQUO_9:
+        EXT.W   D5                              | signed byte to word
+        MOVE.W  D5,0x6(SP)                      | into the saved D0.W: the caller gets it in D0
+        MOVE.L  D1,D4                           | result := the remainder
+        MOVE.L  D2,D5                           | (low half)
+| FP68K_REMFIN: store the remainder (ZNORMCOERCE).
+FP68K_REMFIN:
+        BRA.W   FP68K_ZNORMCOERCE               | -> ZNORMCOERCE
 | ----------------------------------------------------------
-|
-| FP68K_CONT_67
-|
-FP68K_CONT_67:
-        SUBQ.L  #0x1,A4                         | adjust exponent for extra shift
-        MOVE.L  A1,D1                           | D1 = dividend high
-        MOVE.L  A2,D2                           | D2 = dividend low
-        MOVE.L  D4,D3                           | D3 = divisor high
-        MOVE.L  D5,A2                           | A2 = divisor low
-        BSR.B   FP68K_LOOP_4                    | divide: quotient in D4:D5
-        BTST    #0x0,D5                         | quotient odd?
-        BEQ.B   FP68K_OK_18                     | even -> remainder is final
-        TST.L   D1                              | remainder high zero?
-        BNE.B   FP68K_CONT_68                   | nonzero -> adjust for IEEE rem
-        TST.L   D2                              | remainder low zero?
-        BNE.B   FP68K_CONT_68                   | nonzero -> adjust
-        BTST    #0x1,D5                         | quotient bit 1 set? (round to even)
-        BEQ.B   FP68K_SKIP_13                   | no -> don't adjust
-FP68K_CONT_68:
-        BChg    #0x7,D6                         | flip result sign
-        ADDQ.W  #0x2,D5                         | round quotient to even
-FP68K_SKIP_13:
-        exg     D2,A2                           | swap remainder/divisor low
-        EXG     D1,D3                           | swap remainder/divisor high
-        SUB.L   A2,D2                           | remainder = divisor - remainder
-        SUBX.L  D3,D1                           | borrow propagation
-FP68K_OK_18:
-        LSR.B   #0x1,D5                         | extract low quotient bits
-        BTST    #0x6,D6                         | original signs differed?
-        BEQ.B   FP68K_NO_23                     | no -> keep quotient sign
-        NEG.B   D5                              | negate quotient bits
-FP68K_NO_23:
-        EXT     D5                              | sign-extend quotient byte
-        MOVE    D5,0x6(SP)                      | store quotient bits on stack
-        MOVE.L  D1,D4                           | remainder high -> result
-        MOVE.L  D2,D5                           | remainder low -> result
-FP68K_CONT_69:
-        BRA     FP68K_CONT_22                   | -> normalize remainder
-
+| FP68K_CMPTOP -- compare (CMP, CMPX): call the case routine
+| for the number cases; it returns the CCR value in D0: CMPG $00 (dst >
+| src), CMPL $19 (less), CMPE $04 (equal), CMPU $02 (unordered).
+| FP68K_CMPFIN: CMPX signals invalid when unordered; the CCR
+| value goes to D7.hi (CHKERR moves it to the CCR).
+FP68K_CMPTOP:
+        MOVE.W  FP68K_CMPCASE(PC,D3.W),D3       | offset of the case routine (CMPCASE)
+        JSR     FP68K_CMPTOP(PC,D3.W)           | call it: D0 = CCR value
+FP68K_CMPFIN:
+        CMPI.W  #0x2,D0                         | CMPFIN: unordered (CMPU)?
+        BNE.B   FP68K_CMPFIN_1                  | no ->
+        BTST    #0x11,D6                        | CMPX (OPIFCPX)?
+        BEQ.B   FP68K_CMPFIN_1                  | no ->
+        BSET    #0x8,D6                         | CMPX unordered: invalid
+FP68K_CMPFIN_1:
+        MOVE.W  D0,D7                           | CCR value ...
+        SWAP.W  D7                              | ... to D7.hi
+        RTS                                     | return: comparison result as CCR bits in D7.hi (CMPFIN)
+| FP68K_CMPCASE: case routines by (dst, src), offsets from
+| FP68K_CMPTOP.
+FP68K_CMPCASE:
+        .short  FP68K_CMPNUM-FP68K_CMPTOP       | num, num: CMPNUM
+        .short  FP68K_CMPS0-FP68K_CMPTOP        | num, 0: CMPS0
+        .short  FP68K_CMPD0-FP68K_CMPTOP        | num, inf: CMPD0: num vs inf like 0 vs num
+        .short  FP68K_CMPD0-FP68K_CMPTOP        | 0, num: CMPD0
+        .short  FP68K_CMP0-FP68K_CMPTOP         | 0, 0: CMP0: 0 vs 0 equal
+        .short  FP68K_CMPD0-FP68K_CMPTOP        | 0, inf: CMPD0
+        .short  FP68K_CMPS0-FP68K_CMPTOP        | inf, num: CMPS0: inf vs num like num vs 0
+        .short  FP68K_CMPS0-FP68K_CMPTOP        | inf, 0: CMPS0
+        .short  FP68K_CMPINF-FP68K_CMPTOP       | inf, inf: CMPINF
+| FP68K_CMPS0: num vs 0 -- as 0 vs -num: the dst sign to
+| bit 7, inverted.
+FP68K_CMPS0:
+        ADD.B   D6,D6                           | dst sign to bit 7 ...
+        NOT.B   D6                              | ... inverted: 0 vs -num
+| FP68K_CMPD0: 0 vs. number -- D0 = CMPG ($00) or CMPL ($19)
+FP68K_CMPD0:
+        MOVEQ.L #0x0,D0                         | D0 = CMPG ($00, greater): dst > src if src < 0
+        TST.B   D6                              | sign of the source
+        BMI.B   FP68K_CMPD0_1                   | negative: greater ->
+        MOVEQ.L #0x19,D0                        | D0 = CMPL ($19, less): dst < positive src
+FP68K_CMPD0_1:
+        RTS                                     | return D0 = CMPG or CMPL (CMPD0)
 | ----------------------------------------------------------
-|
-| FP68K_CONT_70: FP convert - format conversion dispatch
-|
-FP68K_CONT_70:
-        MOVE    FP68K_CONT_72(PC,D3.W),D3       | get class-dispatch offset
-        JSR     FP68K_CONT_70(PC,D3.W)          | dispatch conversion handler
-FP68K_CONT_71:
-        CMPI    #0x2,D0                         | result = unordered?
-        BNE.B   FP68K_SKIP_14                   | no -> store condition
-        BTST    #0x11,D6                        | signaling compare mode?
-        BEQ.B   FP68K_SKIP_14                   | no -> skip
-        BSET    #0x8,D6                         | flag invalid (unordered + signal)
-FP68K_SKIP_14:
-        MOVE    D0,D7                           | save condition code
-        SWAP    D7                              | to high word for return
-        RTS                                     | return to caller
-
-| Jump Table
-FP68K_CONT_72:
-  .byte  0x00,0x48,0x00,0x30,0x00,0x34
-  .byte 0x00,0x34,0x00,0x44,0x00,0x34
-  .byte 0x00,0x30,0x00,0x30,0x00,0x3E
-| FP68K_CONT_73: compare - ordered compare, swap sign sense
-FP68K_CONT_73:
-        ADD.B   D6,D6                           | shift dest sign to bit 7
-        NOT.B   D6                              | invert for opposite ordering
-| FP68K_OK_19: compare returns 0 (less) or $19 (greater)
-FP68K_OK_19:
-        MOVEQ.L #0x0,D0                         | assume less than
-        TST.B   D6                              | check combined sign
-        BMI.B   FP68K_CONT_74                   | negative = less ->
-        MOVEQ.L #0x19,D0                        | positive = greater
-FP68K_CONT_74:
-        RTS                                     | return to caller
-
+| FP68K_CMPINF: inf vs inf -- equal if the signs are equal,
+| else as 0 vs num. FP68K_CMP0: equal.
+FP68K_CMPINF:
+        BTST    #0x5,D6                         | signs differ?
+        BNE.B   FP68K_CMPD0                     | yes: as 0 vs num ->
+FP68K_CMP0:
+        MOVEQ.L #0x4,D0                         | CMP0: CMPE ($04), equal
+        RTS                                     | return D0 = CMPE ($04): equal (CMP0)
 | ----------------------------------------------------------
-|
-| FP68K_CONT_75: compare - source is zero (equal if dest zero, else ordered)
-|
-FP68K_CONT_75:
-        BTst    #0x5,D6                         | dest has different sign?
-        BNE.B   FP68K_OK_19                     | yes -> ordered by sign
-FP68K_CONT_76:
-        MOVEQ.L #0x4,D0                         | result = equal
-        RTS                                     | return to caller
-
+| FP68K_CMPNUM: num vs num -- different signs: as 0 vs num;
+| else compare exponents, then significands; for negative operands the
+| order flips.
+FP68K_CMPNUM:
+        BTST    #0x5,D6                         | signs differ?
+        BNE.B   FP68K_CMPD0                     | yes: as 0 vs num ->
+        CMPA.L  A4,A3                           | dst exponent - src exponent
+        BGT.B   FP68K_CMPNUM_1                  | dst larger ->
+        BLT.B   FP68K_CMPNUM_2                  | dst smaller ->
+        CMPA.L  D4,A1                           | equal: high halves
+        BHI.B   FP68K_CMPNUM_1                  | dst larger ->
+        BCS.B   FP68K_CMPNUM_2                  | dst smaller ->
+        CMPA.L  D5,A2                           | low halves
+        BEQ.B   FP68K_CMP0                      | equal: CMP0 ->
+        BCS.B   FP68K_CMPNUM_2                  | dst smaller ->
+FP68K_CMPNUM_1:
+        NOT.B   D6                              | dst larger: invert the sign test
+FP68K_CMPNUM_2:
+        MOVEQ.L #0x19,D0                        | D0 = CMPL ($19): dst < src ...
+        TST.B   D6                              | ... unless both are negative
+        BPL.B   FP68K_CMPNUM_21                 | positive: less ->
+        MOVEQ.L #0x0,D0                         | negative: CMPG ($00), greater
+FP68K_CMPNUM_21:
+        RTS                                     | return D0 = CMPL or CMPG (CMPNUM)
 | ----------------------------------------------------------
-|
-| FP68K_CONT_77: compare - both normal, compare magnitudes
-|
-FP68K_CONT_77:
-        BTst    #0x5,D6                         | different signs?
-        BNE.B   FP68K_OK_19                     | yes -> ordered by sign
-        CMPA.L  A4,A3                           | compare exponents
-        BGT.B   FP68K_CONT_78                   | dest > src -> swap sense
-        BLT.B   FP68K_CONT_79                   | dest < src -> src greater
-        CMPA.L  D4,A1                           | same exp: compare mantissa high
-        BHI.B   FP68K_CONT_78                   | dest > src -> swap
-        BCS.B   FP68K_CONT_79                   | dest < src -> ordered
-        CMPA.L  D5,A2                           | compare mantissa low
-        BEQ.B   FP68K_CONT_76                   | exactly equal
-        BCS.B   FP68K_CONT_79                   | dest < src
-FP68K_CONT_78:
-        NOT.B   D6                              | flip ordering sense
-FP68K_CONT_79:
-        MOVEQ.L #0x19,D0                        | assume greater-than
-        TST.B   D6                              | check sign
-        BPL.B   FP68K_CONT_80                   | positive -> greater
-        MOVEQ.L #0x0,D0                         | negative -> less-than
-FP68K_CONT_80:
-        RTS                                     | return to caller
-
+| FP68K_CVT2E -- convert to extended (format of the src in
+| the opword): only finite nonzero values need coercing.
+FP68K_CVT2E:
+        TST.W   D3                              | finite nonzero (D3 = 0)?
+        BEQ.W   FP68K_COERCE                    | yes: COERCE ->
+        RTS                                     | zero or infinity: as it is
 | ----------------------------------------------------------
-|
-| FP68K_NO_24: FP square root entry - dispatch by operand class
-|
-FP68K_NO_24:
-        TST     D3                              | class = normal (zero)?
-        BEQ     FP68K_EXIT_10                   | yes -> round and return
-        RTS                                     | NaN/Inf/zero: return as-is
-
+| FP68K_RINT -- round to an integral value in the current
+| rounding direction: align the binary point (IPALIGN) and coerce.
+FP68K_RINT:
+        TST.W   D3                              | finite nonzero?
+        BEQ.B   FP68K_RINT_1                    | yes ->
+        RTS                                     | zero or infinity: as it is
 | ----------------------------------------------------------
-|
-| FP68K_CONT_81: FP round-to-integer (rint) - round using current SANE mode
-|
-FP68K_CONT_81:
-        TST     D3                              | class = normal?
-        BEQ.B   FP68K_OK_20                     | yes -> round to integer
-        RTS                                     | NaN/Inf/zero: return as-is
-
+| FP68K_RINT_1 (Apple RINT @1): finite nonzero.
+FP68K_RINT_1:
+        BSR.B   FP68K_IPALIGN                   | IPALIGN: the binary point at the right end
+        MOVEA.W (A0),A2                         | save the environment (COMINT restores it)
+        BRA.B   FP68K_COMINT                    | -> COMINT
 | ----------------------------------------------------------
-|
-| FP68K_OK_20: rint - round using current SANE rounding mode
-|
-FP68K_OK_20:
-        BSR.B   FP68K_CONT_84                   | shift out fractional bits
-        MOVE    (A0),A2                         | save current environment
-        BRA.B   FP68K_CONT_83                   | -> round and restore
-
+| FP68K_TINT -- truncate to an integral value: as RINT with
+| the direction forced to toward zero.
+FP68K_TINT:
+        TST.W   D3                              | finite nonzero?
+        BEQ.B   FP68K_TINT_1                    | yes ->
+        RTS                                     | zero or infinity: as it is
 | ----------------------------------------------------------
-|
-| FP68K_CONT_82: FP truncate-to-integer (tint) - round toward zero
-|
-FP68K_CONT_82:
-        TST     D3                              | class = normal?
-        BEQ.B   FP68K_OK_21                     | yes -> truncate to integer
-        RTS                                     | NaN/Inf/zero: return as-is
-
+| FP68K_TINT_1 (Apple TINT @1): finite nonzero. (Apple's source notes a
+| bug comment about the chop encoding; the code sets 11, toward zero.)
+FP68K_TINT_1:
+        BSR.B   FP68K_IPALIGN                   | IPALIGN
+        MOVEA.W (A0),A2                         | save the environment
+        BSET    #0x6,(A0)                       | rounding direction ...
+        BSET    #0x5,(A0)                       | ... 11: toward zero
+| FP68K_COMINT: coerce (rounding the fraction bits away),
+| restore the environment, normalize the result or make it zero.
+FP68K_COMINT:
+        BSR.W   FP68K_COERCE                    | COERCE: round the fraction bits away (maybe to 0)
+        MOVE.W  A2,(A0)                         | restore the environment (keeps no new flags)
+        TST.L   D4                              | normalized?
+        BMI.B   FP68K_COMINT_9                  | yes ->
+        BNE.B   FP68K_COMINT_5                  | unnormalized ->
+        TST.L   D5                              | ...
+        BNE.B   FP68K_COMINT_5                  | ...
+        SUBA.L  A4,A4                           | zero: exponent 0
+        BRA.B   FP68K_COMINT_9                  | -> return
 | ----------------------------------------------------------
-|
-| FP68K_OK_21: tint - force round-toward-zero mode, then round
-|
-FP68K_OK_21:
-        BSR.B   FP68K_CONT_84                   | shift out fractional bits
-        MOVE    (A0),A2                         | save current environment
-        BSET    #0x6,(A0)                       | set round mode bit 6
-        BSET    #0x5,(A0)                       | set round mode bit 5 = toward zero
-FP68K_CONT_83:
-        BSR     FP68K_EXIT_10                   | round per mode
-        MOVE    A2,(A0)                         | restore original environment
-        TST.L   D4                              | result normalized?
-        BMI.B   FP68K_DONE_10                   | yes -> done
-        BNE.B   FP68K_LOOP_5                    | nonzero -> renormalize
-        TST.L   D5                              | low mantissa nonzero?
-        BNE.B   FP68K_LOOP_5                    | yes -> renormalize
-        SUBA.L  A4,A4                           | result is zero, clear exponent
-        BRA.B   FP68K_DONE_10                   | -> done
-
+| FP68K_COMINT_5 (Apple COMINT @5): normalize.
+FP68K_COMINT_5:
+        SUBQ.L  #0x1,A4                         | exponent - 1
+        ADD.L   D5,D5                           | significand * 2
+        ADDX.L  D4,D4                           | ...
+        BPL.B   FP68K_COMINT_5                  | until normalized
+FP68K_COMINT_9:
+        RTS                                     | return: integral value, normalized or zero (COMINT)
 | ----------------------------------------------------------
-|
-| FP68K_LOOP_5: renormalize after rint/tint rounding
-|
-FP68K_LOOP_5:
-        SUBQ.L  #0x1,A4                         | decrement exponent
-        ADD.L   D5,D5                           | shift mantissa left
-        ADDX.L  D4,D4                           | propagate carry
-        BPL.B   FP68K_LOOP_5                    | loop until MSB set
-FP68K_DONE_10:
-        RTS                                     | return to caller
-
+| FP68K_IPALIGN -- put the binary point right of bit 23,
+| 52 or 63 (single, double, extended): shift the fraction bits into D7.
+| Returns LE if the value has no fraction bits (too big), GT if shifted.
+FP68K_IPALIGN:
+        TST.L   D6                              | single?
+        BMI.B   FP68K_IPALIGN_1                 | yes ->
+        BTST    #0x1E,D6                        | double?
+        BEQ.B   FP68K_IALIGN                    | no: extended (IALIGN) ->
+        MOVEQ.L #0x34,D0                        | double: point right of bit 52
+        BRA.W   FP68K_FINALIGN                  | -> FINALIGN
 | ----------------------------------------------------------
-|
-| FP68K_CONT_84: compute precision limit for current format
-| Returns D0 = max mantissa bits (24 for single, 53 for double, 64 for extended)
-|
-FP68K_CONT_84:
-        TST.L   D6                              | single precision mode?
-        BMI.B   FP68K_OK_22                     | yes -> 24 bits
-        BTST    #0x1E,D6                        | double precision mode?
-        BEQ.B   FP68K_NO_25                     | no -> extended (64 bits)
-        MOVEQ.L #0x34,D0                        | double: 52 mantissa bits
-        BRA     FP68K_CONT_85                   | -> compute shift
-
+| FP68K_IPALIGN_1 (Apple IPALIGN @1): single.
+FP68K_IPALIGN_1:
+        MOVEQ.L #0x17,D0                        | single: right of bit 23
+        BRA.W   FP68K_FINALIGN                  | -> FINALIGN
 | ----------------------------------------------------------
-|
-| FP68K_OK_22: single precision - 23 mantissa bits
-|
-FP68K_OK_22:
-        MOVEQ.L #0x17,D0                        | single: 23 mantissa bits
-        BRA     FP68K_CONT_85                   | -> compute shift
-
+| FP68K_IALIGN: extended; FP68K_FINALIGN common.
+FP68K_IALIGN:
+        MOVEQ.L #0x3F,D0                        | extended: right of bit 63
+FP68K_FINALIGN:
+        ADDI.W  #0x3FFF,D0                      | biased exponent of such an integer
+        MOVE.W  D0,D1                           | save it: the new exponent
+        SUB.L   A4,D0                           | - exponent = bits to shift out
+        BGT.B   FP68K_FINALIGN_7                | some ->
+        RTS                                     | none: return LE (an integer already, too big)
 | ----------------------------------------------------------
-|
-| FP68K_NO_25: extended precision - 63 mantissa bits
-|
-FP68K_NO_25:
-        MOVEQ.L #0x3F,D0                        | extended: 63 mantissa bits
-FP68K_CONT_85:
-        ADDI    #0x3FFF,D0                      | add extended bias for comparison
-        MOVE    D0,D1                           | D1 = max biased exponent
-        SUB.L   A4,D0                           | D0 = bits to shift out
-        BGT.B   FP68K_CONT_86                   | fractional bits exist -> shift
-        RTS                                     | no fraction -> already integer
-
+| FP68K_FINALIGN_7 (Apple FINALIGN @7): shift right D0 bits to the new exponent.
+FP68K_FINALIGN_7:
+        MOVEA.W D1,A4                           | exponent := the integer exponent
+        BSR.W   FP68K_RTSHIFT                   | RTSHIFT D0 bits into D7
+        MOVE.W  #0x0,CCR                        | CCR := 0: return GT (aligned)
+        RTS                                     | return GT: binary point right-aligned (FINALIGN)
 | ----------------------------------------------------------
-|
-| FP68K_CONT_86: shift out fractional bits into guard word
-|
-FP68K_CONT_86:
-        MOVE    D1,A4                           | set exponent to integer limit
-        BSR     FP68K_CONT_21                   | right-shift D0 bits
-        MOVE    #0x0,CCR                        | clear X flag for rounding
-        RTS                                     | return to caller
-
+| FP68K_CVTE2 -- convert from extended: to a float as CVT2E;
+| to int16/int32/comp: zero is done, infinity overflows, else align the
+| point at the right (IALIGN), round, check the range (IOFLOW).
+FP68K_CVTE2:
+        BTST    #0x1A,D6                        | integer destination (DSTINT)?
+        BEQ.B   FP68K_CVT2E                     | no: as CVT2E ->
+        CMPI.W  #0x2,D3                         | zero?
+        BNE.B   FP68K_CVTE2_2                   | no ->
+        RTS                                     | zero: done
 | ----------------------------------------------------------
-|
-| FP68K_CONT_87: FP convert-to-integer (comp/int/long) - pack mantissa
-| Handles clamping to integer range and NaN/infinity cases
-|
-FP68K_CONT_87:
-        BTst    #0x1A,D6                        | converting to integer type?
-        BEQ.B   FP68K_NO_24                     | no -> normal convert path
-        CMPI    #0x2,D3                         | source is NaN?
-        BNE.B   FP68K_NO_26                     | no -> check infinity
-        RTS                                     | NaN -> return NaN as integer
-
+| FP68K_CVTE2_2 (Apple CVTE2 @2): infinity -> overflow.
+FP68K_CVTE2_2:
+        CMPI.W  #0x4,D3                         | infinity?
+        BNE.B   FP68K_CVTE2_4                   | no ->
+        MOVEQ.L #-0x1,D4                        | make sure IOFLOW finds an overflow
+        BRA.B   FP68K_IOFLOW                    | -> IOFLOW
+FP68K_CVTE2_4:
+        BSR.B   FP68K_IALIGN                    | IALIGN: point right of D5
+        BLE.B   FP68K_IOFLOW                    | LE: too big, overflow ->
+        CLR.L   D1                              | D1:D2 = 0:1: round as an extended (CVTE2)
+        MOVEQ.L #0x1,D2                         | (low half 1)
+        BTST    #0x0,D5                         | Z = NOT LSB
+        BSR.W   FP68K_ROUND                     | ROUND (cannot carry out: the lead bit is 0)
+| FP68K_IOFLOW -- integer range check: limit $8000 (int16),
+| $80000000 (int32), comp: the leading bit; the limit itself is allowed
+| only for a negative value. Overflow: the limit (largest negative
+| integer, comp: the comp NaN), invalid without inexact.
+FP68K_IOFLOW:
+        MOVEQ.L #0x1,D1                         | D1 := $80000000 ...
+        ROR.L   #0x1,D1                         | ...
+        BTST    #0x18,D6                        | int32 (DSTLO)?
+        BNE.B   FP68K_IOFLOW_21                 | yes: limit $80000000 ->
+        BTST    #0x19,D6                        | comp (DSTMD)?
+        BNE.B   FP68K_IOFLOW_41                 | yes ->
+        SWAP.W  D1                              | int16: limit $00008000
+FP68K_IOFLOW_21:
+        TST.L   D4                              | any high bits?
+        BNE.B   FP68K_IOFLOW_25                 | yes: overflow ->
+        CMP.L   D1,D5                           | magnitude vs the limit
+        BHI.B   FP68K_IOFLOW_25                 | above: overflow ->
+        BCS.B   FP68K_IOFLOW_23                 | below: fits ->
+        TST.B   D6                              | equal: allowed only if negative
+        BPL.B   FP68K_IOFLOW_25                 | positive: overflow ->
+FP68K_IOFLOW_23:
+        TST.B   D6                              | negative?
+        BPL.B   FP68K_IOFLOW_24                 | no ->
+        NEG.L   D5                              | negate the 64 bits
+        NEGX.L  D4                              | ...
+FP68K_IOFLOW_24:
+        RTS                                     | return: integer in D4:D5, negated if negative (IOFLOW)
 | ----------------------------------------------------------
-|
-| FP68K_NO_26: convert infinity to integer - clamp to max
-|
-FP68K_NO_26:
-        CMPI    #0x4,D3                         | source is infinity?
-        BNE.B   FP68K_NO_27                     | no -> normal value
-        MOVEQ.L #-0x1,D4                        | D4 = $FFFFFFFF (max magnitude)
-        BRA.B   FP68K_NO_28                     | -> clamp to integer range
-
+| FP68K_IOFLOW_25 (Apple IOFLOW @25): overflow -- the limit value, invalid.
+FP68K_IOFLOW_25:
+        MOVE.L  D1,D5                           | the limit: the largest negative int16/int32
+FP68K_IOFLOW_27:
+        BSET    #0x8,D6                         | invalid ...
+        BCLR    #0xC,D6                         | ... without inexact
+        RTS                                     | return: integer overflow -- largest negative integer, invalid
+FP68K_IOFLOW_41:
+        TST.L   D4                              | comp: leading bit set?
+        BPL.B   FP68K_IOFLOW_23                 | no: fits ->
+        CLR.L   D5                              | comp overflow: D4:D5 := $80000000:0, the comp NaN
+        MOVE.L  D1,D4                           | (high half $80000000)
+        BRA.B   FP68K_IOFLOW_27                 | -> invalid
 | ----------------------------------------------------------
-|
-| FP68K_NO_27: convert normal value to integer - round and clamp
-|
-FP68K_NO_27:
-        BSR.B   FP68K_NO_25                     | shift out fractional bits
-        BLE.B   FP68K_NO_28                     | no fraction -> already integer
-        CLR.L   D1                              | rounding increment high = 0
-        MOVEQ.L #0x1,D2                         | rounding increment low = 1
-        BTST    #0x0,D5                         | test LSB for round-to-even
-        BSR     FP68K_CONT_26                   | apply rounding
-FP68K_NO_28:
-        MOVEQ.L #0x1,D1                         | prepare max positive value
-        ROR.L   #0x1,D1                         | D1 = $80000000
-        BTST    #0x18,D6                        | target is 16-bit integer?
-        BNE.B   FP68K_OK_23                     | yes -> check 16-bit range
-        BTST    #0x19,D6                        | target is 32-bit long?
-        BNE.B   FP68K_OK_26                     | yes -> check 32-bit range
-        SWAP    D1                              | D1 = $00008000 (16-bit max+1)
-FP68K_OK_23:
-        TST.L   D4                              | high mantissa nonzero?
-        BNE.B   FP68K_OK_25                     | yes -> overflow
-        CMP.L   D1,D5                           | value > max positive?
-        BHI.B   FP68K_OK_25                     | yes -> overflow
-        BCS.B   FP68K_OK_24                     | less -> in range
-        TST.B   D6                              | exactly max: negative?
-        BPL.B   FP68K_OK_25                     | positive -> overflow (max+1)
-FP68K_OK_24:
-        TST.B   D6                              | check sign for negation
-        BPL.B   FP68K_DONE_11                   | positive -> done
-        NEG.L   D5                              | negate low mantissa
-        NEGX.L  D4                              | negate high mantissa
-FP68K_DONE_11:
-        RTS                                     | return to caller
-
+| FP68K_SQRTTOP -- square root: +-0 and +inf are their own
+| roots, negative operands invalid (NANSQRT 1); otherwise halve the
+| exponent and extract the root bit by bit (restoring, two radicand bits
+| per step, 65 steps), the rest gives the sticky bit; coerce.
+FP68K_SQRTTOP:
+        CMPI.W  #0x2,D3                         | +-0?
+        BNE.B   FP68K_SQRTTOP_1                 | no ->
+        RTS                                     | sqrt(+-0) = +-0
 | ----------------------------------------------------------
-|
-| FP68K_OK_25: integer overflow - return max value, flag invalid
-|
-FP68K_OK_25:
-        MOVE.L  D1,D5                           | D5 = max magnitude for type
-FP68K_CONT_88:
-        BSet    #0x8,D6                         | flag invalid operation
-        BCLR    #0xC,D6                         | clear inexact (invalid overrides)
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| FP68K_OK_26: 64-bit comp range check
-|
-FP68K_OK_26:
-        TST.L   D4                              | high word in range?
-        BPL.B   FP68K_OK_24                     | yes -> negate if needed
-        CLR.L   D5                              | overflow: clear low
-        MOVE.L  D1,D4                           | D4 = $80000000 (comp NaN/max)
-        BRA.B   FP68K_CONT_88                   | -> flag invalid
-
-| ----------------------------------------------------------
-|
-| FP68K_CONT_89: FP square root core - non-restoring digit recurrence
-| Uses iterative shift-subtract algorithm for 64-bit precision
-|
-FP68K_CONT_89:
-        CMPI    #0x2,D3                         | operand is NaN?
-        BNE.B   FP68K_NO_29                     | no -> check sign
-        RTS                                     | NaN -> return NaN
-
-| ----------------------------------------------------------
-|
-| FP68K_NO_29
-|
-FP68K_NO_29:
-        MOVEQ.L #0x1,D0                         | invalid payload = 1 (sqrt neg)
-        TST.B   D6                              | operand negative?
-        BMI     FP68K_OK_3                      | yes -> invalid NaN
-        CMPI    #0x4,D3                         | operand is infinity?
-        BNE.B   FP68K_NO_30                     | no -> normal sqrt
+| FP68K_SQRTTOP_1 (Apple SQRTTOP @1): not zero.
+FP68K_SQRTTOP_1:
+        MOVEQ.L #0x1,D0                         | NaN code 1 (NANSQRT)
+        TST.B   D6                              | negative (number or infinity)?
+        BMI.W   FP68K_INVALIDOP                 | yes: INVALIDOP ->
+        CMPI.W  #0x4,D3                         | +inf?
+        BNE.B   FP68K_SQRTTOP_10                | no ->
         RTS                                     | sqrt(+inf) = +inf
-
+| ----------------------------------------------------------
+| FP68K_SQRTTOP_10 (Apple SQRTTOP @10): finite positive. Root in D0.B:D4:D5,
+| radicand in D1.B:D2:D3:D6:D7, step counter in A3.
+FP68K_SQRTTOP_10:
+        MOVE.W  A4,D0                           | D0 = exponent
+        ASR.W   #0x1,D0                         | halve it
+        MOVE.W  SR,D1                           | save C: 1 if the true exponent is even
+        BCC.B   FP68K_SQRTTOP_12                | C = 0 (odd) ->
+        ADDQ.W  #0x1,D0                         | even: + 1 (rebias by $2000 in all)
+FP68K_SQRTTOP_12:
+        ADDI.W  #0x1FFF,D0                      | rebias
+        MOVEA.W D0,A4                           | the root's exponent
+        MOVEA.L D6,A1                           | save D6 ...
+        MOVEA.L D7,A2                           | ... and D7
+        MOVE.L  D5,D7                           | radicand D6:D7 := the significand
+        MOVE.L  D4,D6                           | ...
+        CLR.L   D3                              | D3 := 0: clear the upper radicand D2:D3 (SQRTTOP)
+        MOVE.L  D3,D2                           | (D2 too)
+        ADD.L   D7,D7                           | radicand left 1 bit: point between D3 and D6
+        ADDX.L  D6,D6                           | ...
+        ADDX.W  D3,D3                           | ...
+        MOVE.W  D1,CCR                          | C from the exponent halving
+        BCS.B   FP68K_SQRTTOP_14                | even exponent: one shift ->
+        ADD.L   D7,D7                           | odd: one more
+        ADDX.L  D6,D6                           | ...
+        ADDX.W  D3,D3                           | ...
+FP68K_SQRTTOP_14:
+        MOVE.L  D2,D0                           | root D0.B:D4:D5 := ...0011
+        MOVE.L  D2,D4                           | ...
+        MOVEQ.L #0x3,D5                         | ...: the first root bit is 1 (normalized)
+        SUBQ.W  #0x1,D3                         | first step done: radicand - 1
+        MOVEQ.L #0x41,D1                        | 65 steps ...
+        MOVEA.W D1,A3                           | ... counted in A3
+        CLR.L   D1                              | D1 := 0: radicand top bits (the count is in A3)
+| FP68K_SQRTTOP_20 (Apple SQRTTOP @20): one root bit -- radicand left 2 bits,
+| root <root>1 -> <root>01, try radicand - root.
+FP68K_SQRTTOP_20:
+        ADD.L   D7,D7                           | radicand left 2 bits
+        ADDX.L  D6,D6                           | ...
+        ADDX.L  D3,D3                           | ...
+        ADDX.L  D2,D2                           | ...
+        ADDX.W  D1,D1                           | ...
+        ADD.L   D7,D7                           | (second bit)
+        ADDX.L  D6,D6                           | ...
+        ADDX.L  D3,D3                           | ...
+        ADDX.L  D2,D2                           | ...
+        ADDX.W  D1,D1                           | ...
+        ADD.L   D5,D5                           | root left 1 bit: <root>1 -> <root>10 ...
+        ADDX.L  D4,D4                           | ...
+        ADDX.W  D0,D0                           | ...
+        SUBQ.W  #0x1,D5                         | ... -> <root>01
+        SUB.L   D5,D3                           | radicand - root
+        SUBX.L  D4,D2                           | ...
+        SUBX.W  D0,D1                           | ...
+        BCC.B   FP68K_SQRTTOP_22                | no borrow: the root bit is 1 ->
+        ADD.L   D5,D3                           | borrow: add it back, the root bit is 0
+        ADDX.L  D4,D2                           | ...
+        ADDX.W  D0,D1                           | ...
+        BRA.B   FP68K_SQRTTOP_24                | -> count
+| ----------------------------------------------------------
+| FP68K_SQRTTOP_22 (Apple SQRTTOP @22): the root bit is 1.
+FP68K_SQRTTOP_22:
+        ADDQ.W  #0x2,D5                         | <root>01 -> <root>11: bit 1
+FP68K_SQRTTOP_24:
+        EXG     D0,A3                           | the counter ...
+        SUBQ.W  #0x1,D0                         | ... - 1 ...
+        EXG     D0,A3                           | ... back to A3
+        BNE.B   FP68K_SQRTTOP_20                | more steps ->
+        MOVE.L  A1,D6                           | restore D6 (opword etc.)
+        MOVE.L  A2,D7                           | and D7
+        OR.L    D2,D1                           | remainder nonzero?
+        OR.L    D3,D1                           | ...
+        BNE.B   FP68K_SQRTTOP_30                | yes: the appended 1 stays as sticky bit ->
+        SUBQ.W  #0x1,D5                         | exact: drop the appended 1
+FP68K_SQRTTOP_30:
+        MOVEQ.L #0x3,D1                         | shift the 66 root bits right 3 into place
+FP68K_SQRTTOP_32:
+        LSR.W   #0x1,D0                         | ...
+        ROXR.L  #0x1,D4                         | ...
+        ROXR.L  #0x1,D5                         | ...
+        ROXR.W  #0x1,D7                         | ... the low bits become the round bits
+        SUBQ.W  #0x1,D1                         | count
+        BNE.B   FP68K_SQRTTOP_32                | 3 times
+        BRA.W   FP68K_COERCE                    | -> COERCE
+| ----------------------------------------------------------
+| FP68K_LOGBTOP -- logb: the unbiased exponent as a floating
+| value; logb(+-0) = -inf with divide by zero, logb(+-inf) = +inf.
+FP68K_LOGBTOP:
+        CLR.B   D6                              | the operand sign does not matter
+        CMPI.W  #0x2,D3                         | operand is zero (D3 = 2)?
+        BNE.B   FP68K_LOGBTOP_1                 | no -> infinity?
+        ORI.W   #0x880,D6                       | logb(0): division by zero (ERRZ) and minus sign
+        MOVEA.W #0x7FFF,A4                      | exponent of infinity
+        CLR.L   D4                              | D4 := 0: significand of -infinity
+        MOVE.L  D4,D5                           | (low half)
+        RTS                                     | return: logb(+-0) = -inf
+| ----------------------------------------------------------
+| FP68K_LOGBTOP_1 (Apple LOGBTOP @1): not zero.
+FP68K_LOGBTOP_1:
+        CMPI.W  #0x4,D3                         | infinity?
+        BNE.B   FP68K_UNPACK_EXPONENT           | no: finite ->
+        RTS                                     | logb(+-inf) = +inf (sign cleared)
+FP68K_UNPACK_EXPONENT:
+        CLR.L   D5                              | D5 := 0: the exponent becomes an integer in D4
+        SUBA.W  #0x3FFF,A4                      | unbiased exponent ...
+        MOVE.L  A4,D4                           | ... as an integer in D4
+        BPL.B   FP68K_LOGBTOP_12                | positive ->
+        ORI.B   #0x80,D6                        | negative: minus sign ...
+        NEG.L   D4                              | ... and the magnitude
+FP68K_LOGBTOP_12:
+        MOVEA.W #0x401E,A4                      | exponent 31 (biased): D4 is an integer
+        BRA.W   FP68K_ZNORMCOERCE               | -> ZNORMCOERCE
+| ----------------------------------------------------------
+| FP68K_SCALBTOP -- scalb: x * 2^n, the int16 n at the
+| second address: add n to the exponent and coerce; 0 and inf unchanged.
+FP68K_SCALBTOP:
+        TST.W   D3                              | finite nonzero?
+        BEQ.B   FP68K_SCALBTOP_1                | yes ->
+        RTS                                     | zero or infinity: as it is
+| ----------------------------------------------------------
+| FP68K_SCALBTOP_1 (Apple SCALBTOP @1): finite nonzero.
+FP68K_SCALBTOP_1:
+        MOVEA.L 0xE(A6),A3                      | A3 = address 2: the int16 n
+        ADDA.W  (A3),A4                         | exponent + n
+        BRA.W   FP68K_COERCE                    | -> COERCE: over/underflow
+| ----------------------------------------------------------
+| FP68K_CLASSTOP -- class of the src: the SANE class + 1,
+| negated for a negative operand: 1 signaling NaN, 2 quiet NaN, 3
+| infinity, 4 zero, 5 normal, 6 denormal (NaNs come through NANFLOAT);
+| stored as an int16 at the dst address (FP68K_CLASSFIN, Apple CLASSFIN).
+FP68K_CLASSTOP:
+        MOVEQ.L #0x5,D0                         | class 5: normal
+        TST.L   D3                              | D3 bit 31: unnormalized (from UNPACK)
+        BMI.B   FP68K_CLASSTOP_99               | yes: 6, denormal ->
+        BEQ.B   FP68K_CLASSFIN                  | D3 = 0: a normal number ->
+        SUBQ.W  #0x2,D0                         | 3: infinity?
+        CMPI.W  #0x4,D3                         | D3 = 4?
+        BEQ.B   FP68K_CLASSFIN                  | yes ->
+FP68K_CLASSTOP_99:
+        ADDQ.W  #0x1,D0                         | zero: 4 (denormal: 6)
+FP68K_CLASSFIN:
+        TST.B   D6                              | CLASSFIN: negative operand?
+        BEQ.B   FP68K_CLASSFIN_100              | no ->
+        NEG.W   D0                              | negative: negated class
+FP68K_CLASSFIN_100:
+        MOVEA.L 0xA(A6),A3                      | A3 = address 1: the int16 result
+        MOVE.W  D0,(A3)                         | store the class
+        RTS                                     | return: class code stored at the destination (CLASSFIN)
+| ----------------------------------------------------------
+| FP68K_ODDBALL -- odd opwords: A1 = address 1, A2 = address
+| 2; D7 = opword AND $1E = (operation - 1) indexes ODDTAB.
+FP68K_ODDBALL:
+        MOVEM.L 0xA(A6),A1-A2                   | A1 = address 1, A2 = address 2
+        MOVE.W  FP68K_ODDTAB(PC,D7.W),D7        | offset of the routine (ODDTAB)
+        JMP     FP68K_ODDBALL(PC,D7.W)          | -> it
+| FP68K_ODDTAB: routines for the odd operations, offsets
+| from FP68K_ODDBALL.
+FP68K_ODDTAB:
+        .short  FP68K_PUTW-FP68K_ODDBALL        | $01 setenv (PUTW)
+        .short  FP68K_GETW-FP68K_ODDBALL        | $03 getenv (GETW)
+        .short  FP68K_PUTV-FP68K_ODDBALL        | $05 set halt vector (PUTV)
+        .short  FP68K_GETV-FP68K_ODDBALL        | $07 get halt vector (GETV)
+        .short  FP68K_D2B-FP68K_ODDBALL         | $09 decimal to binary (D2B)
+        .short  FP68K_B2D-FP68K_ODDBALL         | $0B binary to decimal (B2D)
+        .short  FP68K_NEGZ-FP68K_ODDBALL        | $0D negate (NEGZ)
+        .short  FP68K_ABSZ-FP68K_ODDBALL        | $0F abs (ABSZ)
+        .short  FP68K_CPSZ-FP68K_ODDBALL        | $11 copysign (CPSZ)
+        .short  FP68K_NEXTZ-FP68K_ODDBALL       | $13 nextafter (NEXTZ)
+        .short  FP68K_SETXCP-FP68K_ODDBALL      | $15 set exception (SETXCP)
+        .short  FP68K_ENTRYP-FP68K_ODDBALL      | $17 procentry (ENTRYP)
+        .short  FP68K_EXITP-FP68K_ODDBALL       | $19 procexit (EXITP)
+        .short  FP68K_TESTXCP-FP68K_ODDBALL     | $1B test exception (TESTXCP)
+| FP68K_PUTW: setenv -- environment := the word at (A1).
+FP68K_PUTW:
+        MOVE.W  (A1),(A0)                       | environment := (A1)
+        BRA.B   FP68K_GO1                       | -> POP1
+| ----------------------------------------------------------
+| FP68K_ENTRYP: procentry -- save the environment at (A1),
+| then set the default environment (0: no flags, no halts, to nearest).
+FP68K_ENTRYP:
+        MOVE.W  (A0),(A1)                       | save the environment at (A1)
+        CLR.W   (A0)                            | default environment
+        BRA.B   FP68K_GO1                       | -> POP1
+| ----------------------------------------------------------
+| FP68K_GETW: getenv -- the environment word to (A1).
+FP68K_GETW:
+        MOVE.W  (A0),(A1)                       | environment to (A1)
+        BRA.B   FP68K_GO1                       | -> POP1
+| ----------------------------------------------------------
+| FP68K_PUTV: set the halt vector from (A1).
+FP68K_PUTV:
+        MOVE.L  (A1),0x2(A0)                    | halt vector := (A1)
+        BRA.B   FP68K_GO1                       | -> POP1
+| ----------------------------------------------------------
+| FP68K_GETV: the halt vector to (A1).
+FP68K_GETV:
+        MOVE.L  0x2(A0),(A1)                    | halt vector to (A1)
+        BRA.B   FP68K_GO1                       | -> POP1
+| ----------------------------------------------------------
+| FP68K_NEGZ: negate -- flip the sign bit of the operand
+| at (A1), any format.
+FP68K_NEGZ:
+        BCHG    #0x7,(A1)                       | flip the sign bit (the first byte, any format)
+        BRA.B   FP68K_GO1                       | -> POP1
+| ----------------------------------------------------------
+| FP68K_ABSZ: abs -- clear the sign bit of (A1).
+FP68K_ABSZ:
+        BCLR    #0x7,(A1)                       | clear the sign bit
+| ----------------------------------------------------------
+| FP68K_GO1: return, one address (POP1).
+| Called by: FP68K_PUTW, FP68K_ENTRYP, FP68K_GETW, FP68K_PUTV, FP68K_GETV (and 2 more)
+FP68K_GO1:
+        BRA.W   FP68K_POP1                      | -> POP1: one address
+| ----------------------------------------------------------
+| FP68K_TESTXCP -- test the exception whose number (0-4)
+| is the word at (A1): the byte at (A1) := 1 if its flag is set, else 0.
+FP68K_TESTXCP:
+        MOVE.W  (A1),D0                         | D0 = exception number (FBINVALID 0 .. FBINEXACT 4)
+        BTST    D0,(A0)                         | its flag in the environment high byte
+        SNE.B   D0                              | D0 = $FF if set
+        NEG.B   D0                              | 1 or 0
+        MOVE.B  D0,(A1)                         | the BOOLEAN result over the input word
+        BRA.B   FP68K_GO1                       | -> POP1
+| ----------------------------------------------------------
+| FP68K_CPSZ: copysign -- the sign of the operand at (A1)
+| (the "dst") onto the one at (A2).
+FP68K_CPSZ:
+        BTST    #0x7,(A1)                       | sign of the "dst" (A1)
+        BEQ.B   FP68K_CPSZ_1                    | positive ->
+        BSET    #0x7,(A2)                       | negative: set the sign of (A2)
+        BRA.B   FP68K_CPSZ_2                    | -> POP2
+| ----------------------------------------------------------
+| FP68K_CPSZ_1 (Apple CPSZ @1): positive.
+FP68K_CPSZ_1:
+        BCLR    #0x7,(A2)                       | clear the sign of (A2)
+FP68K_CPSZ_2:
+        BRA.W   FP68K_POP2                      | -> POP2: two addresses
+| ----------------------------------------------------------
+| FP68K_NEXTZ -- nextafter: change the operand at (A2)
+| (the "src", single, double or extended) by one unit in the last place
+| toward the one at (A1); a NaN wins as in a multiply. Calls the package
+| recursively (REFP68K) to convert, compare and classify; signals
+| overflow or underflow (with inexact) for an infinite or denormal
+| result; exits through CHKERR. Frame (A4): 0 dst, 10 src (extended),
+| 20 the class integer.
+FP68K_NEXTZ:
+        SUBA.W  #0x16,SP                        | frame: 2 extendeds and an int16
+        MOVEA.L SP,A4                           | A4 = the frame
+        MOVE.W  D6,D5                           | opword ...
+        ANDI.W  #0x3800,D5                      | ... D5 = its format bits
+        ADDQ.W  #0x1,D6                         | TWOADRS (bit 0) for the exit
+        SWAP.W  D6                              | opword to D6.hi as for arithmetic
+        CLR.W   D6                              | no flags, no signs
+        MOVE.L  A2,-(SP)                        | convert the src ...
+        PEA.L   0xA(A4)                         | ... to extended at 10(A4)
+        MOVEQ.L #0xE,D0                         | OP2EXT ...
+        OR.W    D5,D0                           | ... with the format
+        MOVE.W  D0,-(SP)                        | ...
+        BSR.W   FP68K_REFP68K                   | REFP68K
+        CLR.L   (A4)                            | 0.0 at (A4)
+        CLR.L   0x4(A4)                         | ...
+        CLR.W   0x8(A4)                         | ...
+        PEA.L   (A4)                            | compare 0 ...
+        PEA.L   0xA(A4)                         | ... with the src
+        MOVE.W  #0x8,-(SP)                      | OPCMP
+        BSR.W   FP68K_REFP68K                   | REFP68K
+        SNE.B   D4                              | D4.B = $FF if the src is nonzero
+        MOVE.L  A1,-(SP)                        | convert the dst ...
+        PEA.L   (A4)                            | ... to extended at (A4)
+        MOVE.W  D0,-(SP)                        | (OP2EXT with the format)
+        BSR.W   FP68K_REFP68K                   | REFP68K
+        PEA.L   (A4)                            | compare the dst ...
+        PEA.L   0xA(A4)                         | ... with the src
+        MOVE.W  #0x8,-(SP)                      | OPCMP
+        BSR.W   FP68K_REFP68K                   | REFP68K
+        BVC.B   FP68K_NXORD                     | ordered ->
+        PEA.L   (A4)                            | unordered (a NaN): multiply dst ...
+        PEA.L   0xA(A4)                         | ... into src: the precedent NaN
+        MOVE.W  #0x4,-(SP)                      | OPMUL
+        BSR.W   FP68K_REFP68K                   | REFP68K
+        PEA.L   0xA(A4)                         | convert the NaN back ...
+        MOVE.L  A2,-(SP)                        | ... to the src in its format
+        MOVEQ.L #0x10,D0                        | OPEXT2 ...
+        OR.W    D5,D0                           | ... with the format
+        MOVE.W  D0,-(SP)                        | ...
+        BSR.W   FP68K_REFP68K                   | REFP68K
+        BRA.W   FP68K_NXFIN                     | -> NXFIN
+| ----------------------------------------------------------
+| FP68K_NXORD: ordered -- equal: done; else increment or
+| decrement the src magnitude.
+FP68K_NXORD:
+        BEQ.B   FP68K_NXFIN                     | equal: nothing to do ->
+        BCC.B   FP68K_NXGREAT                   | src > dst ->
+        BTST    #0x7,(A2)                       | src < dst: src negative?
+        BEQ.B   FP68K_NXINC                     | positive: increment (NXINC) ->
+        BRA.B   FP68K_NXDEC                     | negative: decrement (NXDEC) ->
+| ----------------------------------------------------------
+| FP68K_NXGREAT: src > dst -- decrement if positive,
+| increment if negative.
+FP68K_NXGREAT:
+        BTST    #0x7,(A2)                       | src negative?
+        BEQ.B   FP68K_NXDEC                     | positive: decrement ->
+| FP68K_NXINC: increment by one ulp, per format.
+FP68K_NXINC:
+        BTST    #0xC,D5                         | single ($1000)?
+        BEQ.B   FP68K_NXINC_11                  | no ->
+        ADDQ.L  #0x1,(A2)                       | single + 1 ulp
+        BRA.B   FP68K_NXERR                     | -> NXERR
 | ----------------------------------------------------------
 |
-| FP68K_NO_30
+| FP68K_NXINC_11
 |
-FP68K_NO_30:
-        MOVE    A4,D0                           | D0 = input exponent
-        ASR     #0x1,D0                         | halve exponent for sqrt
-        MOVE    SR,D1                           | save carry (odd exponent flag)
-        BCC.B   FP68K_SKIP_15                   | even exponent -> skip adjust
-        ADDQ.W  #0x1,D0                         | odd: round up halved exponent
-FP68K_SKIP_15:
-        ADDI    #0x1FFF,D0                      | add half-bias ($3FFF/2)
-        MOVE    D0,A4                           | store result exponent
-        MOVE.L  D6,A1                           | save flags
-        MOVE.L  D7,A2                           | save guard bits
-        MOVE.L  D5,D7                           | D7 = mantissa low (radicand lo)
-        MOVE.L  D4,D6                           | D6 = mantissa high (radicand hi)
-        CLR.L   D3                              | clear remainder accumulator
-        MOVE.L  D3,D2                           | clear remainder high
-        ADD.L   D7,D7                           | shift radicand left
-        ADDX.L  D6,D6                           | propagate carry
-        ADDX    D3,D3                           | into accumulator
-        MOVE    D1,CCR                          | restore carry (odd exponent?)
-        BCS.B   FP68K_CONT_90                   | odd -> already shifted once
-        ADD.L   D7,D7                           | even: shift radicand again
-        ADDX.L  D6,D6                           | propagate carry
-        ADDX    D3,D3                           | into accumulator
-FP68K_CONT_90:
-        MOVE.L  D2,D0                           | D0 = 0 (root accumulator high)
-        MOVE.L  D2,D4                           | D4 = 0 (root accumulator mid)
-        MOVEQ.L #0x3,D5                         | D5 = initial root digit trial
-        SUBQ.W  #0x1,D3                         | initial subtract from remainder
-        MOVEQ.L #0x41,D1                        | 65 iterations
-        MOVE    D1,A3                           | save counter in A3
-        CLR.L   D1                              | clear overflow accumulator
-| FP68K_LOOP_6: non-restoring sqrt loop - two bits of radicand per iteration
-FP68K_LOOP_6:
-        ADD.L   D7,D7                           | shift radicand left (bit 1)
-        ADDX.L  D6,D6                           | propagate
-        ADDX.L  D3,D3                           | into remainder
-        ADDX.L  D2,D2                           | propagate
-        ADDX    D1,D1                           | propagate
-        ADD.L   D7,D7                           | shift radicand left (bit 2)
-        ADDX.L  D6,D6                           | propagate
-        ADDX.L  D3,D3                           | into remainder
-        ADDX.L  D2,D2                           | propagate
-        ADDX    D1,D1                           | propagate
-        ADD.L   D5,D5                           | shift root left
-        ADDX.L  D4,D4                           | propagate
-        ADDX    D0,D0                           | propagate
-        SUBQ.W  #0x1,D5                         | trial: root * 2 - 1
-        SUB.L   D5,D3                           | subtract trial from remainder
-        SUBX.L  D4,D2                           | propagate borrow
-        SUBX    D0,D1                           | propagate borrow
-        BCC.B   FP68K_OK_27                     | remainder >= 0 -> digit is 1
-        ADD.L   D5,D3                           | restore remainder (undo subtract)
-        ADDX.L  D4,D2                           | propagate
-        ADDX    D0,D1                           | propagate
-        BRA.B   FP68K_OK_28                     | -> digit is 0
-
+FP68K_NXINC_11:
+        BTST    #0xB,D5                         | double ($0800)?
+        BEQ.B   FP68K_NXINC_15                  | no: extended ->
+        ADDQ.L  #0x1,0x4(A2)                    | double + 1 ulp: low half ...
+        BCC.B   FP68K_NXINC_13                  | ...
+        ADDQ.L  #0x1,(A2)                       | ... with the carry
+FP68K_NXINC_13:
+        BRA.B   FP68K_NXERR                     | -> NXERR
+| ----------------------------------------------------------
+| FP68K_NXINC_15 (Apple NXINC @15): extended -- an infinite result gets a 0
+| integer bit.
+FP68K_NXINC_15:
+        ADDQ.L  #0x1,0x6(A2)                    | extended + 1 ulp: low significand ...
+        BCC.B   FP68K_NXERR                     | ...
+        ADDQ.L  #0x1,0x2(A2)                    | ... high significand ...
+        BCC.B   FP68K_NXERR                     | ...
+        ROXR.W  0x2(A2)                         | ... carry out: integer bit back in ...
+        ADDQ.W  #0x1,(A2)                       | ... and exponent + 1
+        CMPI.W  #0x7FFF,(A2)                    | +infinity now?
+        BEQ.B   FP68K_NXINC_16                  | yes ->
+        CMPI.W  #0xFFFF,(A2)                    | -infinity?
+        BNE.B   FP68K_NXERR                     | no ->
+FP68K_NXINC_16:
+        BCLR    #0x7,0x2(A2)                    | infinity has integer bit 0
+| ----------------------------------------------------------
+| FP68K_NXERR -- classify the new value: infinity ->
+| overflow + inexact, zero or denormal -> underflow + inexact.
+| Called by: FP68K_NXINC, FP68K_NXDEC, FP68K_NXDEC_201, FP68K_NXDEC_21, FP68K_NXDEC_25
+FP68K_NXERR:
+        MOVE.L  A2,-(SP)                        | classify the new src ...
+        PEA.L   0x14(A4)                        | ... into 20(A4)
+        MOVEQ.L #0x1C,D0                        | OPCLASS ...
+        OR.W    D5,D0                           | ... with the format
+        MOVE.W  D0,-(SP)                        | ...
+        BSR.W   FP68K_REFP68K                   | REFP68K
+        MOVE.W  0x14(A4),D1                     | D1 = the class
+        BPL.B   FP68K_NXERR_1                   | positive ->
+        NEG.W   D1                              | drop the sign
+FP68K_NXERR_1:
+        CMPI.W  #0x3,D1                         | infinity (CLINF)?
+        BNE.B   FP68K_NXERR_3                   | no ->
+        ORI.W   #0x1400,D6                      | overflow and inexact (ERRWXO)
+        BRA.B   FP68K_NXFIN                     | -> NXFIN
 | ----------------------------------------------------------
 |
-| FP68K_OK_27
+| FP68K_NXERR_3
 |
-FP68K_OK_27:
-        ADDQ.W  #0x2,D5                         | root digit = 1 (add 2 to root)
-FP68K_OK_28:
-        exg     D0,A3                           | swap counter/accumulator
-        SUBQ.W  #0x1,D0                         | decrement iteration count
-        EXG     D0,A3                           | swap back
-        BNE.B   FP68K_LOOP_6                    | loop until all bits computed
-        MOVE.L  A1,D6                           | restore flags
-        MOVE.L  A2,D7                           | restore guard bits
-        OR.L    D2,D1                           | any remainder bits?
-        OR.L    D3,D1                           | check all parts
-        BNE.B   FP68K_CONT_91                   | nonzero remainder -> inexact
-        SUBQ.W  #0x1,D5                         | exact: adjust root LSB
-FP68K_CONT_91:
-        MOVEQ.L #0x3,D1                         | shift root right 3 positions
-FP68K_LOOP_7:
-        LSR     #0x1,D0                         | shift root high right
-        ROXR.L  #0x1,D4                         | propagate into root mid
-        ROXR.L  #0x1,D5                         | propagate into root low
-        ROXR    #0x1,D7                         | shift into guard bits
-        SUBQ.W  #0x1,D1                         | decrement shift count
-        BNE.B   FP68K_LOOP_7                    | loop 3 times
-        BRA     FP68K_EXIT_10                   | -> round and pack
-
+FP68K_NXERR_3:
+        CMPI.W  #0x5,D1                         | normal (CLNORM)?
+        BEQ.B   FP68K_NXFIN                     | yes: no exception ->
+        ORI.W   #0x1200,D6                      | zero or denormal: underflow and inexact (ERRWXU)
+| FP68K_NXFIN: drop the frame, exit through CHKERR.
+FP68K_NXFIN:
+        ADDA.W  #0x16,SP                        | drop the frame
+        BRA.W   FP68K_CHKERR                    | -> CHKERR
+| ----------------------------------------------------------
+| FP68K_NXDEC -- decrement by one ulp; a zero (D4 = 0) is
+| incremented instead with the sign flipped (next(-0, 3) = +min).
+FP68K_NXDEC:
+        BTST    #0xC,D5                         | single?
+        BEQ.B   FP68K_NXDEC_21                  | no ->
+        TST.B   D4                              | src nonzero?
+        BNE.B   FP68K_NXDEC_201                 | yes: just decrement ->
+        BCHG    #0x7,(A2)                       | zero: flip the sign ...
+        ADDQ.L  #0x1,(A2)                       | ... and make it the smallest denormal
+        BRA.B   FP68K_NXERR                     | -> NXERR
 | ----------------------------------------------------------
 |
-| FP68K_CONT_92: FP logb - extract unbiased exponent as integer
-| Returns exponent - $3FFF as extended-precision value
+| FP68K_NXDEC_201: decrement single by 1 ULP
 |
-FP68K_CONT_92:
-        CLR.B   D6                              | clear sign (logb always positive)
-        CMPI    #0x2,D3                         | operand is NaN?
-        BNE.B   FP68K_NO_31                     | no -> check infinity
-        ORI     #0x880,D6                       | flag invalid + set exception
-        MOVE    #0x7FFF,A4                      | return NaN
-        CLR.L   D4                              | clear mantissa
-        MOVE.L  D4,D5                           | clear low mantissa
-        RTS                                     | return to caller
-
+FP68K_NXDEC_201:
+        SUBQ.L  #0x1,(A2)                       | single - 1 ulp
+        BRA.B   FP68K_NXERR                     | -> NXERR
 | ----------------------------------------------------------
 |
-| FP68K_NO_31: logb - check for infinity
+| FP68K_NXDEC_21: decrement double by 1 ULP
 |
-FP68K_NO_31:
-        CMPI    #0x4,D3                         | operand is infinity?
-        BNE.B   FP68K_NO_32                     | no -> normal logb
-        RTS                                     | logb(inf) = +inf
-
+FP68K_NXDEC_21:
+        BTST    #0xB,D5                         | double?
+        BEQ.B   FP68K_NXDEC_25                  | no: extended ->
+        TST.B   D4                              | src nonzero?
+        BNE.B   FP68K_NXDEC_211                 | yes: just decrement ->
+        BCHG    #0x7,(A2)                       | zero: flip the sign ...
+        ADDQ.W  #0x1,0x6(A2)                    | ... smallest denormal
+        BRA.B   FP68K_NXERR                     | -> NXERR
 | ----------------------------------------------------------
 |
-| FP68K_NO_32: logb - extract unbiased exponent as extended value
+| FP68K_NXDEC_211: decrement double low word, borrow into high
 |
-FP68K_NO_32:
-        CLR.L   D5                              | clear low mantissa
-        SUBA    #0x3FFF,A4                      | remove bias -> unbiased exponent
-        MOVE.L  A4,D4                           | D4 = unbiased exponent
-        BPL.B   FP68K_SKIP_16                   | positive -> skip sign
-        ORI.B   #0x80,D6                        | set negative sign
-        NEG.L   D4                              | negate for absolute value
-FP68K_SKIP_16:
-        MOVE    #0x401E,A4                      | exponent = 30 + bias (integer)
-        BRA     FP68K_CONT_22                   | -> normalize integer mantissa
-
+FP68K_NXDEC_211:
+        SUBQ.L  #0x1,0x4(A2)                    | double - 1 ulp: low half ...
+        BCC.B   FP68K_NXDEC_213                 | ...
+        SUBQ.L  #0x1,(A2)                       | ... with the borrow
+FP68K_NXDEC_213:
+        BRA.B   FP68K_NXERR                     | -> NXERR
 | ----------------------------------------------------------
 |
-| FP68K_CONT_93: FP scalb - multiply by 2^n (add integer to exponent)
+| FP68K_NXDEC_25: decrement extended by 1 ULP
 |
-FP68K_CONT_93:
-        TST     D3                              | class = normal?
-        BEQ.B   FP68K_OK_29                     | yes -> add to exponent
-        RTS                                     | NaN/Inf/zero: return as-is
-
+FP68K_NXDEC_25:
+        TST.B   D4                              | src nonzero?
+        BNE.B   FP68K_NXDEC_251                 | yes: just decrement ->
+        BCHG    #0x7,(A2)                       | zero: flip the sign ...
+        ADDQ.W  #0x1,0x8(A2)                    | ... smallest denormal
+        BRA.B   FP68K_NXERR                     | -> NXERR
 | ----------------------------------------------------------
 |
-| FP68K_OK_29: scalb - add integer n to exponent (multiply by 2^n)
+| FP68K_NXDEC_251: decrement extended mantissa, handle borrow through exponent
 |
-FP68K_OK_29:
-        MOVE.L  0xE(A6),A3                      | A3 = ptr to integer n
-        ADDA    (A3),A4                         | exponent += n
-        BRA     FP68K_EXIT_10                   | -> round and pack
-
+FP68K_NXDEC_251:
+        SUBQ.L  #0x1,0x6(A2)                    | extended - 1 ulp: low significand
+        BCC.B   FP68K_NXDEC_259                 | no borrow: done ->
+        SUBQ.L  #0x1,0x2(A2)                    | high significand
+        BMI.B   FP68K_NXDEC_257                 | integer bit still 1 (or borrowed out) ->
+        TST.W   (A2)                            | integer bit now 0: minimum exponent?
+        BEQ.B   FP68K_NXDEC_259                 | yes: a denormal, done ->
+        CMPI.W  #0x8000,(A2)                    | (negative)
+        BEQ.B   FP68K_NXDEC_259                 | done ->
+        ADDI.W  #0x8000,0x2(A2)                 | renormalize: integer bit back ...
+        BRA.B   FP68K_NXDEC_258                 | ... exponent - 1 ->
 | ----------------------------------------------------------
 |
-| RETURNS_9: FP classify - return SANE class code
-| Returns: -6=SNaN, -5=QNaN, -4=Inf, -3=Zero, -2=Normal, -1=Denormal
-| Positive values for positive operand, negative for negative
+| FP68K_NXDEC_257: mantissa borrow into exponent
 |
-RETURNS_9:
-        MOVEQ.L #0x5,D0                         | start with class = SNaN (5)
-        TST.L   D3                              | check class descriptor
-        BMI.B   FP68K_CONT_94                   | denormal (negative D3) -> class 6
-        BEQ.B   FP68K_NO_33                     | normal -> class 5 (not reached)
-        SUBQ.W  #0x2,D0                         | D0 = 3 (zero class)
-        CMPI    #0x4,D3                         | infinity?
-        BEQ.B   FP68K_NO_33                     | yes -> class 3 (infinite)
-FP68K_CONT_94:
-        ADDQ.W  #0x1,D0                         | adjust class code
-FP68K_NO_33:
-        TST.B   D6                              | operand negative?
-        BEQ.B   FP68K_NO_34                     | no -> positive class
-        NEG     D0                              | negate for negative operand
-FP68K_NO_34:
-        MOVE.L  0xA(A6),A3                      | A3 = result ptr
-        MOVE    D0,(A3)                         | store class code
-        RTS                                     | return to caller
-
+FP68K_NXDEC_257:
+        BCC.B   FP68K_NXDEC_259                 | no borrow out: done ->
+FP68K_NXDEC_258:
+        SUBQ.W  #0x1,(A2)                       | exponent - 1
+FP68K_NXDEC_259:
+        BRA.W   FP68K_NXERR                     | -> NXERR
 | ----------------------------------------------------------
-|
-| FP68K_CONT_95: FP environment operations - get/set flags, halt vector, etc.
-| D7 indexes into FP68K_CONT_96 dispatch table
-|
-FP68K_CONT_95:
-        MOVEM.L 0xA(A6),A1-A2                   | A1/A2 = operand pointers
-        MOVE    FP68K_CONT_96(PC,D7.W),D7       | get handler offset
-        JMP     FP68K_CONT_95(PC,D7.W)          | dispatch environment operation
-
-| Jump Table
-FP68K_CONT_96:
-  .byte  0x00,0x2A,0x00,0x34,0x00,0x38
-  .byte 0x00,0x3E,0x01,0xF2,0x05,0x5A
-  .byte 0x00,0x44,0x00,0x4A,0x00,0x5E
-  .byte 0x00,0x72,0x01,0xD8,0x00,0x2E
-  .byte 0x01,0xE4,0x00,0x52
-| FP68K_CONT_97: setEnv - load SANE environment word from (A1) into state
-FP68K_CONT_97:
-        MOVE    (A1),(A0)                       | load environment word from (A1)
-        BRA.B   FP68K_EXIT_11                   | -> return
-
+| FP68K_SETXCP -- signal the exception whose number is the
+| word at (A1), with the halt if it is enabled: exit through CHKERR.
+FP68K_SETXCP:
+        SWAP.W  D6                              | opword to D6.hi as for arithmetic
+        CLR.W   D6                              | no flags, no signs
+        MOVE.W  (A1),D0                         | D0 = exception number (0-4)
+        ADDQ.W  #0x8,D0                         | into the flag byte (bits 8-12)
+        BSET    D0,D6                           | signal it
+        BRA.B   FP68K_EPEXIT                    | -> CHKERR
 | ----------------------------------------------------------
-|
-| FP68K_CONT_98: getEnv - read SANE environment word into (A1)
-|
-FP68K_CONT_98:
-        MOVE    (A0),(A1)                       | read environment to (A1)
-        CLR     (A0)                            | clear exceptions (procExit)
-        BRA.B   FP68K_EXIT_11                   | -> return
-
+| FP68K_EXITP: procexit -- restore the environment saved
+| at (A1), then signal the exceptions that were raised in between (they
+| may halt): exit through CHKERR.
+FP68K_EXITP:
+        SWAP.W  D6                              | opword to D6.hi
+        MOVE.W  #0x1F00,D6                      | mask of the exception flags
+        AND.W   (A0),D6                         | D6 = the exceptions raised since procentry
+        MOVE.W  (A1),(A0)                       | restore the saved environment
+FP68K_EPEXIT:
+        BRA.W   FP68K_CHKERR                    | -> CHKERR: signal them again
 | ----------------------------------------------------------
-|
-| FP68K_CONT_99: getEnv2 - read environment word (alternate)
-|
-FP68K_CONT_99:
-        MOVE    (A0),(A1)                       | read environment to (A1)
-        BRA.B   FP68K_EXIT_11                   | -> return (no clear)
-
+| FP68K_D2B -- decimal to binary (Dec2Num): the decimal
+| record at (A2) (sgn, exp, sig: up to 19 digits plus a lost-digits 20th,
+| '0' zero, 'I' infinity, 'N'+hex a NaN) to the format in the opword at
+| (A1). The digits become a 64-bit integer, scaled by 10^exp in DBCORE
+| (with the rounding direction chosen for the scale factor), converted
+| by a recursive call. Frame (A3): 20 bytes, two extendeds.
+FP68K_D2B:
+        SUBA.W  #0x14,SP                        | frame: 2 extendeds
+        MOVEA.L SP,A3                           | A3 = the frame
+        LEA.L   0x4(A2),A4                      | A4 = d.sig (length byte)
+        MOVE.W  0x2(A2),D3                      | D3 = d.exp
+        SWAP.W  D6                              | keep the opword in D6.hi
+        CLR.L   D4                              | D4 := 0: clear the digit accumulator D4:D5 (D2B)
+        MOVE.L  D4,D5                           | (low half)
+        MOVE.L  D4,D7                           | D7.B: lost-digits flag (the 20th digit)
+        MOVEQ.L #0x13,D2                        | at most 19 digits
+        MOVE.B  (A4)+,D6                        | D6.B = length of d.sig
+        BEQ.B   FP68K_DBZSTO                    | empty: 0.0 ->
+        MOVE.B  (A4),D0                         | D0 = first character
+        CMPI.B  #0x49,D0                        | 'I'?
+        BEQ.B   FP68K_DBNFIN                    | infinity ->
+        CMPI.B  #0x4E,D0                        | 'N' (capital only)?
+        BNE.B   FP68K_DBZER                     | no: digits ->
+        MOVE.B  -0x1(A4),D2                     | D2 = character count ...
+        ADDQ.L  #0x1,A4                         | ... A4 -> the first hex digit ...
+        SUBQ.B  #0x1,D2                         | ... without the 'N'
+        MOVEQ.L #0x8,D0                         | 8 hex digits for the high half ...
+        CMPI.B  #0x4,D2                         | ... if there are at least 4
+        BGE.B   FP68K_D2B_31                    | yes ->
+        SUBQ.B  #0x4,D0                         | fewer: 4 leading zeros ...
+        ADD.B   D2,D0                           | ... and the digits there are
+FP68K_D2B_31:
+        BSR.B   FP68K_D2B_35                    | hex digits into D5
+        MOVE.L  D5,D4                           | high half of the NaN
+        CLR.L   D5                              | first 8 hex digits now in D4; D5 := 0 for the next 8
+        MOVEQ.L #0x8,D0                         | the next 8 hex digits ...
+        BSR.B   FP68K_D2B_35                    | ... into D5
+        BRA.B   FP68K_D2B_39                    | -> check the code
 | ----------------------------------------------------------
-|
-| FP68K_CONT_100: setHaltVector - store halt handler address
-|
-FP68K_CONT_100:
-        MOVE.L  (A1),0x2(A0)                    | store halt vector from (A1)
-        BRA.B   FP68K_EXIT_11                   | -> return
-
+| FP68K_D2B_35 (Apple D2B @35) -- shift D0 hex digits into D5 (zeros once
+| the D2 string characters are used up).
+FP68K_D2B_35:
+        ROL.L   #0x4,D5                         | make room for a digit
+        SUBQ.B  #0x1,D2                         | characters left?
+        BMI.B   FP68K_D2B_37                    | no: a 0 digit ->
+        MOVE.B  (A4)+,D1                        | next hex character
+        CMPI.B  #0x39,D1                        | a letter?
+        BLE.B   FP68K_D2B_36                    | no: 0-9 ->
+        ADDI.B  #0x9,D1                         | A-F: + 9 ('A' = $41 -> $4A)
+FP68K_D2B_36:
+        ANDI.B  #0xF,D1                         | digit value
+        OR.B    D1,D5                           | into D5
+FP68K_D2B_37:
+        SUBQ.W  #0x1,D0                         | count
+        BNE.B   FP68K_D2B_35                    | more ->
+        RTS                                     | return: D0 hex digits shifted into D5
 | ----------------------------------------------------------
-|
-| FP68K_CONT_101: getHaltVector - read halt handler address
-|
-FP68K_CONT_101:
-        MOVE.L  0x2(A0),(A1)                    | read halt vector to (A1)
-        BRA.B   FP68K_EXIT_11                   | -> return
-
+| FP68K_D2B_39 (Apple D2B @39): a NaN with an all-zero code gets code 21.
+FP68K_D2B_39:
+        ANDI.L  #0x7FFFFFFF,D4                  | ignore the leading bit; anything left?
+        BNE.B   FP68K_DBNFIN                    | yes ->
+        MOVEQ.L #0x15,D4                        | no: NaN code 21 (NANZERO) ...
+        SWAP.W  D4                              | ... in bits 16-23
+        BSET    #0x1E,D4                        | quiet
+FP68K_DBNFIN:
+        MOVE.W  #0x7FFF,D0                      | DBNFIN: exponent $7FFF (infinity, NaN)
+        BRA.B   FP68K_DBSSTO                    | -> add the sign and store
 | ----------------------------------------------------------
-|
-| FP68K_CONT_102: setSign - toggle sign bit of operand at (A1)
-|
-FP68K_CONT_102:
-        BChg    #0x7,(A1)                       | toggle sign bit of (A1)
-        BRA.B   FP68K_EXIT_11                   | -> return
-
+| FP68K_DBZER: '0' -> a signed zero; FP68K_DBZSTO
+| (Apple DBZSTO) stores it, FP68K_DBSSTO adds the sign.
+FP68K_DBZER:
+        CMPI.B  #0x30,D0                        | '0'?
+        BNE.B   FP68K_SIGDIGS                   | no: significant digits (SIGDIGS) ->
+FP68K_DBZSTO:
+        CLR.L   D0                              | D0 := 0: exponent word of a signed zero (DBZSTO)
+FP68K_DBSSTO:
+        TST.B   (A2)                            | d.sgn (high byte) negative?
+        BEQ.B   FP68K_DBSSTO_1                  | no -> positive
+        BSET    #0xF,D0                         | sign bit into the exponent word
+FP68K_DBSSTO_1:
+        BSR.W   FP68K_TOA3                      | TOA3: store at (A3)
+        BRA.W   FP68K_DBSTORE                   | -> DBSTORE
 | ----------------------------------------------------------
-|
-| FP68K_CONT_103: clearSign - clear sign bit (make positive)
-|
-FP68K_CONT_103:
-        BClr    #0x7,(A1)                       | clear sign bit (absolute value)
-FP68K_EXIT_11:
-        BRA     FP68K_EXIT_4                    | -> two-operand return
-
+| FP68K_DIG10: D4:D5 := D4:D5 * 10 (D0:D1 = * 2).
+FP68K_DIG10:
+        ADD.L   D5,D5                           | * 2
+        ADDX.L  D4,D4                           | ...
+        MOVE.L  D5,D1                           | D0:D1 = * 2
+        MOVE.L  D4,D0                           | ...
+        ADD.L   D5,D5                           | * 4
+        ADDX.L  D4,D4                           | ...
+        ADD.L   D5,D5                           | * 8
+        ADDX.L  D4,D4                           | ...
+        ADD.L   D1,D5                           | * 8 + * 2 = * 10
+        ADDX.L  D0,D4                           | ...
+        RTS                                     | return: D4:D5 := D4:D5 * 10 (DIG10)
 | ----------------------------------------------------------
-|
-| FP68K_CONT_104: testException - test specific SANE exception flag bit
-|
-FP68K_CONT_104:
-        MOVE    (A1),D0                         | D0 = exception bit number
-        BTST    D0,(A0)                         | test that bit in environment
-        SNE.B   D0                              | D0 = $FF if set, $00 if clear
-        NEG.B   D0                              | D0 = 1 if set, 0 if clear
-        MOVE.B  D0,(A1)                         | store boolean result
-        BRA.B   FP68K_EXIT_11                   | -> return
-
+| FP68K_SIGDIGS: digits into D4:D5; the 20th goes to D7.B for
+| rounding (TRAILDIG).
+FP68K_SIGDIGS:
+        BSR.B   FP68K_DIG10                     | value * 10 (DIG10)
+        MOVEQ.L #0xF,D0                         | digit mask
+        AND.B   (A4)+,D0                        | D0 = next digit
+        ADD.L   D0,D5                           | add it
+        CLR.W   D0                              | for the carry
+        ADDX.L  D0,D4                           | ...
+        SUBQ.B  #0x1,D6                         | characters left?
+        BEQ.B   FP68K_CANON                     | no: CANON ->
+        SUBQ.B  #0x1,D2                         | 19 digits used?
+        BNE.B   FP68K_SIGDIGS                   | no: next digit ->
+        MOVE.B  #0xF,D7                         | TRAILDIG: the 20th digit ...
+        AND.B   (A4),D7                         | ... in D7.B: lost digits for rounding
+        BRA.B   FP68K_DONEDIG                   | -> DONEDIG
 | ----------------------------------------------------------
-|
-| FP68K_CONT_105: copySign - copy sign from (A1) to (A2)
-|
-FP68K_CONT_105:
-        BTst    #0x7,(A1)                       | source sign negative?
-        BEQ.B   FP68K_NO_35                     | no -> clear dest sign
-        BSET    #0x7,(A2)                       | copy negative sign to dest
-        BRA.B   FP68K_EXIT_12                   | -> return
-
+| FP68K_CANONTOP: fewer than 19 digits -- append zeros (* 10)
+| while the exponent is above 27 (exact scaling limit).
+FP68K_CANONTOP:
+        CMPI.W  #0x1B,D3                        | exponent at most 27?
+        BLE.B   FP68K_DONEDIG                   | yes: DONEDIG ->
+        BSR.B   FP68K_DIG10                     | append a zero: * 10 ...
+        SUBQ.W  #0x1,D3                         | ... and exponent - 1
+FP68K_CANON:
+        SUBQ.W  #0x1,D2                         | CANON: digit positions left?
+        BNE.B   FP68K_CANONTOP                  | yes: CANONTOP ->
+FP68K_DONEDIG:
+        MOVE.W  #0x403E,D0                      | DONEDIG: exponent 63 (biased): D4:D5 is an integer
+        TST.B   (A2)                            | d.sgn negative?
+        BEQ.B   FP68K_DONEDIG_1                 | no ->
+        BSET    #0xF,D0                         | sign
+FP68K_DONEDIG_1:
+        BSR.B   FP68K_TOA3                      | TOA3: (unnormalized) extended at (A3)
+        BSR.B   FP68K_DBCORE                    | DBCORE: * 10^d.exp
+| FP68K_DBSTORE: convert the extended at (A3) to the
+| destination format (a recursive EXT2 call), drop the frame, return
+| through POP2.
+FP68K_DBSTORE:
+        SWAP.W  D6                              | the opword back
+        ANDI.W  #0x3800,D6                      | its format bits ...
+        ORI.W   #0x10,D6                        | ... with OPEXT2: convert from extended
+        PEA.L   (A3)                            | src: the extended
+        MOVE.L  0xA(A6),-(SP)                   | dst: address 1
+        MOVE.W  D6,-(SP)                        | opword
+        BSR.W   FP68K_REFP68K                   | REFP68K
+        ADDA.W  #0x14,SP                        | drop the frame
+        BRA.W   FP68K_POP2                      | -> POP2
 | ----------------------------------------------------------
-|
-| FP68K_NO_35: copySign - copy positive sign
-|
-FP68K_NO_35:
-        BClr    #0x7,(A2)                       | clear dest sign (positive)
-FP68K_EXIT_12:
-        BRA     FP68K_EXIT_3                    | -> three-operand return
-
+| FP68K_TOA3: store D0.W:D4:D5 as an extended at (A3).
+FP68K_TOA3:
+        MOVE.W  D0,(A3)+                        | sign and exponent
+        MOVE.L  D4,(A3)+                        | significand high
+        MOVE.L  D5,(A3)                         | significand low
+        SUBQ.L  #0x6,A3                         | A3 back to the start
+        RTS                                     | return: extended D0.W:D4:D5 stored at (A3) (TOA3)
 | ----------------------------------------------------------
-|
-| FP68K_CONT_106: nextAfter - return next representable FP value toward target
-| Increments or decrements mantissa by 1 ULP in the appropriate direction
-|
-FP68K_CONT_106:
-        SUBA    #0x16,SP                        | allocate 22 bytes temp space
-        MOVE.L  A7,A4                           | A4 = temp buffer base
-        MOVE    D6,D5                           | save selector
-        ANDI    #0x3800,D5                      | isolate dest format bits
-        ADDQ.W  #0x1,D6                         | adjust return type
-        SWAP    D6                              | move to high word
-        CLR     D6                              | clear low word
-        MOVE.L  A2,-(SP)                        | push dest operand ptr
-        PEA.L   0xA(A4)                         | push temp[10] (extended buffer)
-        MOVEQ.L #0xE,D0                         | selector = convert
-        OR      D5,D0                           | merge dest format
-        MOVE    D0,-(SP)                        | push selector
-        BSR     FP68K_EMPTY                     | convert dest to extended at temp[10]
-        CLR.L   (A4)                            | zero temp[0..9] (extended zero)
-        CLR.L   0x4(A4)                         | clear bytes 4-7
-        CLR     0x8(A4)                         | clear bytes 8-9
-        PEA.L   (A4)                            | push zero operand
-        PEA.L   0xA(A4)                         | push dest extended
-        MOVE    #0x8,-(SP)                      | selector = compare
-        BSR     FP68K_EMPTY                     | compare dest vs zero
-        SNE.B   D4                              | D4 = nonzero if dest != 0
-        MOVE.L  A1,-(SP)                        | push source operand ptr
-        PEA.L   (A4)                            | push temp (for result)
-        MOVE    D0,-(SP)                        | push convert selector
-        BSR     FP68K_EMPTY                     | convert source to extended
-        PEA.L   (A4)                            | push source extended
-        PEA.L   0xA(A4)                         | push dest extended
-        MOVE    #0x8,-(SP)                      | selector = compare
-        BSR     FP68K_EMPTY                     | compare source vs dest
-        BVC.B   FP68K_NO_36                     | not unordered -> continue
-        PEA.L   (A4)                            | push source (NaN)
-        PEA.L   0xA(A4)                         | push dest
-        MOVE    #0x4,-(SP)                      | selector = multiply (propagate NaN)
-        BSR     FP68K_EMPTY                     | propagate NaN
-        PEA.L   0xA(A4)                         | push result
-        MOVE.L  A2,-(SP)                        | push original dest ptr
-        MOVEQ.L #0x10,D0                        | selector = convert back
-        OR      D5,D0                           | merge dest format
-        MOVE    D0,-(SP)                        | push selector
-        BSR     FP68K_EMPTY                     | convert NaN result to dest format
-        BRA     FP68K_EXIT_13                   | -> cleanup and return
-
-| ----------------------------------------------------------
-|
-| FP68K_NO_36
-|
-FP68K_NO_36:
-        BEQ.B   FP68K_EXIT_13                   | source == dest -> return dest as-is
-        BCC.B   FP68K_CONT_107                  | source > dest -> need to decrease
-        BTST    #0x7,(A2)                       | dest negative?
-        BEQ.B   FP68K_NO_37                     | no -> increment toward source
-        BRA.B   FP68K_OK_31                     | yes -> decrement toward source
-
-| ----------------------------------------------------------
-|
-| FP68K_CONT_107: source > dest - decrement if positive, increment if negative
-|
-FP68K_CONT_107:
-        BTst    #0x7,(A2)                       | dest negative?
-        BEQ.B   FP68K_OK_31                     | positive -> decrement magnitude
-FP68K_NO_37:
-        BTst    #0xC,D5                         | single format?
-        BEQ.B   FP68K_NO_38                     | no -> check double
-        ADDQ.L  #0x1,(A2)                       | increment single by 1 ULP
-        BRA.B   FP68K_DONE_13                   | -> check result class
-
-| ----------------------------------------------------------
-|
-| FP68K_NO_38
-|
-FP68K_NO_38:
-        BTst    #0xB,D5                         | double format?
-        BEQ.B   FP68K_NO_39                     | no -> extended
-        ADDQ.L  #0x1,0x4(A2)                    | increment double low word
-        BCC.B   FP68K_DONE_12                   | no carry -> done
-        ADDQ.L  #0x1,(A2)                       | propagate carry to high word
-FP68K_DONE_12:
-        BRA.B   FP68K_DONE_13                   | -> check result class
-
-| ----------------------------------------------------------
-|
-| FP68K_NO_39
-|
-FP68K_NO_39:
-        ADDQ.L  #0x1,0x6(A2)                    | increment extended mantissa low
-        BCC.B   FP68K_DONE_13                   | no carry -> done
-        ADDQ.L  #0x1,0x2(A2)                    | carry to mantissa high
-        BCC.B   FP68K_DONE_13                   | no carry -> done
-        ROXR    0x2(A2)                         | mantissa overflow: shift right
-        ADDQ.W  #0x1,(A2)                       | increment exponent
-        CMPI    #0x7FFF,(A2)                    | exponent overflow to infinity?
-        BEQ.B   FP68K_OK_30                     | yes -> clear mantissa MSB
-        CMPI    #-0x1,(A2)                      | negative exponent overflow?
-        BNE.B   FP68K_DONE_13                   | no -> done
-FP68K_OK_30:
-        BClr    #0x7,0x2(A2)                    | clear integer bit (infinity form)
-| Called by: FP68K_NO_37, FP68K_OK_31, FP68K_NO_41, FP68K_NO_42, FP68K_NO_44
-FP68K_DONE_13:
-        MOVE.L  A2,-(SP)                        | push result operand ptr
-        PEA.L   0x14(A4)                        | push temp for classify result
-        MOVEQ.L #0x1C,D0                        | selector = classify
-        OR      D5,D0                           | merge format
-        MOVE    D0,-(SP)                        | push selector
-        BSR     FP68K_EMPTY                     | classify the result
-        MOVE    0x14(A4),D1                     | D1 = class code
-        BPL.B   FP68K_SKIP_17                   | positive -> skip negate
-        NEG     D1                              | make class code positive
-FP68K_SKIP_17:
-        CMPI    #0x3,D1                         | class = zero?
-        BNE.B   FP68K_NO_40                     | no -> check other classes
-        ORI     #0x1400,D6                      | flag underflow + inexact
-        BRA.B   FP68K_EXIT_13                   | -> cleanup and return
-
-| ----------------------------------------------------------
-|
-| FP68K_NO_40
-|
-FP68K_NO_40:
-        CMPI    #0x5,D1                         | class = normal?
-        BEQ.B   FP68K_EXIT_13                   | yes -> no exceptions
-        ORI     #0x1200,D6                      | flag underflow + inexact
-FP68K_EXIT_13:
-        ADDA    #0x16,SP                        | deallocate temp space
-        BRA     FP68K_EXIT_2                    | -> pack result and return
-
-| ----------------------------------------------------------
-|
-| FP68K_OK_31
-|
-| FP68K_OK_31: nextAfter decrement path - decrease magnitude by 1 ULP
-FP68K_OK_31:
-        BTst    #0xC,D5                         | single format?
-        BEQ.B   FP68K_NO_42                     | no -> check double
-        TST.B   D4                              | dest was zero?
-        BNE.B   FP68K_NO_41                     | no -> simple decrement
-        BCHG    #0x7,(A2)                       | flip sign (cross zero)
-        ADDQ.L  #0x1,(A2)                       | increment to smallest magnitude
-        BRA.B   FP68K_DONE_13                   | -> check result class
-
-| ----------------------------------------------------------
-|
-| FP68K_NO_41: decrement single by 1 ULP
-|
-FP68K_NO_41:
-        SUBQ.L  #0x1,(A2)                       | decrement single value
-        BRA.B   FP68K_DONE_13                   | -> check result class
-
-| ----------------------------------------------------------
-|
-| FP68K_NO_42: decrement double by 1 ULP
-|
-FP68K_NO_42:
-        BTst    #0xB,D5                         | double format?
-        BEQ.B   FP68K_NO_44                     | no -> extended
-        TST.B   D4                              | dest was zero?
-        BNE.B   FP68K_NO_43                     | no -> simple decrement
-        BCHG    #0x7,(A2)                       | flip sign (cross zero)
-        ADDQ.W  #0x1,0x6(A2)                    | increment to smallest double
-        BRA.B   FP68K_DONE_13                   | -> check result class
-
-| ----------------------------------------------------------
-|
-| FP68K_NO_43: decrement double low word, borrow into high
-|
-FP68K_NO_43:
-        SUBQ.L  #0x1,0x4(A2)                    | decrement double low word
-        BCC.B   FP68K_DONE_14                   | no borrow -> done
-        SUBQ.L  #0x1,(A2)                       | borrow into high word
-FP68K_DONE_14:
-        BRA.B   FP68K_DONE_13                   | -> check result class
-
-| ----------------------------------------------------------
-|
-| FP68K_NO_44: decrement extended by 1 ULP
-|
-FP68K_NO_44:
-        TST.B   D4                              | dest was zero?
-        BNE.B   FP68K_NO_45                     | no -> simple decrement
-        BCHG    #0x7,(A2)                       | flip sign (cross zero)
-        ADDQ.W  #0x1,0x8(A2)                    | increment mantissa low to min
-        BRA.B   FP68K_DONE_13                   | -> check result class
-
-| ----------------------------------------------------------
-|
-| FP68K_NO_45: decrement extended mantissa, handle borrow through exponent
-|
-FP68K_NO_45:
-        SUBQ.L  #0x1,0x6(A2)                    | decrement mantissa low
-        BCC.B   FP68K_DONE_15                   | no borrow -> done
-        SUBQ.L  #0x1,0x2(A2)                    | borrow into mantissa high
-        BMI.B   FP68K_CONT_108                  | underflow -> check exponent
-        TST     (A2)                            | exponent zero?
-        BEQ.B   FP68K_DONE_15                   | yes -> result is denorm, done
-        CMPI    #-0x8000,(A2)                   | negative exponent word?
-        BEQ.B   FP68K_DONE_15                   | yes -> done
-        ADDI    #-0x8000,0x2(A2)                | restore sign bit in mantissa
-        BRA.B   FP68K_CONT_109                  | -> decrement exponent
-
-| ----------------------------------------------------------
-|
-| FP68K_CONT_108: mantissa borrow into exponent
-|
-FP68K_CONT_108:
-        BCC.B   FP68K_DONE_15                   | no further borrow -> done
-FP68K_CONT_109:
-        SUBQ.W  #0x1,(A2)                       | decrement exponent
-FP68K_DONE_15:
-        BRA     FP68K_DONE_13                   | -> check result class
-
-| ----------------------------------------------------------
-|
-| FP68K_CONT_110: setException - set specified SANE exception flag
-|
-FP68K_CONT_110:
-        SWAP    D6                              | access high word for exception flags
-        CLR     D6                              | clear low word
-        MOVE    (A1),D0                         | D0 = exception bit number
-        ADDQ.W  #0x8,D0                         | offset into exception flags byte
-        BSET    D0,D6                           | set that exception flag
-        BRA.B   FP68K_EXIT_14                   | -> return via pack path
-
-| ----------------------------------------------------------
-|
-| FP68K_CONT_111: procEntry - save current env, set new rounding mode
-|
-FP68K_CONT_111:
-        SWAP    D6                              | access high word
-        MOVE    #0x1F00,D6                      | mask for exception flags
-        AND     (A0),D6                         | capture current exceptions
-        MOVE    (A1),(A0)                       | set new environment from (A1)
-FP68K_EXIT_14:
-        BRA     FP68K_EXIT_2                    | -> pack result and return
-
-| ----------------------------------------------------------
-|
-| FP68K_CONT_112: Num2Dec - convert FP number to Decimal record
-| Unpacks FP value, handles INF/NaN, then converts to
-| decimal digits via repeated multiply-by-10
-|
-FP68K_CONT_112:
-        SUBA    #0x14,SP                        | allocate 20 bytes temp space
-        MOVE.L  A7,A3                           | A3 = temp buffer base
-        LEA.L   0x4(A2),A4                      | A4 = decimal string start
-        MOVE    0x2(A2),D3                      | D3 = decimal exponent
-        SWAP    D6                              | save selector in high word
-        CLR.L   D4                              | clear mantissa high
-        MOVE.L  D4,D5                           | clear mantissa low
-        MOVE.L  D4,D7                           | clear guard bits
-        MOVEQ.L #0x13,D2                        | max 19 significant digits
-        MOVE.B  (A4)+,D6                        | D6 = string length
-        BEQ.B   FP68K_EMPTY_8                   | empty string -> zero
-        MOVE.B  (A4),D0                         | first char of string
-        CMPI.B  #0x49,D0                        | 'I' for infinity?
-        BEQ.B   FP68K_OK_32                     | yes -> infinity
-        CMPI.B  #0x4E,D0                        | 'N' for NaN?
-        BNE.B   FP68K_NO_48                     | no -> normal decimal digits
-        MOVE.B  -0x1(A4),D2                     | D2 = NaN payload length
-        ADDQ.L  #0x1,A4                         | skip 'N'
-        SUBQ.B  #0x1,D2                         | adjust for 'N' prefix
-        MOVEQ.L #0x8,D0                         | 8 hex digits for high word
-        CMPI.B  #0x4,D2                         | fewer than 4 digits?
-        BGE.B   FP68K_NO_46                     | no -> full 8 digits
-        SUBQ.B  #0x4,D0                         | adjust digit count
-        ADD.B   D2,D0                           | D0 = actual hex digits
-FP68K_NO_46:
-        BSR.B   FP68K_LOOP_8                    | extract hex digits to D5
-        MOVE.L  D5,D4                           | high NaN payload
-        CLR.L   D5                              | clear for low part
-        MOVEQ.L #0x8,D0                         | 8 more hex digits
-        BSR.B   FP68K_LOOP_8                    | extract low hex digits
-        BRA.B   FP68K_CONT_113                  | -> validate NaN payload
-
-| ----------------------------------------------------------
-|
-| FP68K_LOOP_8: extract hex nibbles from NaN payload into mantissa
-| Reads D0 hex digits, packing into D5 via rotate-and-OR
-|
-FP68K_LOOP_8:
-        ROL.L   #0x4,D5                         | make room for next nibble
-        SUBQ.B  #0x1,D2                         | any digits remaining?
-        BMI.B   FP68K_EMPTY_7                   | no -> leave zero nibble
-        MOVE.B  (A4)+,D1                        | read hex ASCII digit
-        CMPI.B  #0x39,D1                        | is it A-F?
-        BLE.B   FP68K_NO_47                     | no -> 0-9
-        ADDI.B  #0x9,D1                         | adjust A-F to binary
-FP68K_NO_47:
-        ANDI.B  #0xF,D1                         | mask to 4-bit nibble
-        OR.B    D1,D5                           | merge into result
-FP68K_EMPTY_7:
-        SUBQ.W  #0x1,D0                         | decrement digit count
-        BNE.B   FP68K_LOOP_8                    | loop for all digits
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| FP68K_CONT_113
-|
-FP68K_CONT_113:
-        ANDI.L  #0x7FFFFFFF,D4                  | clear sign bit from payload
-        BNE.B   FP68K_OK_32                     | nonzero payload -> valid NaN
-        MOVEQ.L #0x15,D4                        | default NaN payload = 21
-        SWAP    D4                              | shift to high word
-        BSET    #0x1E,D4                        | set quiet NaN bit
-FP68K_OK_32:
-        MOVE    #0x7FFF,D0                      | exponent = NaN/Inf
-        BRA.B   FP68K_CONT_114                  | -> store extended value
-
-| ----------------------------------------------------------
-|
-| FP68K_NO_48
-|
-FP68K_NO_48:
-        CMPI.B  #0x30,D0                        | first digit = '0' (zero)?
-        BNE.B   FP68K_NEXT                      | no -> parse decimal digits
-FP68K_EMPTY_8:
-        CLR.L   D0                              | exponent = 0 (zero result)
-FP68K_CONT_114:
-        TST.B   (A2)                            | sign negative?
-        BEQ.B   FP68K_NO_49                     | no -> positive
-        BSET    #0xF,D0                         | set sign bit in exponent word
-FP68K_NO_49:
-        BSR     FP68K_CONT_117                  | store extended value at (A3)
-        BRA     FP68K_CONT_116                  | -> convert to dest format
-
-| ----------------------------------------------------------
-|
-| FP68K_CONT_115: multiply D4:D5 by 10 using shifts (x*10 = x*8 + x*2)
-|
-FP68K_CONT_115:
-        ADD.L   D5,D5                           | x2 low
-        ADDX.L  D4,D4                           | x2 high
-        MOVE.L  D5,D1                           | save x2 low
-        MOVE.L  D4,D0                           | save x2 high
-        ADD.L   D5,D5                           | x4 low
-        ADDX.L  D4,D4                           | x4 high
-        ADD.L   D5,D5                           | x8 low
-        ADDX.L  D4,D4                           | x8 high
-        ADD.L   D1,D5                           | x8+x2 = x10 low
-        ADDX.L  D0,D4                           | x8+x2 = x10 high
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| FP68K_NEXT
-|
-FP68K_NEXT:
-        BSR.B   FP68K_CONT_115                  | multiply accumulator by 10
-        MOVEQ.L #0xF,D0                         | mask for ASCII digit
-        AND.B   (A4)+,D0                        | D0 = digit value (0-9)
-        ADD.L   D0,D5                           | add to mantissa low
-        CLR     D0                              | clear for carry propagation
-        ADDX.L  D0,D4                           | propagate carry to high
-        SUBQ.B  #0x1,D6                         | more string chars?
-        BEQ.B   FP68K_DONE_17                   | no -> done with digits
-        SUBQ.B  #0x1,D2                         | max precision reached?
-        BNE.B   FP68K_NEXT                      | no -> next digit
-        MOVE.B  #0xF,D7                         | mask for rounding digit
-        AND.B   (A4),D7                         | D7 = next digit (for rounding)
-        BRA.B   FP68K_SKIP_18                   | -> skip remaining digits
-
-| ----------------------------------------------------------
-|
-| FP68K_DONE_16
-|
-FP68K_DONE_16:
-        CMPI    #0x1B,D3                        | exponent > 27?
-        BLE.B   FP68K_SKIP_18                   | no -> stop multiplying
-        BSR.B   FP68K_CONT_115                  | multiply by 10 (scale up)
-        SUBQ.W  #0x1,D3                         | decrement remaining exponent
-FP68K_DONE_17:
-        SUBQ.W  #0x1,D2                         | decrement precision counter
-        BNE.B   FP68K_DONE_16                   | loop until done
-FP68K_SKIP_18:
-        MOVE    #0x403E,D0                      | exponent = 63 + bias (64-bit int)
-        TST.B   (A2)                            | sign negative?
-        BEQ.B   FP68K_NO_50                     | no -> positive
-        BSET    #0xF,D0                         | set sign bit
-FP68K_NO_50:
-        BSR.B   FP68K_CONT_117                  | store extended value at (A3)
-        BSR.B   FP68K_CONT_118                  | apply power-of-10 scaling
-FP68K_CONT_116:
-        SWAP    D6                              | restore selector
-        ANDI    #0x3800,D6                      | isolate dest format bits
-        ORI     #0x10,D6                        | add convert-to-dest selector
-        PEA.L   (A3)                            | push extended source
-        MOVE.L  0xA(A6),-(SP)                   | push dest operand ptr
-        MOVE    D6,-(SP)                        | push selector
-        BSR     FP68K_EMPTY                     | convert extended to dest format
-        ADDA    #0x14,SP                        | deallocate temp space
-        BRA     FP68K_EXIT_3                    | -> three-operand return
-
-| ----------------------------------------------------------
-|
-| FP68K_CONT_117: store extended value (D0:D4:D5) into temp at (A3)
-|
-FP68K_CONT_117:
-        MOVE    D0,(A3)+                        | store exponent+sign word
-        MOVE.L  D4,(A3)+                        | store mantissa high
-        MOVE.L  D5,(A3)                         | store mantissa low
-        SUBQ.L  #0x6,A3                         | rewind pointer to start
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| FP68K_CONT_118: apply rounding direction for Num2Dec/Dec2Num scaling
-| Chooses round-up or round-down based on format and sign
-|
-FP68K_CONT_118:
-        MOVE.B  (A0),D6                         | read current rounding mode
-        MOVE.B  D6,-(SP)                        | save on stack
-        ANDI.B  #0x60,D6                        | isolate rounding mode bits
-        BEQ.B   FP68K_OK_33                     | round-to-nearest -> use as-is
-        MOVEQ.L #0x40,D1                        | D1 = round-toward-minus-inf mode
+| FP68K_DBCORE -- common core of both conversions (steps B4-
+| B7 / D5-D8 of Coonen's algorithms): compute 10^|D3| (POW10) with the
+| rounding direction set so that the scale error goes the safe way,
+| multiply or divide the value at (A3) by it (toward zero), then OR the
+| inexact information (rounding errors, lost digits D7.B) into its last
+| bit: an added half-ulp for directed rounding, a jammed LSB for nearest
+| (jam1lsb). The caller's modes are restored, the new flags kept.
+FP68K_DBCORE:
+        MOVE.B  (A0),D6                         | D6 = environment high byte (direction, flags)
+        MOVE.B  D6,-(SP)                        | save it
+        ANDI.B  #0x60,D6                        | rounding direction
+        BEQ.B   FP68K_DBCORE_51                 | nearest ->
+        MOVEQ.L #0x40,D1                        | assume downward for the scale factor
         TST.B   (A3)                            | value negative?
-        BPL.B   FP68K_NO_51                     | no -> check positive direction
-        CMPI.B  #0x40,D6                        | mode = round toward -inf?
-        BEQ.B   FP68K_OK_34                     | yes -> invert for magnitude
-        BRA.B   FP68K_NO_52                     | -> apply direction
-
+        BPL.B   FP68K_DBCORE_30                 | no ->
+        CMPI.B  #0x40,D6                        | negative and downward?
+        BEQ.B   FP68K_DBCORE_37                 | yes: upward for the factor ->
+        BRA.B   FP68K_DBCORE_40                 | -> sign of the exponent
+| ----------------------------------------------------------
+| FP68K_DBCORE_51 (Apple DBCORE @51): to nearest -- clear the flags.
+FP68K_DBCORE_51:
+        MOVE.B  D6,(A0)                         | nearest, flags cleared
+        BRA.B   FP68K_DBCORE_50                 | -> scale
 | ----------------------------------------------------------
 |
-| FP68K_OK_33
+| FP68K_DBCORE_30
 |
-FP68K_OK_33:
-        MOVE.B  D6,(A0)                         | set round-to-nearest mode
-        BRA.B   FP68K_CONT_119                  | -> do the scaling
-
+FP68K_DBCORE_30:
+        CMPI.B  #0x20,D6                        | positive and upward?
+        BNE.B   FP68K_DBCORE_40                 | no ->
+FP68K_DBCORE_37:
+        EORI.B  #0x60,D1                        | upward for the factor
+FP68K_DBCORE_40:
+        TST.W   D3                              | negative exponent (a division)?
+        BPL.B   FP68K_DBCORE_43                 | no ->
+        EORI.B  #0x60,D1                        | flip upward <-> downward
+FP68K_DBCORE_43:
+        MOVE.B  D1,(A0)                         | direction for POW10, flags cleared
+FP68K_DBCORE_50:
+        LEA.L   0xA(A3),A1                      | A1 = 10(A3): the factor
+        BSR.W   FP68K_POW10                     | POW10: 10^|D3|
+        ORI.B   #0x60,(A0)                      | scale toward zero
+        PEA.L   0xA(A3)                         | src: the factor
+        PEA.L   (A3)                            | dst: the value
+        MOVEQ.L #0x4,D0                         | OPMUL ...
+        TST.W   D3                              | ... for a positive exponent
+        BPL.B   FP68K_DBCORE_5                  | ...
+        MOVEQ.L #0x6,D0                         | OPDIV for a negative one
+FP68K_DBCORE_5:
+        MOVE.W  D0,-(SP)                        | opword
+        BSR.W   FP68K_REFP68K                   | REFP68K: scale
+        BTST    #0x4,(A0)                       | inexact (power, multiply or divide)?
+        SNE.B   D0                              | ...
+        TST.B   D7                              | lost digits (D7.B)?
+        SNE.B   D7                              | ...
+        OR.B    D7,D0                           | D0 = $FF if either
+        MOVE.B  (A0),D1                         | new environment high byte ...
+        ANDI.B  #0x1F,D1                        | ... its flags ...
+        OR.B    (SP)+,D1                        | ... + the old direction and flags
+        MOVE.B  D1,(A0)                         | store
+        NEG.B   D0                              | 0 or 1
+        BEQ.B   FP68K_DBCORERETURN              | exact: done ->
+        BSET    #0x4,(A0)                       | inexact (for lost digits)
+        TST.B   D6                              | rounding to nearest?
+        BEQ.B   FP68K_JAM1LSB                   | yes: jam a 1 into the LSB ->
+        CMPI.B  #0x60,D6                        | toward zero?
+        BEQ.B   FP68K_DBCORERETURN              | yes: ignore the extra information ->
+        MOVE.L  #0x1,-(SP)                      | directed: add half an ulp: low 32 bits 1 ...
+        CLR.L   -(SP)                           | ... high 32 bits 0 ...
+        MOVE.W  (A3),-(SP)                      | ... sign/exponent of the value ...
+        SUBQ.W  #0x1,(SP)                       | ... - 1, but watch for ...
+        BCS.B   FP68K_MINEXP                    | ... 0000 -> FFFF ...
+        BVC.B   FP68K_NOTMINEXP                 | ... and 8000 -> 7FFF
+FP68K_MINEXP:
+        ADDQ.W  #0x1,(SP)                       | MINEXP: keep the minimum exponent
+FP68K_NOTMINEXP:
+        PEA.L   (SP)                            | src: the half-ulp
+        PEA.L   (A3)                            | dst: the value
+        CLR.W   -(SP)                           | FOADD (0)
+        BSR.W   FP68K_REFP68K                   | REFP68K
+        ADDA.W  #0xA,SP                         | drop the half-ulp
+        BRA.B   FP68K_DBCORERETURN              | -> return
 | ----------------------------------------------------------
-|
-| FP68K_NO_51
-|
-FP68K_NO_51:
-        CMPI.B  #0x20,D6                        | mode = round toward +inf?
-        BNE.B   FP68K_NO_52                     | no -> keep direction
-FP68K_OK_34:
-        EORI.B  #0x60,D1                        | invert direction for this sign
-FP68K_NO_52:
-        TST     D3                              | exponent negative?
-        BPL.B   FP68K_NO_53                     | no -> keep direction
-        EORI.B  #0x60,D1                        | invert for negative power
-FP68K_NO_53:
-        MOVE.B  D1,(A0)                         | set adjusted rounding mode
-FP68K_CONT_119:
-        LEA.L   0xA(A3),A1                      | A1 = second temp extended slot
-        BSR     FP68K_CONT_121                  | compute power-of-10 scale factor
-        ORI.B   #0x60,(A0)                      | set round-toward-zero for multiply
-        PEA.L   0xA(A3)                         | push scale factor
-        PEA.L   (A3)                            | push value to scale
-        MOVEQ.L #0x4,D0                         | selector = multiply
-        TST     D3                              | exponent positive?
-        BPL.B   FP68K_OK_35                     | yes -> multiply
-        MOVEQ.L #0x6,D0                         | negative -> divide by power
-FP68K_OK_35:
-        MOVE    D0,-(SP)                        | push multiply/divide selector
-        BSR     FP68K_EMPTY                     | scale the value
-        BTST    #0x4,(A0)                       | inexact flag set?
-        SNE.B   D0                              | D0 = $FF if inexact
-        TST.B   D7                              | rounding digit nonzero?
-        SNE.B   D7                              | D7 = $FF if nonzero
-        OR.B    D7,D0                           | combine inexact indicators
-        MOVE.B  (A0),D1                         | get environment byte
-        ANDI.B  #0x1F,D1                        | mask exception flags
-        OR.B    (SP)+,D1                        | merge saved rounding mode
-        MOVE.B  D1,(A0)                         | restore environment
-        NEG.B   D0                              | D0 = 1 if any inexactness
-        BEQ.B   FP68K_DONE_18                   | exact -> done
-        BSET    #0x4,(A0)                       | set inexact flag
-        TST.B   D6                              | round-to-nearest mode?
-        BEQ.B   FP68K_OK_37                     | yes -> special tie-break
-        CMPI.B  #0x60,D6                        | round toward zero?
-        BEQ.B   FP68K_DONE_18                   | yes -> already truncated
-        MOVE.L  #0x1,-(SP)                      | build 1-ULP extended value
-        CLR.L   -(SP)                           | mantissa low = 0
-        MOVE    (A3),-(SP)                      | copy exponent
-        SUBQ.W  #0x1,(SP)                       | exponent - 1 for ULP
-        BCS.B   FP68K_CONT_120                  | underflow -> fix
-        BVC.B   FP68K_OK_36                     | no overflow -> ok
-FP68K_CONT_120:
-        ADDQ.W  #0x1,(SP)                       | restore exponent
-FP68K_OK_36:
-        PEA.L   (SP)                            | push ULP operand
-        PEA.L   (A3)                            | push value
-        CLR     -(SP)                           | selector = add
-        BSR     FP68K_EMPTY                     | add 1 ULP for directed rounding
-        ADDA    #0xA,SP                         | clean up stack
-        BRA.B   FP68K_DONE_18                   | -> done
-
-| ----------------------------------------------------------
-|
-| FP68K_OK_37
-|
-FP68K_OK_37:
-        MOVE    (A3),D0                         | get result exponent
-        ADDQ.W  #0x1,D0                         | increment for tie-break check
-        ADD     D0,D0                           | double (shift out sign bit)
-        BEQ.B   FP68K_DONE_18                   | zero -> no tie-break needed
-        BSET    #0x0,0x9(A3)                    | set LSB for round-to-odd
-FP68K_DONE_18:
-        RTS                                     | return to caller
-| POWER_TBL prefix: extended-precision powers of 10 for large exponents
-| Each 14-byte entry: 2-byte exp_delta, 2-byte sign, 10-byte extended value
-| Used by FP68K_CONT_121 to scale by 10^14, 10^27, 10^55, 10^110, 10^220, etc.
-  .byte 0x00,0x0E,0x00,0x00,0x40,0x2D
-  .byte 0xB5,0xE6,0x20,0xF4,0x80,0x00
-  .byte 0x00,0x00,0x00,0x1B,0x00,0x00
-  .byte 0x40,0x58,0xCE,0xCB,0x8F,0x27
-  .byte 0xF4,0x20,0x0F,0x3A,0x00,0x37
-  .byte 0x00,0x01,0x40,0xB5,0xD0,0xCF
-  .byte 0x4B,0x50,0xCF,0xE2,0x07,0x66
-  .byte 0x00,0x6C,0x00,0x01,0x41,0x65
-  .byte 0xDA,0x01,0xEE,0x64,0x1A,0x70
-  .byte 0x8D,0xEA,0x00,0xCE,0xFF,0xFF
-  .byte 0x42,0xAB,0x9F,0x79,0xA1,0x69
-  .byte 0xBD,0x20,0x3E,0x41,0x01,0x9C
-  .byte 0x00,0x01,0x45,0x57,0xC6,0xB0
-  .byte 0xA0,0x96,0xA9,0x52,0x02,0xBE
-  .byte 0x03,0x38,0x00,0x01,0x4A,0xB0
-  .byte 0x9A,0x35,0xB2,0x46,0x41,0xD0
-  .byte 0x59,0x53,0x06,0x70,0x00,0x01
-  .byte 0x55,0x61,0xB9,0xC9,0x4B,0x7F
-  .byte 0xA8,0xD7,0x65,0x15
+| FP68K_JAM1LSB: set the LSB of a finite result.
+FP68K_JAM1LSB:
+        MOVE.W  (A3),D0                         | sign/exponent: watch for $7FFF and $FFFF ...
+        ADDQ.W  #0x1,D0                         | ...
+        ADD.W   D0,D0                           | ... (0 after these two)
+        BEQ.B   FP68K_DBCORERETURN              | infinity/NaN: leave it ->
+        BSET    #0x0,0x9(A3)                    | set the LSB
+FP68K_DBCORERETURN:
+        RTS                                     | return: scaled value at (A3), modes restored (DBCORE)
+| -------------------------------------------------------------------------
+| FP68K_TAB10: powers of ten for POW10, 7 words per entry: N, the
+| rounding error of the table value (+1 rounded up, -1 down, 0 exact),
+| then 10^N in extended. Searched from the top entry (POWER_TBL, Apple
+| TAB10E) down.
+| -------------------------------------------------------------------------
+FP68K_TAB10:
+        .short  14,0,0x402D,0xB5E6,0x20F4,0x8000,0x0000 | 10^14, exact
+        .short  27,0,0x4058,0xCECB,0x8F27,0xF420,0x0F3A | 10^27, exact
+        .short  55,1,0x40B5,0xD0CF,0x4B50,0xCFE2,0x0766 | 10^55, rounded up
+        .short  108,1,0x4165,0xDA01,0xEE64,0x1A70,0x8DEA | 10^108, rounded up
+        .short  206,-1,0x42AB,0x9F79,0xA169,0xBD20,0x3E41 | 10^206, rounded down
+        .short  412,1,0x4557,0xC6B0,0xA096,0xA952,0x02BE | 10^412, rounded up
+        .short  824,1,0x4AB0,0x9A35,0xB246,0x41D0,0x5953 | 10^824, rounded up
+        .short  1648,1,0x5561,0xB9C9,0x4B7F,0xA8D7,0x6515 | 10^1648, rounded up
 POWER_TBL:
-  .byte  0x0C,0xE0,0x00,0x01,0x6A,0xC4
-  .byte 0x86,0xD4,0x8D,0x66,0x26,0xC2
-  .byte 0x7E,0xEC
-| FP68K_CONT_121 -- compute power-of-10 scale factor.
-FP68K_CONT_121:
-        MOVEQ.L #0x9,D1                         | 9 table entries to process
-        MOVE    D3,D0                           | D0 = absolute decimal exponent
-        BPL.B   FP68K_OK_38                     | positive -> ok
-        NEG     D0                              | make positive
-FP68K_OK_38:
-        CMPI    #0xF,D0                         | exponent < 15?
-        BCS.B   FP68K_OK_41                     | yes -> use small table directly
-        CMPI    #0x1388,D0                      | exponent > 5000?
-        BCS.B   FP68K_OK_39                     | no -> ok
-        MOVE    #0x1388,D0                      | clamp to 5000
-FP68K_OK_39:
-        LEA.L   POWER_TBL(PC),A2                | A2 = large power table
-FP68K_LOOP_9:
-        CMP     (A2),D0                         | remaining exp >= table entry?
-        BCS.B   FP68K_SKIP_19                   | no -> skip this power
-        SUB     (A2)+,D0                        | subtract and advance to sign
-        TST     (A2)                            | inexact entry? (sign word)
-        BEQ.B   FP68K_NO_55                     | no -> exact power, use directly
-        BSET    #0x4,(A0)                       | flag inexact (approximate power)
-        BTST    #0x6,(A0)                       | rounding toward -inf?
-        BEQ.B   FP68K_NO_54                     | no -> check +inf
-        TST     (A2)                            | sign of correction?
-        BLE.B   FP68K_NO_55                     | <= 0 -> use lower bound
-        BRA.B   FP68K_CONT_122                  | -> use adjusted bound
-
+        .short  3296,1,0x6AC4,0x86D4,0x8D66,0x26C2,0x7EEC | 10^3296, rounded up
+| FP68K_POW10 -- 10^|D3| into the extended at (A1): below
+| 15 straight from TAB10S, else the product of TAB10 entries (exponents
+| above 5000 are held at 5000: overflow), each corrected by its rounding
+| error when that would go against the rounding direction. Changes D0-D2,
+| A2; D1 bit 31 set after the first factor (PTMUL multiplies from then
+| on). An inexact table value sets the inexact flag directly.
+FP68K_POW10:
+        MOVEQ.L #0x9,D1                         | D1 = 9 TAB10 entries (D1.hi = 0: first factor)
+        MOVE.W  D3,D0                           | exponent ...
+        BPL.B   FP68K_POW10_1                   | ...
+        NEG.W   D0                              | ... absolute value
+FP68K_POW10_1:
+        CMPI.W  #0xF,D0                         | below 15?
+        BCS.B   FP68K_PTQUICK                   | yes: straight from TAB10S (PTQUICK) ->
+        CMPI.W  #0x1388,D0                      | above 5000?
+        BCS.B   FP68K_POW10_10                  | no ->
+        MOVE.W  #0x1388,D0                      | 5000: overflows anyway
+FP68K_POW10_10:
+        LEA.L   POWER_TBL(PC),A2                | A2 = the top TAB10 entry (TAB10E)
+| FP68K_PTLOOP: next table entry.
+FP68K_PTLOOP:
+        CMP.W   (A2),D0                         | exponent vs the entry's N
+        BCS.B   FP68K_PTSKIP                    | smaller: skip the entry (PTSKIP) ->
+        SUB.W   (A2)+,D0                        | exponent - N; A2 -> the error word
+        TST.W   (A2)                            | an inexact table value?
+        BEQ.B   FP68K_PTLOOP_31                 | exact: use it ->
+        BSET    #0x4,(A0)                       | inexact flag, directly
+        BTST    #0x6,(A0)                       | RNDHI: downward or toward zero?
+        BEQ.B   FP68K_PTLOOP_13                 | no ->
+        TST.W   (A2)                            | rounded down (error <= 0)?
+        BLE.B   FP68K_PTLOOP_31                 | yes: fine for these directions ->
+        BRA.B   FP68K_PTLOOP_15                 | rounded up: correct it ->
 | ----------------------------------------------------------
 |
-| FP68K_NO_54
+| FP68K_PTLOOP_13
 |
-FP68K_NO_54:
-        BTst    #0x5,(A0)                       | rounding toward +inf?
-        BEQ.B   FP68K_NO_55                     | no -> use exact value
-        TST     (A2)                            | sign of correction?
-        BGE.B   FP68K_NO_55                     | >= 0 -> use lower bound
-FP68K_CONT_122:
-        MOVE.L  A2,-(SP)                        | save table pointer
-        MOVE    0xA(A2),-(SP)                   | push adjusted exponent
-        TST     (A2)+                           | correction positive?
-        BPL.B   FP68K_OK_40                     | yes -> increment exponent
-        ADDQ.W  #0x1,(SP)                       | negative: bump exponent up
-        BRA.B   FP68K_CONT_123                  | -> build adjusted value
-
+FP68K_PTLOOP_13:
+        BTST    #0x5,(A0)                       | RNDLO (with RNDHI clear): upward?
+        BEQ.B   FP68K_PTLOOP_31                 | no: nearest, as it is ->
+        TST.W   (A2)                            | rounded up (error >= 0)?
+        BGE.B   FP68K_PTLOOP_31                 | yes: fine ->
+| FP68K_PTLOOP_15 (Apple POW10 @15): correct the table value by one LSB, on
+| a copy on the stack.
+FP68K_PTLOOP_15:
+        MOVE.L  A2,-(SP)                        | save the pointer to the error word
+        MOVE.W  0xA(A2),-(SP)                   | copy: the low significand word ...
+        TST.W   (A2)+                           | ... error +1 or -1; A2 -> the value
+        BPL.B   FP68K_PTLOOP_21                 | +1 (rounded up): subtract 1 ->
+        ADDQ.W  #0x1,(SP)                       | -1: add 1 to the LSB
+        BRA.B   FP68K_PTLOOP_23                 | ...
 | ----------------------------------------------------------
 |
-| FP68K_OK_40
+| FP68K_PTLOOP_21
 |
-FP68K_OK_40:
-        SUBQ.W  #0x1,(SP)                       | positive: decrement exponent
-FP68K_CONT_123:
-        MOVE.L  0x4(A2),-(SP)                   | push adjusted mantissa low
-        MOVE.L  (A2),-(SP)                      | push adjusted mantissa high
-        MOVE.L  A7,A2                           | A2 = stack-based extended value
-        BSR.B   FP68K_CONT_124                  | multiply by adjusted power
-        ADDQ.L  #0x8,SP                         | clean up stack (8 bytes)
-        ADDQ.L  #0x2,SP                         | clean up stack (2 bytes)
-        MOVE.L  (SP)+,A2                        | restore table pointer
-        ADDQ.L  #0x2,A2                         | skip sign word
-        BRA.B   FP68K_NEXT_2                    | -> advance to next entry
-
+FP68K_PTLOOP_21:
+        SUBQ.W  #0x1,(SP)                       | subtract 1 from the LSB
+FP68K_PTLOOP_23:
+        MOVE.L  0x4(A2),-(SP)                   | the middle 32 significand bits
+        MOVE.L  (A2),-(SP)                      | exponent and the high 16 bits
+        MOVEA.L SP,A2                           | A2 = the corrected copy
+        BSR.B   FP68K_PTMUL                     | PTMUL
+        ADDQ.L  #0x8,SP                         | drop the copy ...
+        ADDQ.L  #0x2,SP                         | ...
+        MOVEA.L (SP)+,A2                        | A2 = the error word again
+        ADDQ.L  #0x2,A2                         | A2 -> the value
+        BRA.B   FP68K_PTLOOP_33                 | ...
+| ----------------------------------------------------------
+| FP68K_PTLOOP_31 (Apple POW10 @31): the table value as it is.
+FP68K_PTLOOP_31:
+        ADDQ.L  #0x2,A2                         | skip the error word
+        BSR.B   FP68K_PTMUL                     | PTMUL
+FP68K_PTLOOP_33:
+        SUBQ.L  #0x4,A2                         | A2 -> the entry
+FP68K_PTSKIP:
+        SUBA.W  #0xE,A2                         | PTSKIP: the next lower entry (14 bytes down)
+        SUBQ.W  #0x1,D1                         | entries left
+        BNE.B   FP68K_PTLOOP                    | ...
+FP68K_PTQUICK:
+        MULU.W  #0xA,D0                         | PTQUICK: rest (0-14) * 10
+        LEA.L   FP68K_TAB10S(PC,D0.W),A2        | A2 = 10^rest in TAB10S
+| FP68K_PTMUL: (A1) := (A2), or (A1) * (A2) when D1 bit 31
+| is set.
+FP68K_PTMUL:
+        TST.L   D1                              | first factor (D1 bit 31 clear)?
+        BPL.B   FP68K_PTMUL_42                  | yes: copy it ->
+        PEA.L   (A2)                            | src: the power
+        PEA.L   (A1)                            | dst: the product so far
+        MOVE.W  #0x4,-(SP)                      | OPMUL
+        BSR.W   FP68K_REFP68K                   | REFP68K
+        RTS                                     | return: (A1) := (A1) * (A2) (PTMUL)
 | ----------------------------------------------------------
 |
-| FP68K_NO_55
+| FP68K_PTMUL_42
 |
-FP68K_NO_55:
-        ADDQ.L  #0x2,A2                         | skip sign word
-        BSR.B   FP68K_CONT_124                  | multiply by this power of 10
-FP68K_NEXT_2:
-        SUBQ.L  #0x4,A2                         | back up past sign+delta words
-FP68K_SKIP_19:
-        SUBA    #0xE,A2                         | advance to next table entry
-        SUBQ.W  #0x1,D1                         | decrement entry counter
-        BNE.B   FP68K_LOOP_9                    | loop for all 9 entries
-FP68K_OK_41:
-        MULU    #0xA,D0                         | remaining exp * 10 bytes/entry
-        LEA.L   FP68K_CONT_125(PC,D0.W),A2      | A2 = small power-of-10 entry
-| FP68K_CONT_124: multiply or store power of 10 into scale factor at (A1)
-FP68K_CONT_124:
-        TST.L   D1                              | first call (D1 >= 0)?
-        BPL.B   FP68K_OK_42                     | yes -> store directly
-        PEA.L   (A2)                            | push power-of-10 operand
-        PEA.L   (A1)                            | push accumulated scale factor
-        MOVE    #0x4,-(SP)                      | selector = multiply
-        BSR     FP68K_EMPTY                     | multiply into scale factor
-        RTS                                     | return to caller
-
+FP68K_PTMUL_42:
+        MOVE.W  (A2)+,(A1)+                     | (A1) := (A2): sign/exponent
+        MOVE.L  (A2)+,(A1)+                     | significand
+        MOVE.L  (A2),(A1)                       | ...
+        SUBQ.L  #0x6,A1                         | A1 back
+        SUBQ.L  #0x6,A2                         | A2 back
+        BSET    #0x1F,D1                        | multiply from now on
+        RTS                                     | return: first factor copied to (A1); multiply from now on
+| -------------------------------------------------------------------------
+| FP68K_TAB10S: 10^0 .. 10^14, exact, in extended.
+| -------------------------------------------------------------------------
+FP68K_TAB10S:
+        .short  0x3FFF,0x8000,0x0000,0x0000,0x0000 | 10^0 = 1
+        .short  0x4002,0xA000,0x0000,0x0000,0x0000 | 10^1 = 10
+        .short  0x4005,0xC800,0x0000,0x0000,0x0000 | 10^2 = 100
+        .short  0x4008,0xFA00,0x0000,0x0000,0x0000 | 10^3 = 1000
+        .short  0x400C,0x9C40,0x0000,0x0000,0x0000 | 10^4 = 10000
+        .short  0x400F,0xC350,0x0000,0x0000,0x0000 | 10^5 = 100000
+        .short  0x4012,0xF424,0x0000,0x0000,0x0000 | 10^6 = 1000000
+        .short  0x4016,0x9896,0x8000,0x0000,0x0000 | 10^7 = 10000000
+        .short  0x4019,0xBEBC,0x2000,0x0000,0x0000 | 10^8 = 100000000
+        .short  0x401C,0xEE6B,0x2800,0x0000,0x0000 | 10^9 = 1000000000
+        .short  0x4020,0x9502,0xF900,0x0000,0x0000 | 10^10 = 10000000000
+        .short  0x4023,0xBA43,0xB740,0x0000,0x0000 | 10^11 = 100000000000
+        .short  0x4026,0xE8D4,0xA510,0x0000,0x0000 | 10^12 = 1000000000000
+        .short  0x402A,0x9184,0xE72A,0x0000,0x0000 | 10^13 = 10000000000000
+        .short  0x402D,0xB5E6,0x20F4,0x8000,0x0000 | 10^14 = 100000000000000
 | ----------------------------------------------------------
-|
-| FP68K_OK_42
-|
-FP68K_OK_42:
-        MOVE    (A2)+,(A1)+                     | copy exponent word
-        MOVE.L  (A2)+,(A1)+                     | copy mantissa high
-        MOVE.L  (A2),(A1)                       | copy mantissa low
-        SUBQ.L  #0x6,A1                         | rewind dest pointer
-        SUBQ.L  #0x6,A2                         | rewind source pointer
-        BSET    #0x1F,D1                        | mark as initialized
-        RTS                                     | return to caller
-
+| FP68K_B2D -- binary to decimal (Num2Dec): the value at
+| (A2) (format in the opword) to the decimal record at (A1), by the
+| DecForm at address 3 (style: 0 float, nonzero fixed; digits). NaN:
+| 'N' and 16 hex digits; zero '0', infinity 'I'; else estimate
+| floor(log10|x|) (BD1), scale to an integer of the wanted digits
+| (DBCORE, rint), retry if the estimate was low, '?' if a fixed result
+| has more than 19 digits, then the digits (BD9). Frame (A3): 30 bytes.
+FP68K_B2D:
+        MOVE.W  D6,D0                           | D0 = opword: source format field next (B2D)
+        ROL.W   #0x6,D0                         | source format * 2 in bits 3-1
+        CLR.L   D2                              | D2 := 0: NaN flag for UNPACK
+        MOVE.L  D2,D3                           | D3 := 0: number case
+        MOVE.L  D2,D6                           | D6 := 0: sign and flags
+        MOVE.L  D2,D7                           | D7 := 0: round bits
+        MOVEA.L A2,A3                           | A3 = address 2, the binary value
+        BSR.W   FP68K_UNPACK                    | UNPACK it
+        MOVE.W  A4,D0                           | D0 = its exponent
+        MOVEA.L 0x12(A6),A4                     | A4 = address 3, the DecForm
+        SUBA.W  #0x1E,SP                        | frame: 3 extendeds
+        MOVEA.L SP,A3                           | A3 = the frame
+        ROL.B   #0x1,D6                         | sign to bit 0
+        MOVE.B  D6,(A1)                         | d.sgn (high byte)
+        MOVE.B  #0x1,0x4(A1)                    | d.sig length 1 by default
+        TST.W   D2                              | a NaN?
+        BEQ.B   FP68K_B2D_10                    | no ->
+        ADDQ.L  #0x4,A1                         | A1 -> d.sig
+        MOVE.B  #0x11,(A1)+                     | length 17: 'N' and 16 hex digits
+        MOVE.B  #0x4E,(A1)+                     | d.sig[1] := 'N': the sig of a NaN
+        BSR.B   FP68K_B2D_31                    | the high 8 hex digits from D4
+        MOVE.L  D5,D4                           | the low half ...
+        BSR.B   FP68K_B2D_31                    | ... the next 8
+        SUBA.W  #0x16,A1                        | A1 back to the record
+        BRA.W   FP68K_BDFIN                     | -> BDFIN
 | ----------------------------------------------------------
-|
-| FP68K_CONT_125: extended-precision powers of 10 (10^0 through 10^14)
-| Used for decimal-to-binary conversion scaling
-|
-FP68K_CONT_125:
-  .byte  0x3F,0xFF,0x80,0x00,0x00,0x00
-  .byte 0x00,0x00,0x00,0x00,0x40,0x02
-  .byte 0xA0,0x00,0x00,0x00,0x00,0x00
-  .byte 0x00,0x00,0x40,0x05,0xC8,0x00
-  .byte 0x00,0x00,0x00,0x00,0x00,0x00
-  .byte 0x40,0x08,0xFA,0x00,0x00,0x00
-  .byte 0x00,0x00,0x00,0x00,0x40,0x0C
-  .byte 0x9C,0x40,0x00,0x00,0x00,0x00
-  .byte 0x00,0x00,0x40,0x0F,0xC3,0x50
-  .byte 0x00,0x00,0x00,0x00,0x00,0x00
-  .byte 0x40,0x12,0xF4,0x24,0x00,0x00
-  .byte 0x00,0x00,0x00,0x00,0x40,0x16
-  .byte 0x98,0x96,0x80,0x00,0x00,0x00
-  .byte 0x00,0x00,0x40,0x19,0xBE,0xBC
-  .byte 0x20,0x00,0x00,0x00,0x00,0x00
-  .byte 0x40,0x1C,0xEE,0x6B,0x28,0x00
-  .byte 0x00,0x00,0x00,0x00,0x40,0x20
-  .byte 0x95,0x02,0xF9,0x00,0x00,0x00
-  .byte 0x00,0x00,0x40,0x23,0xBA,0x43
-  .byte 0xB7,0x40,0x00,0x00,0x00,0x00
-  .byte 0x40,0x26,0xE8,0xD4,0xA5,0x10
-  .byte 0x00,0x00,0x00,0x00,0x40,0x2A
-  .byte 0x91,0x84,0xE7,0x2A,0x00,0x00
-  .byte 0x00,0x00,0x40,0x2D,0xB5,0xE6
-  .byte 0x20,0xF4,0x80,0x00,0x00,0x00
-| FP68K_CONT_126: Dec2Num extended - convert Decimal record to extended FP
-| Parses sign, digits, handles NaN/Inf/Zero, then builds mantissa
-| and scales by power of 10 to produce final extended result
-FP68K_CONT_126:
-        MOVE    D6,D0                           | save selector
-        ROL     #0x6,D0                         | extract format code
-        CLR.L   D2                              | clear NaN counter
-        MOVE.L  D2,D3                           | clear class
-        MOVE.L  D2,D6                           | clear flags
-        MOVE.L  D2,D7                           | clear guard bits
-        MOVE.L  A2,A3                           | A3 = source operand ptr
-        BSR     FP68K_CONT_5                    | unpack source to extended
-        MOVE    A4,D0                           | D0 = source exponent
-        MOVE.L  0x12(A6),A4                     | A4 = DecForm ptr
-        SUBA    #0x1E,SP                        | allocate 30 bytes temp space
-        MOVE.L  A7,A3                           | A3 = temp buffer base
-        ROL.B   #0x1,D6                         | sign bit to bit 0
-        MOVE.B  D6,(A1)                         | store sign in Decimal record
-        MOVE.B  #0x1,0x4(A1)                    | default: 1 digit
-        TST     D2                              | source is NaN?
-        BEQ.B   FP68K_NO_56                     | no -> check other specials
-        ADDQ.L  #0x4,A1                         | advance to digit string
-        MOVE.B  #0x11,(A1)+                     | string length = 17
-        MOVE.B  #0x4E,(A1)+                     | 'N' for NaN
-        BSR.B   FP68K_CONT_127                  | convert D4 to 8 hex digits
-        MOVE.L  D5,D4                           | get low NaN payload
-        BSR.B   FP68K_CONT_127                  | convert to 8 more hex digits
-        SUBA    #0x16,A1                        | rewind pointer to record start
-        BRA     FP68K_EXIT_16                   | -> cleanup and return
-
-| ----------------------------------------------------------
-|
-| FP68K_CONT_127: convert 32-bit D4 to 8 hex ASCII digits at (A1)+
-|
-FP68K_CONT_127:
-        MOVEQ.L #0x8,D0                         | 8 hex digits per 32-bit word
-FP68K_LOOP_10:
-        ROL.L   #0x4,D4                         | rotate next nibble to low bits
+| FP68K_B2D_31 (Apple B2D @31): D4 as 8 hex digits to (A1)+.
+FP68K_B2D_31:
+        MOVEQ.L #0x8,D0                         | 8 digits
+FP68K_B2D_33:
+        ROL.L   #0x4,D4                         | next nibble, high to low
         MOVEQ.L #0xF,D1                         | nibble mask
-        AND.B   D4,D1                           | D1 = nibble value (0-15)
-        ORI.B   #0x30,D1                        | convert to ASCII '0'-'?'
-        CMPI.B  #0x39,D1                        | is it 0-9?
-        BLE.B   FP68K_DONE_19                   | yes -> done
-        ADDQ.B  #0x7,D1                         | adjust for A-F
-FP68K_DONE_19:
-        MOVE.B  D1,(A1)+                        | store hex ASCII digit
-        SUBQ.W  #0x1,D0                         | decrement digit count
-        BNE.B   FP68K_LOOP_10                   | loop for all 8 digits
-        RTS                                     | return to caller
-
+        AND.B   D4,D1                           | D1 = nibble
+        ORI.B   #0x30,D1                        | + '0'
+        CMPI.B  #0x39,D1                        | beyond 9?
+        BLE.B   FP68K_B2D_35                    | no ->
+        ADDQ.B  #0x7,D1                         | A-F
+FP68K_B2D_35:
+        MOVE.B  D1,(A1)+                        | store it
+        SUBQ.W  #0x1,D0                         | count
+        BNE.B   FP68K_B2D_33                    | more ->
+        RTS                                     | return: 8 hex digits of D4 stored at (A1)+
 | ----------------------------------------------------------
-|
-| FP68K_NO_56: Dec2Num - handle zero, infinity, and NaN decimal records
-|
-FP68K_NO_56:
-        TST     D3                              | class = normal?
-        BEQ.B   FP68K_OK_44                     | yes -> convert normally
-        MOVEQ.L #0x30,D0                        | '0' for zero
-        CMPI    #0x2,D3                         | class = zero?
-        BEQ.B   FP68K_OK_43                     | yes -> store '0'
+| FP68K_B2D_10 (Apple B2D @10): zero ('0') or infinity ('I'), else BD1.
+FP68K_B2D_10:
+        TST.W   D3                              | finite nonzero (D3 = 0)?
+        BEQ.B   FP68K_BD1                       | yes: BD1 ->
+        MOVEQ.L #0x30,D0                        | '0' ...
+        CMPI.W  #0x2,D3                         | ... for zero
+        BEQ.B   FP68K_B2D_16                    | ...
         MOVEQ.L #0x49,D0                        | 'I' for infinity
-FP68K_OK_43:
-        MOVE.B  D0,0x5(A1)                      | store class char in digit string
-        BRA     FP68K_EXIT_16                   | -> cleanup and return
-
+FP68K_B2D_16:
+        MOVE.B  D0,0x5(A1)                      | the 1-character d.sig
+        BRA.W   FP68K_BDFIN                     | -> BDFIN
 | ----------------------------------------------------------
-|
-| FP68K_OK_44: Dec2Num normal - convert decimal digits to binary mantissa
-| Estimates decimal exponent using log10(2) approximation
-|
-FP68K_OK_44:
-        MOVE.L  D4,D1                           | save mantissa high
-        MOVE    D0,D1                           | D1.lo = exponent
-        SUBI    #0x3FFF,D1                      | D1.lo = unbiased exponent
-        SWAP    D1                              | D1.hi = unbiased exponent
-        ADD     D1,D1                           | D1.lo = 2 * mantissa high word
-        TST     D0                              | exponent negative?
-        BPL.B   FP68K_OK_45                     | no -> ok
-FP68K_LOOP_11:
-        LSR.L   #0x1,D4                         | shift mantissa right
-        ROXR.L  #0x1,D5                         | propagate
-        ADDQ.W  #0x1,D0                         | increment exponent
-        BMI.B   FP68K_LOOP_11                   | loop until exponent >= 0
-FP68K_OK_45:
-        ROR     #0x1,D6                         | save sign in high bit
-        OR      D6,D0                           | merge sign into exponent
-        BSR     FP68K_CONT_117                  | store extended value at (A3)
-        CLR.L   D4                              | clear estimated decimal exponent
-        TST.B   (A4)                            | fixed-decimal format?
-        BNE.B   FP68K_RETRY                     | yes -> skip estimation
+| FP68K_BD1 -- finite nonzero: log2|x| ~ exp.frac in D1;
+| denormalize back to extended format and store at (A3); float style:
+| D4 = floor(log10|x|) + 1 = log10(2) * log2|x| + 1 (16 bits suffice).
+FP68K_BD1:
+        MOVE.L  D4,D1                           | integer bit.fraction ...
+        MOVE.W  D0,D1                           | ... exponent in the low word ...
+        SUBI.W  #0x3FFF,D1                      | ... unbiased ...
+        SWAP.W  D1                              | ... exponent above int.frac ...
+        ADD.W   D1,D1                           | ... D1 = exp.frac, about log2|x|
+        TST.W   D0                              | negative exponent (normalized denormal)?
+        BPL.B   FP68K_BD1_7                     | no ->
+FP68K_BD1_3:
+        LSR.L   #0x1,D4                         | denormalize again: shift right ...
+        ROXR.L  #0x1,D5                         | ...
+        ADDQ.W  #0x1,D0                         | ... exponent + 1 ...
+        BMI.B   FP68K_BD1_3                     | ... up to 0
+FP68K_BD1_7:
+        ROR.W   #0x1,D6                         | sign to bit 15 ...
+        OR.W    D6,D0                           | ... of the exponent word
+        BSR.W   FP68K_TOA3                      | TOA3: x at (A3)
+        CLR.L   D4                              | D4 := 0: receives the log10 estimate
+        TST.B   (A4)                            | DecForm style fixed?
+        BNE.B   FP68K_BD3                       | yes: no estimate needed ->
 | estimate decimal exponent using log10(2) approximation
 | log10(2) ~ 0x4D104D42 / 2^32 ~ 0.30103
-        MOVE.L  #0x4D104D42,D0                  | log10(2) * 2^32 (approx)
-        TST.L   D1                              | exponent negative?
-        BPL.B   FP68K_OK_46                     | no -> ok
-        ADDQ.W  #0x1,D0                         | adjust for negative rounding
-FP68K_OK_46:
-        MOVE.L  D0,D4                           | copy for multiplication
-        SWAP    D4                              | D4 = log10(2) high word
-        MULU    D1,D4                           | partial product 1
-        CLR     D4                              | discard low word
-        SWAP    D4                              | shift to high
-        SWAP    D1                              | D1 = unbiased exponent
-        MOVE    D1,D5                           | save for second multiply
-        MULS    D0,D5                           | partial product 2
-        SWAP    D5                              | get high word
-        EXT.L   D5                              | sign extend
-        ADD.L   D5,D4                           | accumulate
-        SWAP    D0                              | D0 = log10(2) high word
-        MULS    D1,D0                           | partial product 3
-        ADD.L   D0,D4                           | accumulate
-        SWAP    D4                              | D4 = estimated decimal exponent
-        ADDQ.W  #0x1,D4                         | round up estimate
-FP68K_RETRY:
-        BSR     FP68K_CONT_129                  | get requested digit count in D3
-        SUB     D4,D3                           | D3 = digits - estimated exp
-        MOVE.L  0xA(A6),A1                      | A1 = Decimal record ptr
-        MOVE    D3,0x2(A1)                      | store decimal exponent
-        NEG     0x2(A1)                         | negate for Decimal.exp convention
-        MOVE    (A3),0x14(A3)                   | save original extended exponent
-        MOVE.L  PORTBITS(A3),0x16(A3)           | save original mantissa high
-        MOVE.L  0x6(A3),0x1A(A3)                | save original mantissa low
-        BSR     FP68K_CONT_118                  | scale by power of 10
-        PEA.L   (A3)                            | push scaled value
-        MOVE    #0x14,-(SP)                     | selector = rint (round to integer)
-        BSR     FP68K_EMPTY                     | round to integer
-        LEA.L   0xA(A3),A1                      | A1 = second temp slot
-        TST.B   (A4)                            | fixed-decimal format?
-        BNE.B   FP68K_OK_47                     | yes -> use fixed digit count
-        BSR.B   FP68K_CONT_129                  | get requested digits
-        BRA.B   FP68K_CONT_128                  | -> compute scale factor
-
+        MOVE.L  #0x4D104D42,D0                  | log10(2) * 2^32, rounded down
+        TST.L   D1                              | log2|x| negative?
+        BPL.B   FP68K_BD1_1                     | no ->
+        ADDQ.W  #0x1,D0                         | yes: bump it, to be sure of the floor
+FP68K_BD1_1:
+        MOVE.L  D0,D4                           | D0 = A:B, D1 = X:Y
+        SWAP.W  D4                              | D4.W = A
+        MULU.W  D1,D4                           | D4 = A * Y
+        CLR.W   D4                              | ...
+        SWAP.W  D4                              | D4.W = (A * Y).hi
+        SWAP.W  D1                              | D1.W = X
+        MOVE.W  D1,D5                           | ...
+        MULS.W  D0,D5                           | D5 = B * X (signed)
+        SWAP.W  D5                              | ...
+        EXT.L   D5                              | D5 = (B * X).hi with sign
+        ADD.L   D5,D4                           | + (no carry or borrow possible)
+        SWAP.W  D0                              | D0.W = A
+        MULS.W  D1,D0                           | D0 = A * X
+        ADD.L   D0,D4                           | +
+        SWAP.W  D4                              | D4.W = floor(log10|x|)
+        ADDQ.W  #0x1,D4                         | + 1: digits left of the point
+| FP68K_BD3: decimal exponent = -(digits - D4); keep a copy of
+| x at 20(A3) for a retry; scale, round to an integer, compare with
+| 10^N (N = digits, fixed: 19).
+FP68K_BD3:
+        BSR.W   FP68K_BDGETCNT                  | D3 = digits (BDGETCNT)
+        SUB.W   D4,D3                           | scale = digits - D4 (D4 = 0 for fixed)
+        MOVEA.L 0xA(A6),A1                      | A1 = address 1, the decimal record
+        MOVE.W  D3,0x2(A1)                      | d.exp := -scale ...
+        NEG.W   0x2(A1)                         | ...
+        MOVE.W  (A3),0x14(A3)                   | keep x at 20(A3) for a retry
+        MOVE.L  0x2(A3),0x16(A3)                | ...
+        MOVE.L  0x6(A3),0x1A(A3)                | ...
+        BSR.W   FP68K_DBCORE                    | DBCORE: x * 10^scale
+        PEA.L   (A3)                            | round it to an integer ...
+        MOVE.W  #0x14,-(SP)                     | ... OPRINT, in the caller's direction
+        BSR.W   FP68K_REFP68K                   | REFP68K
+        LEA.L   0xA(A3),A1                      | A1 = 10(A3): 10^N above the scaled value
+        TST.B   (A4)                            | style?
+        BNE.B   FP68K_BD3_3                     | fixed ->
+        BSR.B   FP68K_BDGETCNT                  | float: N = digits
+        BRA.B   FP68K_BD3_5                     | ...
 | ----------------------------------------------------------
 |
-| FP68K_OK_47
+| FP68K_BD3_3
 |
-FP68K_OK_47:
-        MOVEQ.L #0x13,D3                        | fixed: use max 19 digits
-FP68K_CONT_128:
-        BSR     FP68K_CONT_121                  | build power-of-10 scale factor
-        MOVE    (A3),D0                         | get scaled result exponent
-        BCLR    #0xF,D0                         | clear sign for comparison
-        CMP     (A1),D0                         | compare with scale factor exp
-        BNE.B   FP68K_OK_48                     | different -> check which is larger
-        MOVE.L  PORTBITS(A3),D0                 | compare mantissa high
-        CMP.L   0x2(A1),D0                      | vs scale factor mantissa high
-        BNE.B   FP68K_OK_48                     | different -> check
-        MOVE.L  0x6(A3),D0                      | compare mantissa low
-        CMP.L   0x6(A1),D0                      | vs scale factor mantissa low
-FP68K_OK_48:
-        BCS.B   FP68K_CONT_130                  | value < scale -> too few digits
-        TST.B   (A4)                            | fixed-decimal format?
-        BNE.B   FP68K_OK_49                     | yes -> overflow
-        ADDQ.W  #0x1,D4                         | increment estimated exponent
-        MOVE    0x14(A3),(A3)                   | restore original extended value
-        MOVE.L  0x16(A3),PORTBITS(A3)           | restore mantissa high
-        MOVE.L  0x1A(A3),0x6(A3)                | restore mantissa low
-        BRA.B   FP68K_RETRY                     | retry with adjusted estimate
-
+FP68K_BD3_3:
+        MOVEQ.L #0x13,D3                        | fixed: N = 19
+FP68K_BD3_5:
+        BSR.W   FP68K_POW10                     | POW10: 10^N at (A1)
+        MOVE.W  (A3),D0                         | compare |scaled| with 10^N: exponents ...
+        BCLR    #0xF,D0                         | ...
+        CMP.W   (A1),D0                         | ...
+        BNE.B   FP68K_BD3_13                    | ...
+        MOVE.L  0x2(A3),D0                      | significands, high ...
+        CMP.L   0x2(A1),D0                      | ...
+        BNE.B   FP68K_BD3_13                    | ...
+        MOVE.L  0x6(A3),D0                      | ... and low
+        CMP.L   0x6(A1),D0                      | ...
+FP68K_BD3_13:
+        BCS.B   FP68K_BD85                      | below 10^N: fine (BD85) ->
+        TST.B   (A4)                            | too big: style?
+        BNE.B   FP68K_BD3_15                    | fixed: '?' ->
+        ADDQ.W  #0x1,D4                         | float: the estimate was low by one
+        MOVE.W  0x14(A3),(A3)                   | restore x ...
+        MOVE.L  0x16(A3),0x2(A3)                | ...
+        MOVE.L  0x1A(A3),0x6(A3)                | ...
+        BRA.B   FP68K_BD3                       | ... and scale again (BD3)
+| ----------------------------------------------------------
+| FP68K_BD3_15 (Apple BD3 @15): fixed style, too many digits -- '?'.
+FP68K_BD3_15:
+        MOVEA.L 0xA(A6),A1                      | A1 = the decimal record
+        MOVE.B  #0x3F,0x5(A1)                   | d.sig := '?'
+        BRA.W   FP68K_BDFIN                     | -> BDFIN
+| ----------------------------------------------------------
+| FP68K_BDGETCNT -- D3 = the digit count of the DecForm:
+| fixed style as given, float style held to 1..19.
+FP68K_BDGETCNT:
+        MOVE.W  0x2(A4),D3                      | D3 = DecForm digits
+        TST.B   (A4)                            | fixed style?
+        BNE.B   FP68K_BDGETCNT_3                | yes: as it is ->
+        TST.W   D3                              | float: at most 0?
+        BLE.B   FP68K_BDGETCNT_1                | yes: 1 ->
+        CMPI.W  #0x13,D3                        | more than 19?
+        BLE.B   FP68K_BDGETCNT_3                | no ->
+        MOVEQ.L #0x13,D3                        | 19
+        BRA.B   FP68K_BDGETCNT_3                | -> return
 | ----------------------------------------------------------
 |
-| FP68K_OK_49: Num2Dec overflow - digit count exceeds capacity, return '?'
+| FP68K_BDGETCNT_1: force minimum 1 digit
 |
-FP68K_OK_49:
-        MOVE.L  0xA(A6),A1                      | A1 = Decimal record ptr
-        MOVE.B  #0x3F,0x5(A1)                   | store '?' (overflow indicator)
-        BRA     FP68K_EXIT_16                   | -> cleanup and return
-
-| ----------------------------------------------------------
-|
-| FP68K_CONT_129: get requested digit count from DecForm, clamped to [1,19]
-|
-FP68K_CONT_129:
-        MOVE    0x2(A4),D3                      | D3 = requested digits from DecForm
-        TST.B   (A4)                            | fixed-decimal format?
-        BNE.B   FP68K_EXIT_15                   | yes -> use as-is
-        TST     D3                              | digits <= 0?
-        BLE.B   FP68K_OK_50                     | yes -> force minimum 1
-        CMPI    #0x13,D3                        | digits > 19?
-        BLE.B   FP68K_EXIT_15                   | no -> ok
-        MOVEQ.L #0x13,D3                        | clamp to 19 max
-        BRA.B   FP68K_EXIT_15                   | -> return
-
-| ----------------------------------------------------------
-|
-| FP68K_OK_50: force minimum 1 digit
-|
-FP68K_OK_50:
+FP68K_BDGETCNT_1:
         MOVEQ.L #0x1,D3                         | minimum 1 significant digit
-FP68K_EXIT_15:
-        RTS                                     | return to caller
-
+FP68K_BDGETCNT_3:
+        RTS                                     | return D3 = digit count (float: 1..19) (BDGETCNT)
 | ----------------------------------------------------------
-|
-| FP68K_CONT_130: Num2Dec - adjust if too few digits, try one fewer
-|
-FP68K_CONT_130:
-        TST.B   (A4)                            | fixed-decimal format?
-        BNE.B   FP68K_SKIP_20                   | yes -> skip adjustment
-        BSR.B   FP68K_CONT_129                  | get requested digit count
-        SUBQ.W  #0x1,D3                         | try one fewer digit
-        BSR     FP68K_CONT_121                  | build scale factor for D3 digits
-        MOVE    (A3),D0                         | get result exponent
-        BCLR    #0xF,D0                         | clear sign
-        CMP     (A1),D0                         | compare with scale factor
-        BNE.B   FP68K_CONT_131                  | different -> check which
-        MOVE.L  PORTBITS(A3),D0                 | compare mantissa high
-        CMP.L   0x2(A1),D0                      | vs scale factor
-        BNE.B   FP68K_CONT_131                  | different -> check
-        MOVE.L  0x6(A3),D0                      | compare mantissa low
-        CMP.L   0x6(A1),D0                      | vs scale factor
-FP68K_CONT_131:
-        BCC.B   FP68K_SKIP_20                   | value >= scale -> ok
-        MOVE    (A1),(A3)                       | use scale factor as result
-        MOVE.L  0x2(A1),PORTBITS(A3)            | copy mantissa high
-        MOVE.L  0x6(A1),0x6(A3)                 | copy mantissa low
-        NOP                                     | alignment padding
-FP68K_SKIP_20:
-        MOVE.L  0xA(A6),A1                      | A1 = Decimal record ptr
-        MOVE    (A3),D3                         | D3 = result exponent+sign
-        MOVE.L  PORTBITS(A3),D1                 | D1 = mantissa high
-        BNE.B   FP68K_CONT_132                  | nonzero -> convert to digits
-        MOVE.B  #0x30,0x5(A1)                   | mantissa zero -> store '0'
-        BRA     FP68K_EXIT_16                   | -> cleanup and return
-
+| FP68K_BD85: float style -- a scaled value below
+| 10^(N-1) is replaced by 10^(N-1).
+FP68K_BD85:
+        TST.B   (A4)                            | fixed style?
+        BNE.B   FP68K_BD9                       | yes: BD9 ->
+        BSR.B   FP68K_BDGETCNT                  | N = digits
+        SUBQ.W  #0x1,D3                         | N - 1
+        BSR.W   FP68K_POW10                     | POW10: 10^(N-1) at (A1)
+        MOVE.W  (A3),D0                         | compare |scaled| with it ...
+        BCLR    #0xF,D0                         | ...
+        CMP.W   (A1),D0                         | ...
+        BNE.B   FP68K_BD85_13                   | ...
+        MOVE.L  0x2(A3),D0                      | ...
+        CMP.L   0x2(A1),D0                      | ...
+        BNE.B   FP68K_BD85_13                   | ...
+        MOVE.L  0x6(A3),D0                      | ...
+        CMP.L   0x6(A1),D0                      | ...
+FP68K_BD85_13:
+        BCC.B   FP68K_BD9                       | not below: BD9 ->
+        MOVE.W  (A1),(A3)                       | below: use 10^(N-1) ...
+        MOVE.L  0x2(A1),0x2(A3)                 | ...
+        MOVE.L  0x6(A1),0x6(A3)                 | ...
+        NOP                                     | (no operation) and fall into BD9
+FP68K_BD9:
+        MOVEA.L 0xA(A6),A1                      | BD9: A1 = the decimal record
+        MOVE.W  (A3),D3                         | D3 = sign/exponent of the scaled value
+        MOVE.L  0x2(A3),D1                      | D1 = high significand
+        BNE.B   FP68K_BD9_3                     | nonzero ->
+        MOVE.B  #0x30,0x5(A1)                   | zero (fixed style): d.sig := '0'
+        BRA.W   FP68K_BDFIN                     | -> BDFIN
 | ----------------------------------------------------------
-|
-| FP68K_CONT_132: Num2Dec - convert binary mantissa to decimal via multiply-by-5
-| D1:D2 = denormalized mantissa, produces 19 decimal digits
-|
-FP68K_CONT_132:
-        MOVE.L  0x6(A3),D2                      | D2 = mantissa low
-        BCLR    #0xF,D3                         | clear sign from exponent
-        SUBI    #0x403E,D3                      | remove bias (63 + $3FFF)
-        BEQ.B   FP68K_CONT_133                  | exponent = 0 -> already integer
-FP68K_LOOP_12:
-        LSR.L   #0x1,D1                         | shift mantissa right
-        ROXR.L  #0x1,D2                         | propagate
-        ADDQ.W  #0x1,D3                         | increment toward 0
-        BMI.B   FP68K_LOOP_12                   | loop until exponent = 0
-FP68K_CONT_133:
+| FP68K_BD9_3 (Apple BD9 @3): right-align the integer (exponent 63),
+| divide by 10^19 into a fraction, + 1 ulp (so .99999 does not chop to
+| the wrong digit), then 19 times * 10: each digit that falls off the
+| left, leading zeros skipped.
+FP68K_BD9_3:
+        MOVE.L  0x6(A3),D2                      | D2 = low significand
+        BCLR    #0xF,D3                         | drop the sign
+        SUBI.W  #0x403E,D3                      | exponent - 63 (biased)
+        BEQ.B   FP68K_BD9_7                     | 0: a 64-bit integer already ->
+FP68K_BD9_5:
+        LSR.L   #0x1,D1                         | right-align: shift right ...
+        ROXR.L  #0x1,D2                         | ...
+        ADDQ.W  #0x1,D3                         | ... up to exponent 63
+        BMI.B   FP68K_BD9_5                     | ...
+FP68K_BD9_7:
 | divide 64-bit integer by 10^19 to extract decimal digits
 | divisor = 10^19 = $8AC72304:89E80000
-        MOVE.L  #0x8AC72304,D3                  | divisor high = 10^19 high
-        MOVE.L  #0x89E80000,A2                  | divisor low = 10^19 low
-        MOVEQ.L #0x41,D0                        | 65 iterations
-        BSR     FP68K_LOOP_4                    | divide: quotient=D4:D5, rem=D1:D2
-        ADDQ.L  #0x1,D5                         | round up remainder
-        ADDX.L  D0,D4                           | propagate carry
-        ADDQ.L  #0x4,A1                         | advance past Decimal header
-        MOVE.L  A1,A2                           | A2 = digit output ptr
-        CLR.B   (A2)+                           | clear digit count
-        MOVEQ.L #0x13,D6                        | 19 decimal digits to extract
-| FP68K_LOOP_13: extract decimal digits via multiply-by-10 (x*10 = x*8 + x*2)
-FP68K_LOOP_13:
-        ADD.L   D5,D5                           | shift left (x2)
-        ADDX.L  D4,D4                           | propagate carry
-        ADDX    D0,D0                           | propagate carry
-        MOVE.L  D5,D3                           | save x2 low
-        MOVE.L  D4,D2                           | save x2 high
-        MOVE    D0,D1                           | save x2 overflow
-        ADD.L   D5,D5                           | shift left (x4)
-        ADDX.L  D4,D4                           | propagate
-        ADDX    D0,D0                           | propagate
-        ADD.L   D5,D5                           | shift left (x8)
-        ADDX.L  D4,D4                           | propagate
-        ADDX    D0,D0                           | propagate
-        ADD.L   D3,D5                           | x8 + x2 = x10 low
-        ADDX.L  D2,D4                           | propagate
-        ADDX    D1,D0                           | D0 = decimal digit (0-9)
-        TST     D0                              | digit zero?
-        BEQ.B   FP68K_SKIP_21                   | yes -> skip leading zero
-        ORI.L   #0x130,D0                       | convert to ASCII ('0' = $30)
-        MOVE.B  D0,(A2)+                        | store decimal digit
-        CLR.B   D0                              | clear for next iteration
-        ADDQ.B  #0x1,(A1)                       | increment digit count
-FP68K_SKIP_21:
-        SUBQ.B  #0x1,D6                         | decrement digit counter
-        BNE.B   FP68K_LOOP_13                   | loop for all 19 digits
-FP68K_EXIT_16:
-        ADDA    #0x1E,SP                        | deallocate temp space
-        BRA     FP68K_EXIT_6                    | -> three-operand return
+        MOVE.L  #0x8AC72304,D3                  | divisor D3:A2 = 10^19 ...
+        MOVEA.L #0x89E80000,A2                  | ...
+        MOVEQ.L #0x41,D0                        | 65 quotient bits
+        BSR.W   FP68K_RESTORE                   | RESTORE: D4:D5 = the integer / 10^19, a fraction
+        ADDQ.L  #0x1,D5                         | + 1 ulp so that .99999 does not chop wrong ...
+        ADDX.L  D0,D4                           | ... (D0 = 0 after RESTORE)
+        ADDQ.L  #0x4,A1                         | A1 -> d.sig
+        MOVEA.L A1,A2                           | A2 = output pointer ...
+        CLR.B   (A2)+                           | ... after the length byte := 0
+        MOVEQ.L #0x13,D6                        | 19 digits
+| FP68K_BD9_11: extract decimal digits via multiply-by-10 (x*10 = x*8 + x*2)
+FP68K_BD9_11:
+        ADD.L   D5,D5                           | fraction * 2 ...
+        ADDX.L  D4,D4                           | ...
+        ADDX.W  D0,D0                           | ... (the integer part in D0)
+        MOVE.L  D5,D3                           | save * 2
+        MOVE.L  D4,D2                           | ...
+        MOVE.W  D0,D1                           | ...
+        ADD.L   D5,D5                           | * 4
+        ADDX.L  D4,D4                           | ...
+        ADDX.W  D0,D0                           | ...
+        ADD.L   D5,D5                           | * 8
+        ADDX.L  D4,D4                           | ...
+        ADDX.W  D0,D0                           | ...
+        ADD.L   D3,D5                           | * 8 + * 2 = * 10
+        ADDX.L  D2,D4                           | ...
+        ADDX.W  D1,D0                           | D0.B = the digit that fell off the left
+        TST.W   D0                              | zero so far (no digit seen: high byte 0 too)?
+        BEQ.B   FP68K_BD9_12                    | yes: a leading zero ->
+        ORI.L   #0x130,D0                       | ASCII digit; bit 8 marks 'first digit seen'
+        MOVE.B  D0,(A2)+                        | store it
+        CLR.B   D0                              | keep the mark in the high byte
+        ADDQ.B  #0x1,(A1)                       | d.sig length + 1
+FP68K_BD9_12:
+        SUBQ.B  #0x1,D6                         | count
+        BNE.B   FP68K_BD9_11                    | more ->
+FP68K_BDFIN:
+        ADDA.W  #0x1E,SP                        | BDFIN: drop the frame
+        BRA.W   FP68K_POP3                      | -> POP3: three addresses
 
-| end of resource : 'PACK' 4
-
-| resource header
-  .long 0xC000004C                              | Length
-  .long 0x00000080                              | ?

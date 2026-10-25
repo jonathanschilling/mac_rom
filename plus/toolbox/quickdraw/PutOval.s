@@ -243,7 +243,7 @@ PUTOVAL_SIZEOK:
         CMP     -0x4(A3),D6                     | DOES VERT MATCH PREV ?
         BNE.B   APPEND                          | NO, APPEND NEW POINT
         SUBQ.W  #0x4,A3                         | YES, DELETE DUPLICATE PAIR
-        RTS                                     | RETURN
+        RTS                                     | return from PUTOVAL_SIZEOK
 
 | ----------------------------------------------------------
 |
@@ -253,7 +253,7 @@ PUTOVAL_SIZEOK:
 APPEND:
         MOVE    D6,(A3)+                        | PUT VERT COORD
         MOVE    D5,(A3)+                        | PUT HORIZ COORD
-        RTS                                     | RETURN
+        RTS                                     | return from APPEND
 
 
 

@@ -1,4 +1,4 @@
-|-----------------------------------------------------------
+| -----------------------------------------------------------
 |
 |
 |     ****   *****   ***   *****   ***
@@ -84,7 +84,7 @@ PUSHVERB_DONE:
 
 | ---------------------------------------------------------------
 | PROCEDURE CallRect(r: Rect);
-| code shared by FrameRect, PaintRect, EraseRect, InvertRect, and FillRect.
+| code shared by FrameRect, PaintRect, EraseRect, InverRect, and FillRect.
 | enter with verb in D0.
 | Called during boot.
 CallRect:
@@ -104,32 +104,37 @@ CALLRECT_CONT:
         JMP     (A0)                            | RTS
 
 | ----------------------------------------------------------
-| PROCEDURE FrameRect(r: Rect); Plus equivalent: Rects.s 158.
+| PROCEDURE FrameRect(r: Rect).
 FrameRect:
         MOVEQ.L #0x0,D0                         | VERB = FRAME
         JMP     CallRect(PC)                    | SHARE COMMON CODE
 
 | ----------------------------------------------------------
-| PROCEDURE PaintRect(r: Rect); Plus equivalent: Rects.s 173.
+| PROCEDURE PaintRect(r: Rect).
 PaintRect:
         MOVEQ.L #0x1,D0                         | VERB = PAINT
         JMP     CallRect(PC)                    | SHARE COMMON CODE
 
 | ----------------------------------------------------------
-| PROCEDURE EraseRect(r: Rect); Plus equivalent: Rects.s 188.
+| PROCEDURE EraseRect(r: Rect).
 EraseRect:
         MOVEQ.L #0x2,D0                         | VERB = ERASE
         JMP     CallRect(PC)                    | SHARE COMMON CODE
 
 | ----------------------------------------------------------
-| PROCEDURE InvertRect(r: Rect); Plus equivalent: Rects.s 203.
-InvertRect:
+|
+| _InverRect ($A8A4): invert the pixels inside a rectangle
+| Pascal: PROCEDURE InvertRect(r: Rect);
+| CallRect with verb invert (3): calls the port's rectProc (StdRect if
+| grafProcs is nil).
+| Apple source name: InvertRect (1983 Rects.a; MacSEROM.lst: INVERTRECT)
+|
+InverRect:
         MOVEQ.L #0x3,D0                         | VERB = INVERT
         JMP     CallRect(PC)                    | SHARE COMMON CODE
 
 | ----------------------------------------------------------
 | PROCEDURE FillRect(r: Rect; pat: Pattern);
-| Plus equivalent: Rects.s 135.
 FillRect:
         MOVE.L  (SP)+,A0                        | POP RETURN ADDR
         MOVE.L  (SP)+,A1                        | POP ADDR OF PATTERN
@@ -281,6 +286,13 @@ SetRect:
         MOVE.L  D0,(A1)+                        | INSTALL TOPLEFT
         MOVE.L  D1,(A1)+                        | INSTALL BOTRIGHT
         JMP     (A0)                            | RETURN
+| ----------------------------------------------------------
+|
+| _EqualRect ($A8A6): compare two rectangles
+| Pascal: FUNCTION EqualRect(rect1, rect2: Rect): BOOLEAN;
+| TRUE if topLeft and botRight are both identical. CLOBBERS D0,A0,A1.
+|
+EqualRect:
         MOVE.L  (SP)+,D0                        | POP RETURN ADDR
         MOVE.L  (SP)+,A1                        | POP ADDR OF RECT2
         MOVE.L  (SP)+,A0                        | POP ADDR OF RECT1
@@ -292,7 +304,7 @@ SetRect:
         BRA.B   EQUALRECT_EXIT                  | AND QUIT (skip CLR.B of result)
 SETRECT_EXIT:
         CLR.B    (SP)                           | RETURN FALSE
-EQUALRECT_EXIT:                                 | jump via A0
+EQUALRECT_EXIT:                                 | DONE
         MOVE.L   D0,-(SP)                       | PUSH RETURN ADDR
         RTS                                     | AND RETURN
 
@@ -347,14 +359,23 @@ InsetRect:
         SUB     D1,(A1)+                        | SUBTRACT DV FROM BOTTOM
         SUB     D0,(A1)+                        | SUBTRACT DH FROM RIGHT
         JMP     (A0)                            | DONE: RETURN
-        LINK    A6,#0x0                         | SectRect entry: no locals
+| ----------------------------------------------------------
+|
+| _SectRect ($A8AA): intersection of two rectangles
+| Pascal: FUNCTION SectRect(src1, src2: Rect; VAR dstRect: Rect): BOOLEAN;
+| Calls RSect with nRects = 2. Returns TRUE and the intersection in
+| dstRect, else FALSE and dstRect = (0,0,0,0); dstRect may also be one
+| of the inputs.
+|
+SectRect:
+        LINK    A6,#0x0                         | NO LOCAL VARS
         MOVE.L  16(A6),-(SP)                    | PUSH SRCA POINTER
         MOVE.L  12(A6),-(SP)                    | PUSH SRCB POINTER
         MOVE    #0x2,-(SP)                      | push nRects = 2 (intersect 2 rects)
         MOVE.L  8(A6),-(SP)                     | PUSH DST POINTER
         BSR.W   RSect                           | CALC INTERSECTION
         SNE     20(A6)                          | STORE BOOLEAN RESULT
-        NEG.B   20(A6)                          | 20(A6) = -20(A6)
+        NEG.B   20(A6)                          | CONVERT $FF TO $01
         UNLK    A6                              | tear down frame
         MOVE.L  (SP)+,A0                        | pop return address
         ADDA.W  #0xC,SP                         | pop 12 bytes of params
@@ -427,29 +448,36 @@ SECTRECT_DONE:
         MOVE.L  (SP)+,A0                        | POP RETURN ADDR
         ADD     D0,SP                           | STRIP VARIABLE NUMBER OF PARAMS
         JMP     (A0)                            | RETURN WITH Z-FLAG IF EMPTY
+| ----------------------------------------------------------
+|
+| _UnionRect ($A8AB): smallest rectangle enclosing two rectangles
+| Pascal: PROCEDURE UnionRect(src1, src2: Rect; VAR dstRect: Rect);
+| Works correctly even if one of the sources is the destination.
+|
+UnionRect:
         MOVE.L  12(SP),A0                       | GET ADDR OF SRC1
         MOVE.L  8(SP),A1                        | GET ADDR OF SRC2
         MOVE    (A0)+,D0                        | TOP:=TOP1
         CMP     (A1)+,D0                        | IS TOP2 < TOP ?
         BLE.B   UNIONRECT_TOPOK                 | NO, CONTINUE
-        MOVE    -2(A1),D0                       | YES, TOP:=TOP2 / LEFT:=LEFT2
+        MOVE    -2(A1),D0                       | YES, TOP:=TOP2
 UNIONRECT_TOPOK:
-        SWAP    D0                              | TOPOK: PUT TOP IN HI WORD
+        SWAP    D0                              | PUT TOP IN HI WORD
         MOVE    (A0)+,D0                        | LEFT:=LEFT1
         CMP     (A1)+,D0                        | IS LEFT2 < LEFT ?
         BLE.B   UNIONRECT_LEFTOK                | NO, CONTINUE
-        MOVE    -2(A1),D0                       | YES, TOP:=TOP2 / LEFT:=LEFT2
+        MOVE    -2(A1),D0                       | YES, LEFT:=LEFT2
 UNIONRECT_LEFTOK:
-        MOVE    (A0)+,D1                        | jump via A0
+        MOVE    (A0)+,D1                        | BOTTOM:=BOTTOM1
         CMP     (A1)+,D1                        | IS BOTTOM2 > BOTTOM ?
         BGE.B   UNIONRECT_BOTOK                 | NO, CONTINUE
         MOVE    -2(A1),D1                       | YES, BOTTOM:=BOTTOM2
 UNIONRECT_BOTOK:
-        SWAP    D1                              | BOTOK: PUT BOTTOM IN HI WORD
+        SWAP    D1                              | PUT BOTTOM IN HI WORD
         MOVE    (A0)+,D1                        | RIGHT:=RIGHT1
         CMP     (A1)+,D1                        | IS RIGHT2 > RIGHT1 ?
         BGE.B   UNIONRECT_RIGHTOK               | NO, CONTINUE
-        MOVE    -2(A1),D1                       | YES, BOTTOM:=BOTTOM2 / RIGHT:=RIGHT2
+        MOVE    -2(A1),D1                       | YES, RIGHT:=RIGHT2
 UNIONRECT_RIGHTOK:
         MOVE.L  4(SP),A0                        | POINT TO DST RECT
         MOVE.L  D0,(A0)+                        | INSTALL TOPLEFT
@@ -457,6 +485,12 @@ UNIONRECT_RIGHTOK:
         MOVE.L  (SP)+,A0                        | pop return address
         ADDA.W  #0xC,SP                         | pop 12 bytes of params
         JMP     (A0)                            | RTS
+| ----------------------------------------------------------
+|
+| _Pt2Rect ($A8AC): smallest rectangle containing two points
+| Pascal: PROCEDURE Pt2Rect(pt1, pt2: Point; VAR dstRect: Rect);
+|
+Pt2Rect:
         MOVE.L  4(SP),A0                        | POINT TO DST RECT
         MOVE    14(SP),D0                       | GET H1
         MOVE    10(SP),D1                       | GET H2
@@ -477,10 +511,17 @@ HOK_NO:
         MOVE.L  (SP)+,A0                        | POP RETURN ADDR
         ADDA.W  #0xC,SP                         | strip 3 parameters (12 bytes)
         JMP     (A0)                            | RTS
+| ----------------------------------------------------------
+|
+| _PtInRect ($A8AD): test whether a point lies inside a rectangle
+| Pascal: FUNCTION PtInRect(pt: Point; r: Rect): BOOLEAN;
+| TRUE if top <= pt.v < bottom and left <= pt.h < right.
+|
+PtInRect:
         LINK    A6,#0x0                         | NO LOCAL VARS
-        MOVE.L  8(A6),A0                        | POINT TO DST RECT
-        MOVE    14(A6),D0                       | GET DH or PT.H
-        MOVE    12(A6),D1                       | GET DV or PT.V
+        MOVE.L  8(A6),A0                        | GET RECT PTR
+        MOVE    14(A6),D0                       | GET HORIZ COORD (PT.H)
+        MOVE    12(A6),D1                       | GET VERT COORD (PT.V)
         CLR.B   16(A6)                          | INIT BOOLEAN TO FALSE
         CMP     (A0)+,D1                        | IS PT.V < TOP ?
         BLT.B   PTINRECT_EXIT                   | YES, QUIT
@@ -544,102 +585,3 @@ PUTRECT_SIZEOK:
         ADDA.W  #0x10,SP                        | pop 16 bytes of parameters
         JMP     (A0)                            | RTS
 
-| ---------------------------------------------------------------
-| --> BITBLT.TEXT
-| Low-level bit boundary block transfer.
-| .PROC BITBLT,7
-| .REF LEFTMASK,RIGHTMASK,PatExpand
-| --------------------------------------------------------------
-| PROCEDURE BitBlt(srcBits,dstBits: BitMap;
-| srcRect,dstRect: Rect;
-| mode: INTEGER; pat: Pattern);
-| TRANSFERS A RECTANGULAR BLOCK OF BITS WITH NO CLIPPING AT ALL.
-| MODE SPECIFIES THE COMBINATION MODE AND WHETHER THE SOURCE SHOULD COME
-| FROM THE SOURCE BITMAP OR FROM A REPEATING PATTERN.
-| COPYRIGHT APPLE COMPUTER INC.
-| WRITTEN BY BILL ATKINSON
-| POSITION INDEPENDENT AND RE-ENTRANT, CLOBBERS ONLY A0.
-| MODES: 0 SRC --> DST
-| 1 SRC OR DST --> DST
-| 2 SRC XOR DST --> DST
-| 3 SRC BIC DST --> DST
-| 4 (NOT SRC) --> DST
-| 5 (NOT SRC) OR DST --> DST
-| 6 (NOT SRC) XOR DST --> DST
-| 7 (NOT SRC) BIC DST --> DST
-| 8 PATTERN --> DST
-| 9 PATTERN OR DST --> DST
-| 10 PATTERN XOR DST --> DST
-| 11 PATTERN BIC DST --> DST
-| 12 (NOT PATTERN) --> DST
-| 13 (NOT PATTERN) OR DST --> DST
-| 14 (NOT PATTERN) XOR DST --> DST
-| 15 (NOT PATTERN) BIC DST --> DST
-| Called during boot.
-BitBlt:
-        LINK    A6,#-0x58                       | set up stack frame
-        MOVEM.L D0-D7/A1-A5,-(SP)               | save scratch registers
-        MOVE.L  A5,-0x58(A6)                    | save QD globals ptr in local
-        MOVE.L  18(A6),A2                       | GET SRCV
-        MOVE.L  14(A6),A3                       | GET HEIGHT
-        MOVE.L  26(A6),A4                       | A4 = srcBits ptr
-        MOVE.L  22(A6),A5                       | A5 = dstBits ptr
-        MOVE    4(A3),D0                        | D0 = dstRect.bottom
-        SUB     (A3),D0                         | D0 = height (bottom - top)
-        BLE.W   GOHOME                          | height <= 0 -> nothing to draw
-        MOVE    D0,-0x52(A6)                    | save height in local
-        MOVEQ.L #0x2,D3                         | bump = +2 (left-to-right)
-        MOVE    (A2),D0                         | D0 = srcRect.top
-        SUB     6(A4),D0                        | convert srcTop to global coords
-        MOVE    D0,-0x42(A6)                    | srcV = srcTop (global)
-        MOVE    (A3),D0                         | D0 = dstRect.top
-        SUB     6(A5),D0                        | convert dstTop to global coords
-        MOVE    D0,-0x44(A6)                    | dstV = dstTop (global)
-        MOVE    4(A4),-0x46(A6)                 | srcRow = srcBits.rowBytes
-        MOVE    4(A5),-0x48(A6)                 | dstRow = dstBits.rowBytes
-        CLR     D7                              | invertReg = 0 (not inverted)
-        MOVE    12(A6),D0                       | D0 = transfer mode
-        BTST    #0x2,D0                         | inverted-source mode bit?
-        BEQ.B   MODEOK                          | not inverted -> continue
-        NOT     D7                              | invertReg = -1 (inverted)
-MODEOK:
-        BTST    #0x3,D0                         | pattern mode bit?
-        BEQ.B   DIREC                           | no -> direct src copy
-        MOVE    8(A5),D2                        | D2 = dstLeft for pattern align
-        MOVE.L  8(A6),A0                        | A0 = pattern parameter
-        LEA.L     -0x40(A6),A1                  | A1 = expanded pattern slot (16 longs)
-        MOVE.L  -0x58(A6),A5                    | A5 = QD globals (PatExpand needs it)
-        JSR     PatExpand(PC)                   | expand 8-byte pattern -> 16 longs
-        MOVE.L  22(A6),A5                       | restore A5 = dstBits
-        MOVEQ.L #0xF,D7                         | treat coord mod 16
-        AND     (A3),D7                         | D7 = dstTop & 15
-        LSL     #0x2,D7                         | quad for longword indexing
-        MOVE.L  -0x40(A6,D7.W),D6               | D6 = pattern word from expanded table
-        BRA.B   GETSRC_CONT                     | skip src setup -> GETSRC_CONT
-
-| ----------------------------------------------------------
-| DIREC
-| Called during boot.
-DIREC:
-        MOVE.L  (A4),D0                         | D0 = src baseAddr
-        CMP.L   (A5),D0                         | same as dst baseAddr?
-        BNE.B   GETSRC                          | different bitmaps -> no overlap risk
-        MOVE    -0x42(A6),D0                    | D0 = srcV
-        CMP     -0x44(A6),D0                    | srcV vs dstV
-        BGT.B   GETSRC                          | srcV > dstV -> top-to-bottom OK
-        BLT.B   UPSIDE                          | srcV < dstV -> upside-down copy
-        MOVE    2(A2),D0                        | same V, get srcLeft
-        SUB     8(A4),D0                        | convert srcLeft to global
-        MOVE    2(A3),D1                        | get dstLeft
-        SUB     8(A5),D1                        | convert dstLeft to global
-        CMP     D1,D0                           | srcLeft vs dstLeft
-        BGE.B   GETSRC                          | srcLeft >= dstLeft -> left-to-right
-        NEG     D3                              | bump = -2 (right-to-left)
-        BRA.B   GETSRC                          | -> begin transfer
-UPSIDE:
-        MOVE    -0x52(A6),D0                    | D0 = height
-        SUBQ.W  #0x1,D0                         | height - 1
-        ADD     D0,-0x42(A6)                    | -0x42(A6) += D0
-        ADD     D0,-0x44(A6)                    | -0x44(A6) += D0
-        NEG     -0x46(A6)                       | -0x46(A6) = --0x46(A6)
-        NEG     -0x48(A6)                       | -0x48(A6) = --0x48(A6)

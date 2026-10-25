@@ -1,4 +1,4 @@
-|-----------------------------------------------------------
+| -----------------------------------------------------------
 |
 |
 |     ****   ***  *****  *     *     *     ****    ***
@@ -431,8 +431,8 @@ AGAIN:
 |
         TST.B    D7                             | was region rectangular ?
         BEQ.B   NOTRECT                         | no, continue
-        MOVE    #-0x7FFF,0xE(A1)                | NEXTV := -32767
-        MOVE    #0x7FFF,0x10(A1)                | ENDV := 32767
+        MOVE    #-0x7FFF,THISV(A1)              | THISV := -32767 (say we are at infinity)
+        MOVE    #0x7FFF,NEXTV(A1)               | NEXTV := 32767 (next change is never)
         MOVE.L   SCANBUF(A1),A0                 | point to buffer
         MOVE    -0x6(A6),D3                     | GET MINRECT LEFT
         SUB     -0x42(A6),D3                    | make buffer relative
@@ -927,7 +927,7 @@ ScrollRect:
         JSR     CopyRgn(PC)                     | CopyRgn(srcRgn,dstRgn);
         MOVE.L  D6,-(SP)                        | PUSH DSTRGN
         MOVE.L  0xC(A6),-(SP)                   | PUSH DH,DV PACKED
-        JSR     OffsetRgn(PC)                   | OffsetRgn(dstRgn,dh,dv);
+        JSR     OfsetRgn(PC)                    | OfsetRgn(dstRgn,dh,dv);
         MOVE.L  0x10(A6),A0                     | POINT TO DSTRECT
         MOVE.L  (A0)+,-0x8(A6)                  | COPY DSTRECT INTO SRCRECT
         MOVE.L  (A0)+,-0x4(A6)                  | COPY BOTTOM+RIGHT

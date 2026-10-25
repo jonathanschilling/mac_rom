@@ -31,7 +31,7 @@
 |
 P_mBTClose:
         MOVE.L  (0x730).w,-(SP)                 | HFS vector: BTClose
-        RTS                                     | Return
+        RTS                                     | return from P_mBTClose
 
 | ----------------------------------------------------------
 |
@@ -59,7 +59,7 @@ BTCLOSE_EXIT:
         MOVEM.L (A6)+,D1-D4/A0-A4               | Restore registers
         MOVE.L  (A6)+,-(SP)                     | restore return address
         TST     D0                              | Set Z flag from result
-        RTS                                     | Return
+        RTS                                     | return from BTCLOSE_EXIT
 
 | P_mBTDelete -- delete the record.
 | ----------------------------------------------------------
@@ -69,7 +69,7 @@ BTCLOSE_EXIT:
 | Called by: DC_DELETE, DEALLOCFILE_NO_2, TRUNCATEFILE_OK, CC_CLR_THD_LOOP, MC_UPD_DEST (and 1 more)
 P_mBTDelete:
         MOVE.L  (0x734).w,-(SP)                 | HFS vector: BTDelete
-        RTS                                     | Return
+        RTS                                     | return from P_mBTDelete
 
 | ----------------------------------------------------------
 |
@@ -96,7 +96,7 @@ BTDEL_DELREC:
         BNE     BTDEL_CHKLEAF                   | No: done at this level
         BSET    #0x6,(A4)                       | Set BTCKeyUpd flag: index key changed at root
 BTDEL_CHKLEAF:
-        CMPI.B  #0xFF,PORTBOUNDS(A3)            | Is this a leaf node? (NDType = 0xFF)
+        CMPI.B  #0xFF,NDType(A3)                | Is this a leaf node? (NDType = 0xFF)
         BNE.B   BTDEL_CHKRECS                   | No: check key update
         SUBQ.L  #0x1,BTCNRecs(A4)               | Leaf deletion: decrement BTCNRecs (total leaf records)
 BTDEL_CHKRECS:
@@ -123,7 +123,7 @@ BTDEL_GETRSIB:
         JSR     P_mRelNode(PC)                  | Release right sibling
 | BDUpdPtrs: update 1st and last node pointers
 BTDEL_UPDPTRS:
-        CMPI.B  #0xFF,PORTBOUNDS(A3)            | at leaf level? (NDLeafNode = $FF)
+        CMPI.B  #0xFF,NDType(A3)                | at leaf level? (NDLeafNode = $FF)
         BNE.B   BTDEL_FREENODE                  | no ->
         TST.L   NDBlink(A3)                     | backward link = 0?
         BNE.B   BTDEL_CHKFLINK                  | no ->
@@ -218,7 +218,7 @@ BTDEL_ROOT:
 BTDEL_UPDDEPTH:
         CMPI    #0x1,NDNRecs(A3)                | check # of records left in root
         BGT     BTDEL_DONE                      | > 1, all done ->
-        TST.B   PORTBOUNDS(A3)                  | index node? (NDType = 0 for index)
+        TST.B   NDType(A3)                      | index node? (NDType = 0 for index)
         BNE     BTDEL_DONE                      | no, all done ->
         SUBQ.W  #0x1,BTCDepth(A4)               | decrement tree depth
         MOVEQ.L #0x0,D1                         | locate key and data for 1st record
@@ -257,7 +257,7 @@ BTDEL_CLEANUP:
 |
 P_mBTFlush:
         MOVE.L  (0x738).w,-(SP)                 | HFS vector: BTFlush
-        RTS                                     | Return
+        RTS                                     | return from P_mBTFlush
 
 | ----------------------------------------------------------
 |
@@ -313,7 +313,7 @@ BTFLUSH_EXIT:
 |
 P_mBTGetRecord:
         MOVE.L  (0x73C).w,-(SP)                 | HFS vector: BTGetRecord
-        RTS                                     | Return
+        RTS                                     | return from P_mBTGetRecord
 
 | ----------------------------------------------------------
 |
@@ -448,7 +448,7 @@ GR_RELNODE:
 | Called by: EXTENDFILE_LOOP, CC_ADD_REC, CC_CLR_THD_LOOP, MC_INSERT_DST, CMRenameCN
 P_mBTInsert:
         MOVE.L  (0x740).w,-(SP)                 | HFS vector: BTInsert
-        RTS                                     | Return
+        RTS                                     | return from P_mBTInsert
 
 | ----------------------------------------------------------
 |
@@ -520,7 +520,7 @@ BTINS_CHKERR:
         MOVE.L  D1,D3                           | D3 = new node number
         JSR     InitNode(PC)                    | get an initialized node
         MOVE.L  A0,A3                           | A3 = ptr(new root node)
-        MOVE.B  #0xFF,PORTBOUNDS(A3)            | type = leaf node (NDLeafNode = $FF)
+        MOVE.B  #0xFF,NDType(A3)                | type = leaf node (NDLeafNode = $FF)
         MOVEQ.L #0x1,D0                         | node height = 1
         MOVE.B  D0,NDNHeight(A3)                | set node height to 1
         MOVE    D0,BTCDepth(A4)                 | tree depth = 1
@@ -659,7 +659,7 @@ BTINS_RELLEFT:
         BTST    #0x5,(A4)                       | new index record required? (BTCNewIRec)
         BEQ     BTINS_CKDONE                    | no, check if done ->
         MOVE.L  BTCVarPtr(A4),A0                | locate new index record
-        LEA.L   ioFFlNum(A0),A0                 | BTVRecord offset
+        LEA.L   0x30(A0),A0                     | A0 = BTVRecord (record buffer, BTVars+$30)
         MOVE.L  A0,D7                           | D7 = ptr to new record
         JSR     GetMaxKey(PC)                   | max key length + 4
         ADDQ.W  #0x4,D0                         | = size of index record
@@ -691,7 +691,7 @@ BTINS_NEWROOT:
         JSR     GetMaxKey(PC)                   | GetMaxKey: get highest key from left child
         ADDQ.W  #0x4,D0                         | D0 += 4 (key length + node number)
         MOVE.L  BTCVarPtr(A4),A0                | A0 = B-tree variables area
-        LEA.L   ioFFlNum(A0),A0                 | A0 += offset to record buffer
+        LEA.L   0x30(A0),A0                     | A0 = BTVRecord (record buffer, BTVars+$30)
         MOVE.L  D4,A1                           | A1 = new root node data
         CLR     D1                              | D1 = 0 (insert at position 0)
         JSR     InsertRec(PC)                   | InsertRec: insert left child's index record into new root at pos 0
@@ -703,7 +703,7 @@ BTINS_NEWROOT:
         JSR     GetMaxKey(PC)                   | GetMaxKey: get highest key from right child
         ADDQ.W  #0x4,D0                         | D0 += 4
         MOVE.L  BTCVarPtr(A4),A0                | A0 = record buffer
-        LEA.L   ioFFlNum(A0),A0                 | A0 += offset
+        LEA.L   0x30(A0),A0                     | A0 = BTVRecord (record buffer, BTVars+$30)
         MOVE.L  D4,A1                           | A1 = root node data
         MOVE    #0x1,D1                         | D1 = 1 (insert at position 1)
         JSR     InsertRec(PC)                   | InsertRec: insert right child's index record at pos 1
@@ -732,7 +732,7 @@ BTINS_EXIT:
         MOVEM.L (A6)+,D1/D3-D7/A0-A4            | Restore all registers
         MOVE.L  (A6)+,-(SP)                     | restore return address
         TST     D0                              | Set Z flag from result
-        RTS                                     | Return
+        RTS                                     | return from BTINS_EXIT
 
 | P_mBTOpen -- bTOpen: open the B*-Tree file.
 | ----------------------------------------------------------
@@ -741,7 +741,7 @@ BTINS_EXIT:
 |
 P_mBTOpen:
         MOVE.L  (0x744).w,-(SP)                 | HFS vector: BTOpen
-        RTS                                     | Return
+        RTS                                     | return from P_mBTOpen
 
 | ----------------------------------------------------------
 |
@@ -772,8 +772,8 @@ BTOpen:
         BNE.B   BTOPEN_EXIT                     | couldn't get it ->
         MOVE.L  A0,A2                           | A2 = cache buffer ptr
 | BOChkHdr: make sure the BTree header node is ok
-        LEA.L   vcbLsBkUp(A2),A0                | A0 = ptr to BTH (after node descriptor)
-        MOVE    ioFileName(A0),D0               | node size (BTHNodeSize)
+        LEA.L   0xE(A2),A0                      | A0 = ptr to BTH (after node descriptor, lenND = 14)
+        MOVE    BTHNodeSize(A0),D0              | node size (BTHNodeSize)
         BEQ.B   BTOPEN_BADHDR                   | node size = 0, error ->
         MOVE    D0,D1                           | check if multiple of 512
         ANDI    #0x1FF,D1                       | mask to low 9 bits
@@ -783,7 +783,7 @@ BTOpen:
         SWAP    D2                              | = # of nodes
         CLR     D2                              | clear remainder
         SWAP    D2                              | D2 = quotient (node count)
-        CMP.L   ioVRefNum(A0),D2                | same # as in BTH (BTHNNodes)?
+        CMP.L   BTHNNodes(A0),D2                | same # as in BTH (BTHNNodes)?
         BNE.B   BTOPEN_BADHDR                   | no, error ->
         CMP.L   0x1A(A0),D2                     | free count < # of nodes (BTHFree)?
         BCS     BTOPEN_BADHDR                   | no, error ->
@@ -808,7 +808,7 @@ BTOPEN_BADHDR:
 | BOCpyBTH: copy BTH into BTCB
 BTOPEN_CPYBTH:
         MOVE    #0x1D,D0                        | loop index = LenMemBTH-1
-        LEA.L   vcbLsBkUp(A2),A0                | ptr(source) = BTH
+        LEA.L   0xE(A2),A0                      | ptr(source) = BTH (node + lenND)
         LEA.L   BTCDepth(A4),A1                 | ptr(dest) = BTCB
 BTOPEN_CPYLOOP:
         MOVE.B  (A0)+,(A1)+                     | move it
@@ -839,7 +839,7 @@ BTOPEN_EXIT:
 | Called by: MOUNTVOL_OK_9, DEALLOCFILE_NEXT, TRUNCATEFILE_NEXT, XFSearch, XFSEARCH_NO_2 (and 1 more)
 P_mBTSearch:
         MOVE.L  (0x748).w,-(SP)                 | HFS vector: BTSearch
-        RTS                                     | Return
+        RTS                                     | return from P_mBTSearch
 
 | ----------------------------------------------------------
 |
@@ -983,7 +983,7 @@ CAL_BTVARS:
 |
 P_mAllocNode:
         MOVE.L  (0x758).w,-(SP)                 | HFS vector: AllocNode
-        RTS                                     | Return
+        RTS                                     | return from P_mAllocNode
 
 | ----------------------------------------------------------
 |
@@ -1057,7 +1057,7 @@ ALLOC_EXIT:
         MOVEM.L (A6)+,D2-D4/A2-A3               | Restore registers
         MOVE.L  (A6)+,-(SP)                     | put return address back on stack
         TST     D0                              | set condition codes
-        RTS                                     | Return
+        RTS                                     | return from ALLOC_EXIT
 
 | P_mExtBTFile -- extend the file.
 | ----------------------------------------------------------
@@ -1066,7 +1066,7 @@ ALLOC_EXIT:
 |
 P_mExtBTFile:
         MOVE.L  (0x760).w,-(SP)                 | HFS vector: ExtBTFile
-        RTS                                     | Return
+        RTS                                     | return from P_mExtBTFile
 
 | ----------------------------------------------------------
 |
@@ -1141,8 +1141,8 @@ EXTBT_MARKOLD:
         MOVE.L  D4,D1                           | map node number = begin node number
         JSR     InitNode(PC)                    | get an initialized node
         MOVE.L  A0,A2                           | A2 = ptr(new map node)
-        MOVE.B  #0x2,vcbSigWord(A2)             | set node type = NDMapNode (2)
-        MOVE    #0x1,vcbCrDate(A2)              | NDNRecs = 1 (map is one large record)
+        MOVE.B  #0x2,NDType(A2)                 | set node type = NDMapNode (2)
+        MOVE    #0x1,NDNRecs(A2)                | NDNRecs = 1 (map is one large record)
         MOVE    BTCNodeSize(A4),D1              | D1 = node size
         MOVEQ.L #-0x12,D0                       | map rec size = nodesize - lenND - 2*offsets
         ADD     D1,D0                           | D0 = nodesize - header - offsets
@@ -1152,7 +1152,7 @@ EXTBT_MARKOLD:
         MOVE    D0,-0x4(A2,D1.W)                | set free space offset
         TST.L   D3                              | map node bit within new record?
         BLT.B   EXTBT_MARKNEW                   | no ->
-        MOVE.B  #0x80,vcbLsBkUp(A2)             | pre-allocate 1st node (map node)
+        MOVE.B  #0x80,0xE(A2)                   | pre-allocate 1st node (map record at lenND)
 EXTBT_MARKNEW:
         MOVE.L  A2,A0                           | mark the map node dirty
         JSR     P_mMarkBlock(PC)                | mark new map node dirty
@@ -1177,7 +1177,7 @@ EXTBT_EXIT:
 |
 P_mFreeNode:
         MOVE.L  (0x75C).w,-(SP)                 | HFS vector: FreeNode
-        RTS                                     | Return
+        RTS                                     | return from P_mFreeNode
 
 | ----------------------------------------------------------
 |
@@ -1244,14 +1244,14 @@ GETMAP_GETNODE:
         MOVE.L  A0,A2                           | A2 = ptr(node buffer)
 | locate map record and calculate its size
         MOVEQ.L #0x0,D0                         | assume map record is record 0
-        CMPI.B  #0x1,vcbSigWord(A2)             | header node? (NDHdrNode = 1)
+        CMPI.B  #0x1,NDType(A2)                 | header node? (NDHdrNode = 1)
         BNE.B   GETMAP_LOCREC                   | no ->
         MOVEQ.L #0x2,D0                         | map record is record 2
 GETMAP_LOCREC:
         MOVE.L  A2,A1                           | locate
         JSR     GetRecA(PC)                     | the record
         MOVE.L  A0,D1                           | D1 = ptr(record)
-        MOVE    vcbCrDate(A2),D0                | locate the last record in node (NDNRecs)
+        MOVE    NDNRecs(A2),D0                  | locate the last record in node (NDNRecs)
         JSR     GetRecA(PC)                     | get ptr to last record
         MOVE.L  D1,A1                           | A1 = ptr(record)
         SUBA.L  A1,A0                           | map size = ptr(last record) - ptr(map record)
@@ -1301,7 +1301,7 @@ RotateLT:
         LSR     #0x1,D0                         | total size / 2 = split point
         MOVE    D0,D6                           | D6 = split point
 | simulate left rotation to determine best fit
-        MOVE    vcbCrDate(A2),D3                | D3 = init virt indx = #recs in lt node
+        MOVE    NDNRecs(A2),D3                  | D3 = init virt indx = #recs in lt node
         MOVE    D1,D4                           | D4 = virtual insert index
         ADD     D3,D4                           | = rt insert indx + #recs in lt node
         MOVEQ.L #-0x1,D7                        | no current fit or previous fit
@@ -1318,7 +1318,7 @@ ROTLT_FITLOOP:
 |
 ROTLT_GETREC:
         MOVE    D3,D0                           | convert virtual index
-        SUB     vcbCrDate(A2),D0                | subtract NDNRecs from left node
+        SUB     NDNRecs(A2),D0                  | subtract NDNRecs from left node
         CMP     D4,D3                           | past insert point?
         BLE.B   ROTLT_ADJINDX                   | no, skip adjustment
         SUBQ.W  #0x1,D0                         | to a right node index
@@ -1365,7 +1365,7 @@ ROTLT_NEXTFIT:
         SWAP    D7                              | previous fit = current fit
         MOVE    #-0x1,D7                        | no current fit
         ADDQ.W  #0x1,D3                         | bump index to next record
-        MOVE    vcbCrDate(A2),D1                | max virtual index
+        MOVE    NDNRecs(A2),D1                  | max virtual index
         ADD     NDNRecs(A3),D1                  | = #recs in lt + #recs in rt
         CMP     D1,D3                           | any more records?
         BLE.B   ROTLT_FITLOOP                   | yes, keep trying ->
@@ -1378,7 +1378,7 @@ ROTLT_NEXTFIT:
 |
 | RLRotate: we have a fit, do the actual rotation
 ROTLT_DOROT:
-        MOVE    vcbCrDate(A2),D3                | init virt indx = 1st rec in rt node
+        MOVE    NDNRecs(A2),D3                  | init virt indx = 1st rec in rt node
 ROTLT_LOOP:
         CMP     D3,D4                           | at insert point?
         BNE.B   ROTLT_ROTREC                    | no ->
@@ -1471,7 +1471,7 @@ SPLITLT_INIT:
         MOVE.L  D3,D1                           | new node number
         JSR     InitNode(PC)                    | get an initialized node
         MOVE.L  A0,A2                           | A2 = ptr(new left node)
-        MOVE.B  PORTBOUNDS(A3),vcbSigWord(A2)   | set to same type as right node (NDType)
+        MOVE.B  NDType(A3),NDType(A2)           | set to same type as right node (NDType)
         MOVE.L  NDBlink(A3),0x4(A2)             | finish updating links (NDBlink)
         MOVE.L  D4,(A2)                         | NDFlink = right node number
         MOVE.L  D3,NDBlink(A3)                  | right node's BLink = new left node
@@ -1479,7 +1479,7 @@ SPLITLT_INIT:
         ADD     BTCDepth(A4),D0                 | = tree depth + 1
         SUB     BTCLevel(A4),D0                 | - current level
         MOVE.B  D0,0x9(A2)                      | NDNHeight
-        CMPI.B  #0xFF,vcbSigWord(A2)            | adding a new leaf node? (NDLeafNode)
+        CMPI.B  #0xFF,NDType(A2)                | adding a new leaf node? (NDLeafNode)
         BNE.B   SPLITLT_ROTATE                  | no ->
         TST.L   0x4(A2)                         | new 1st node? (NDBlink = 0?)
         BNE.B   SPLITLT_ROTATE                  | no ->
@@ -1809,7 +1809,7 @@ GetMaxKey:
 | Called by: BTDEL_GETPAR, BTFlush, GR_GETNODE, BTINS_NXTLEV, BTSearch (and 4 more)
 P_mGetNode:
         MOVE.L  (0x750).w,-(SP)                 | HFS vector: GetNode
-        RTS                                     | Return
+        RTS                                     | return from P_mGetNode
 
 | ----------------------------------------------------------
 |
@@ -1861,7 +1861,7 @@ GetNodeSiz:
 GetOffset:
         BSR     GET_OFFA                        | get ptr(offset) first
         MOVE    (A0),D0                         | get the offset
-        RTS                                     | return
+        RTS                                     | return from GetOffset
 
 | ----------------------------------------------------------
 |
@@ -1874,7 +1874,7 @@ GET_OFFA:
         LSL     #0x1,D0                         | index * 2 (bytes)
         NEG     D0                              | negative byte index
         LEA.L   -0x2(A0,D0.W),A0                | ptr(offset) = (base-2) + byte index
-        RTS                                     | return
+        RTS                                     | return from GET_OFFA
 
 | GetRecA -- parent index record.
 | ----------------------------------------------------------
@@ -1893,7 +1893,7 @@ GetRecA:
         SUB     D2,D0                           | size = next offset - target offset
         LEA.L   0x0(A1,D2.W),A0                 | ptr(record) = base + offset
         MOVEM.L (SP)+,D1-D2                     | restore registers
-        RTS                                     | return
+        RTS                                     | return from GetRecA
 
 | InitNode -- get an initialized node.
 | ----------------------------------------------------------
@@ -2077,11 +2077,11 @@ MovRecLT:
         BLE.B   MOVRECLT_EXIT                   | byte count <= 0
         SUBQ.W  #0x1,D0                         | adjust loop index
 MOVRECLT_LOOP:
-        MOVE.B  (A0)+,(A1)+                     | move
-        DBF     D0,MOVRECLT_LOOP                | it
+        MOVE.B  (A0)+,(A1)+                     | move one byte, ascending
+        DBF     D0,MOVRECLT_LOOP                | for all D0+1 bytes
 MOVRECLT_EXIT:
         MOVEM.L (SP)+,D0-D1/A0-A1               | restore regs
-        RTS                                     | return
+        RTS                                     | return from MOVRECLT_EXIT
 
 | ----------------------------------------------------------
 |
@@ -2095,11 +2095,11 @@ MovRecRT:
         ADDA    D0,A1                           | high-address of dest block
         SUBQ.W  #0x1,D0                         | byte count - 1
 MOVRECRT_LOOP:
-        MOVE.B  -(A0),-(A1)                     | move
-        DBF     D0,MOVRECRT_LOOP                | it
+        MOVE.B  -(A0),-(A1)                     | move one byte, descending from the high end
+        DBF     D0,MOVRECRT_LOOP                | for all D0+1 bytes
 MOVRECRT_EXIT:
         MOVEM.L (SP)+,D0-D1/A0-A1               | restore regs
-        RTS                                     | return
+        RTS                                     | return from MOVRECRT_EXIT
 
 | P_mRelNode -- release the node.
 | ----------------------------------------------------------
@@ -2109,7 +2109,7 @@ MOVRECRT_EXIT:
 | Called by: BTINS_CLEANUP, BTDEL_CHKRECS, BTDEL_GETRSIB, BTDEL_FREENODE, BTDEL_RELCHILD (and 12 more)
 P_mRelNode:
         MOVE.L  (0x754).w,-(SP)                 | HFS vector: RelNode
-        RTS                                     | Return
+        RTS                                     | return from P_mRelNode
 
 | ----------------------------------------------------------
 |
@@ -2125,7 +2125,7 @@ RELNODE_SKIP:
         MOVE.L  (A6)+,A1                        | Restore A4
         MOVE.L  (A6)+,-(SP)                     | restore return address
         TST     D0                              | Set Z flag
-        RTS                                     | Return
+        RTS                                     | return from RELNODE_SKIP
 
 | SearchNode -- binary search within node.
 | ----------------------------------------------------------
@@ -2140,7 +2140,7 @@ SearchNode:
         MOVE.L  BTCKeyCR(A4),D5                 | D5 = ptr(key compare routine)
 | search node for key using a binary search
         CLR     D2                              | lower bnd = 0
-        MOVE    vcbCrDate(A2),D3                | upper bnd = number of recs - 1 (NDNRecs)
+        MOVE    NDNRecs(A2),D3                  | upper bnd = number of recs - 1 (NDNRecs)
         SUBQ.W  #0x1,D3                         | adjust to 0-based index
         CMP     D3,D2                           | while lower bnd <= upper bnd
         BGT.B   SRCHNODE_NOTFND                 | search exhausted, not found
@@ -2247,33 +2247,3 @@ UPDIKEY_EXIT:
         MOVEM.L (SP)+,D0-D1/A0-A2               | restore regs
         RTS                                     | exit UpdIKey
 
-| ----------------------------------------------------------
-|
-| Cache
-|
-| Called during boot.
-Cache:
-        MOVE.L  0x18(A1,D1.W),D0                | FLUSH_DIRTY: extract VCB from file refnum via FCB
-        BEQ.B   CACHE_DONE                      | D2 = disk block or file block to find
-        MOVE.L  D0,A4                           | A1 = volume cache queue (vcbBufAdr from VCB)
-        SUBA    #0x1C,A4                        | Subtract
-CACHE_DONE:
-        RTS                                     | A4 = next entry (follow FLink)
-
-| ----------------------------------------------------------
-|
-| FLUSH_DIRTY
-|
-| Called during boot.
-FLUSH_DIRTY:
-        BSR.B   Cache                           | A1 = FCB array
-        BEQ.B   FLUSHDIRTY_EXIT                 | A2 = VCB from FCB (at refnum offset + 0x14)
-        BTST    #0x5,BTCRoot(A4)                | Return
-        BNE.B   FLUSHDIRTY_EXIT                 | no ->
-        BCLR    #0x7,BTCRoot(A4)                | Clear bit
-        BEQ.B   FLUSHDIRTY_EXIT                 | yes ->
-        MOVE.L  (SP)+,-(A6)                     | Save return address to A6 stack
-        JSR     WriteOwnBuf(PC)                 | call
-        MOVE.L  (A6)+,-(SP)                     | put return address back on stack
-FLUSHDIRTY_EXIT:                                | D2 = block to search
-        RTS                                     | Return

@@ -1,4 +1,4 @@
-|-----------------------------------------------------------
+| -----------------------------------------------------------
 |
 |
 |     ****   ***   ***   *****  *   *  ****   *****   ***
@@ -138,7 +138,6 @@ STDPUTPIC_CONT_5:
 | .PROC PicComment,3
 | PROCEDURE PicComment(kind, dataSize: INTEGER; dataHandle: Handle);
 | Verb-dispatch via QDProcs commentProc (offset $24).
-| Plus equivalent: Pictures.s 201.
 PicComment:
         MOVE.L  (A5),A0                         | A0 = QD globals
         MOVE.L  (A0),A0                         | A0 = thePort
@@ -154,7 +153,7 @@ PICCOMMENT_USESTD:
 | .FUNC OpenPicture,1
 | FUNCTION OpenPicture(picFrame: Rect): PicHandle;
 | Allocate PICSAVE record + clipRgn copy + initial 256-byte
-| PicHandle. Plus equivalent: Pictures.s 223 (different impl --
+| PicHandle. (The Plus version differs --
 | Plus does a 500-byte heap test first; classic skips that).
 OpenPicture:
         LINK    A6,#0x0                         | set up stack frame, reserve 0x0 locals
@@ -221,7 +220,6 @@ OPENPICTURE_DONE:
 | ----------------------------------------------------------
 | .PROC ClosePicture,0
 | PROCEDURE ClosePicture; finalize the picture being saved.
-| Plus equivalent: Pictures.s 337.
 ClosePicture:
         MOVEM.L D6-D7/A3-A4,-(SP)               | save regs
         MOVE.L  (A5),A4                         | A4 = QD globals
@@ -242,15 +240,23 @@ ClosePicture:
         JSR     SetHSize(PC)                    | trim to exact size
 CLOSEPICTURE_OVERFLO:
         MOVE.L  D6,-(SP)                        | push picClipRgn
-        JSR     NEWRGN_CONT(PC)                 | DisposeHandle wrapper
+        JSR     DisposRgn(PC)                   | DisposeRgn(picClipRgn)
         MOVE.L  D7,-(SP)                        | push PICSAVE handle
-        JSR     KillPicture(PC)                 | dispose PICSAVE
+        JSR     KILLPICTURE_BODY(PC)            | dispose PICSAVE
         CLR.L   0x5C(A3)                        | PICSAVE := nil
         JSR     ShowPen(PC)                     | resume drawing
 CLOSEPICTURE_GOHOME:
         MOVEM.L (SP)+,D6-D7/A3-A4               | restore regs
-        RTS                                     | return
-        JMP     KillPicture(PC)                 | tail-call: dispose picture and return
+        RTS                                     | return from CLOSEPICTURE_GOHOME
+| ----------------------------------------------------------
+|
+| _KillPicture ($A8F5): dispose of a picture
+| Pascal: PROCEDURE KillPicture(myPicture: PicHandle);
+| Jumps to KILLPICTURE_BODY (end of Pictures.s), which pops the return
+| address and the handle, calls _DisposHandle and returns.
+|
+KillPicture:
+        JMP     KILLPICTURE_BODY(PC)            | dispose myPicture and return
 
 | ----------------------------------------------------------
 | .PROC DrawPicture,2
@@ -349,13 +355,13 @@ MORE:
         MOVE.B  (SP)+,D0                        | POP BOOLEAN RESULT
         BNE.B   MORE                            | LOOP TILL FALSE
         MOVE.L  -8(A6),-(SP)                    | -(SP) := tempHndl
-        JSR     NEWRGN_CONT(PC)                 | dispose region
+        JSR     DisposRgn(PC)                   | dispose region
         MOVE.L  28(A3),-(SP)                    | push thePort.clipRgn
-        JSR     NEWRGN_CONT(PC)                 | dispose region
+        JSR     DisposRgn(PC)                   | dispose region
         LEA.L     -0xA0(A6),A0                  | A0 = &savedFields
         MOVEQ.L #0x35,D0                        | D0 := #0x35
 MORE_LOOP:
-        MOVE    (A0)+,(A3)+                     | INIT DBRA COUNT
+        MOVE    (A0)+,(A3)+                     | COPY A WORD INTO THEPORT
         DBRA    D0,MORE_LOOP                    | LOOP ENTIRE PORT
         CLR.L   -0xA8(A4)                       | RESTORE PATALIGN TO (0,0)
         CLR.L   -0x9C(A4)                       | SET PLAYPIC TO NIL
@@ -482,9 +488,9 @@ GET2:
         MOVE.L  D0,0x24(A3)                     | INSTALL INTO PLAYSTATE
         JSR     GETWORD_NO(PC)                  | GET TEXT DENOM
         MOVE.L  D0,0x28(A3)                     | INSTALL INTO PLAYSTATE
-        PEA.L     0x24(A3)                      | PUSH PORT RECT
-        PEA.L     20(A3)                        | PUSH PORT BOUNDS
-        PEA.L     28(A3)                        | PUSH CLIP REGION
+        PEA.L     0x24(A3)                      | PUSH PLAYSTATE NUMER (+$24)
+        PEA.L     20(A3)                        | PUSH PLAYSTATE FROMRECT (+$14)
+        PEA.L     28(A3)                        | PUSH PLAYSTATE TORECT (+$1C)
         JSR     ScalePt(PC)                     | SCALE NUMER
         BRA.W   KILL1_EXIT                      | GO TO COMMON SCALING
         BSR.W   GETUBYTE                        | GET VERSION NUMBER BYTE
@@ -506,7 +512,7 @@ GET2:
         JSR     GETWORD_NO(PC)                  | GET DH,DV
         MOVE.L  8(A6),A2                        | POINT TO PLAYSTATE RECORD
         ADD     D0,20(A2)                       | ADD DV TO FROMRECT
-        ADD     D0,24(A2)                       | ADJUST RECT LEFT
+        ADD     D0,24(A2)                       | ADD DV TO FROMRECT.BOTTOM
         ADD     D0,-0xA8(A4)                    | AND TO PATALIGN
         SWAP    D0                              | GET DH IN LO WORD
         ADD     D0,22(A2)                       | ADD DH TO FROMRECT
@@ -825,7 +831,7 @@ GETUBYTE:                                       | jump via A0
         JSR     GetPicData(PC)                  | GET DATA FROM THEPIC
         CLR     D0                              | GET READY FOR BYTE
         MOVE.B  (SP)+,D0                        | POP RESULT INTO LO BYTE
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from GETUBYTE
 GETSBYTE:
         CLR.B   -(SP)                           | ALLOCATE TEMP
         MOVE.L  SP,-(SP)                        | PUSH ADDR OF TEMP
@@ -833,17 +839,17 @@ GETSBYTE:
         JSR     GetPicData(PC)                  | GET DATA FROM THEPIC
         MOVE.B  (SP)+,D0                        | POP RESULT
         EXT.W    D0                             | SIGN EXTEND TO WORD
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from GETSBYTE
 GETWORD:
         CLR     -(SP)                           | ALLOCATE TEMP
         MOVE.L  SP,-(SP)                        | PUSH ADDR OF TEMP
         MOVE    #0x2,-(SP)                      | PUSH BYTECOUNT
         JSR     GetPicData(PC)                  | GET DATA FROM THEPIC
         MOVE    (SP)+,D0                        | RETURN ANSWER IN D0
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from GETWORD
 
 | GETWORD_NO -- gET PNSIZE.
-| ---------------------------------------------------------- 
+| ----------------------------------------------------------
 | call subroutine via A0 | call subroutine via A0
 | GETWORD_NO
 GETWORD_NO:
@@ -852,7 +858,7 @@ GETWORD_NO:
         MOVE    #0x4,-(SP)                      | PUSH UPDATERGN HANDLE
         JSR     GetPicData(PC)                  | pc-relative jsr (was raw .short pair)
         MOVE.L  (SP)+,D0                        | RETURN ANSWER IN D0
-        RTS                                     | return to caller
+        RTS                                     | return from GETWORD_NO
 
 | GETRECT -- gET AND PUSH DSTRECT.
 | ----------------------------------------------------------
@@ -902,16 +908,16 @@ CALL1:
         JSR     (A0)                            | call subroutine via A0
         BRA.B   KILL1                           | jump via A0
 KILL2:
-        MOVE.L  -8(A6),-(SP)                    | -(SP) := tempHndl
-        JSR     KillPicture(PC)                 | call KillPicture
+        MOVE.L  -8(A6),-(SP)                    | PUSH HANDLE2
+        JSR     KILLPICTURE_BODY(PC)            | DISCARD HANDLE2
 KILL1:
-        MOVE.L  -4(A6),-(SP)                    | -(SP) := playState
-        JSR     KillPicture(PC)                 | call KillPicture
+        MOVE.L  -4(A6),-(SP)                    | PUSH HANDLE1
+        JSR     KILLPICTURE_BODY(PC)            | DISCARD HANDLE1
 KILL1_EXIT:
         MOVEM.L (SP)+,D3-D7/A2-A4               | RESTORE REGISTERS
         UNLK    A6                              | tear down frame
         MOVE.L  (SP)+,(SP)                      | pop (SP)
-        RTS                                     | return to caller
+        RTS                                     | return from KILL1_EXIT
 | Called by: TEXTOP2, PICITEM_MORE1, PICITEM_NOPACK, GETDONE, GETUBYTE (and 5 more)
 GetPicData:
         MOVE.L  (A5),A0                         | A0 := (A5)
@@ -970,7 +976,7 @@ PutPicLong:
         MOVE    #0x4,-(SP)                      | PUSH BYTECOUNT = 4
         JSR     PutPicData(PC)                  | CALL PutPicData
         MOVE.L  (SP)+,(SP)                      | STRIP PARAM
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from PutPicLong
 
 | PutPicPat -- pUT PATTERN DATA.
 | ----------------------------------------------------------
@@ -1002,7 +1008,7 @@ PutPicRect:
         ADDQ.W  #0x8,D2                         | D2 += #0x8
         MOVE.B  D2,-(SP)                        | push D2
         JSR     PutPicByte(PC)                  | emit byte into picture stream
-        RTS                                     | return to caller
+        RTS                                     | return from PutPicRect
 NOTSAME:
         MOVE.L  D0,0x44(A0)                     | 0x44(A0) := D0
         MOVE.L  D1,0x48(A0)                     | 0x48(A0) := D1
@@ -1011,7 +1017,7 @@ NOTSAME:
         MOVE.B  D2,-(SP)                        | push D2
         JSR     PutPicByte(PC)                  | PUT OPCODE (IN D0)
         JSR     PutPicData(PC)                  | PUT 8 BYTES OF RECTANGLE
-        RTS                                     | return to caller
+        RTS                                     | return from NOTSAME
 PutPicRgn:
         MOVE.L  4(SP),-(SP)                     | push 4(SP)
         JSR     HLock_Inline(PC)                | call HLock_Inline
@@ -1241,7 +1247,7 @@ POS:
 MINSIZE_EMPTY:
         MOVE    D0,(A0)                         | UPDATE RESULT
 SCDONE:
-        RTS                                     | return to caller
+        RTS                                     | return from SCDONE
 | Called by: MapRect, MAPPOLY_NEXTPT, MAPRGN_LOOP, LNFROM, LNOK (and 1 more)
 MapPt:
         LINK    A6,#0x0                         | set up stack frame, reserve 0x0 locals
@@ -1290,7 +1296,7 @@ NOTNEG:
 NOTNEG_SKIP:
         ADD.W    D4,D0                          | D0 += D4
         MOVE.W   D0,(A0)                        | (A0) := D0
-        RTS                                     | return to caller
+        RTS                                     | return from NOTNEG_SKIP
 
 | .PROC MapRect,3
 | .REF MapPt
@@ -1307,38 +1313,3 @@ MapRect:
         ADDQ.L  #0x4,12(SP)                     | OFFSET RECT TO BOTRIGHT
         JMP     MapPt(PC)                       | MAP BOTRIGHT AND RETURN
 
-| NewHandle_Inline -- aLLOCATE PTBUF.
-| Called by: OpenPicture, OpenPoly, NewRgn, OpenRgn, INSETRGN_NOTRECT (and 4 more)
-NewHandle_Inline:
-        MOVEQ.L #0x0,D0                         | clear D0
-        MOVE.L  (SP)+,A1                        | pop return jump address
-        MOVE    (SP)+,D0                        | pop requested size into D0
-        _NewHandle                              | allocate handle of size D0
-        BNE.B   MEMFULL_SYSERR                  | if non-zero -> MEMFULL_SYSERR
-        MOVE.L  A0,(SP)                         | (SP) := A0
-        JMP     (A1)                            | jump via A1
-MEMFULL_SYSERR:
-        MOVEQ.L #0x19,D0                        | D0 = dsMemFullErr (25)
-        _SysError                               | system error (halt)
-        _Debugger                               | (unreachable) drop to debugger
-
-| SetHSize -- mAKE THE BUFFER BIGGER.
-| Called by: DOLINE_CONT, DVPOS_OK, PutRect, PUTPT, EMPTY (and 9 more)
-SetHSize:
-        MOVEQ.L #0x0,D0                         | clear D0
-        MOVE.L  (SP)+,A1                        | pop return jump address
-        MOVE    (SP)+,D0                        | pop new size into D0
-        MOVE.L  (SP)+,A0                        | pop handle into A0
-        _SetHandleSize                          | resize handle A0 to D0 bytes
-        BNE.B   MEMFULL_SYSERR                  | if non-zero -> MEMFULL_SYSERR
-        JMP     (A1)                            | jump via A1
-| RTS ;AND RETURN
-| .PROC KillPicture
-| ---------------------------------------------------
-| PROCEDURE KillPicture(myPicture: PicHandle);
-| Called by: NEWRGN_CONT, CloseRgn, INSETRGN_FINISH, JDONE_NO_2, MAPRGN_LOOP_2 (and 4 more)
-KillPicture:
-        MOVE.L  (SP)+,A1                        | pop return addr
-        MOVE.L  (SP)+,A0                        | pop handle
-        _DisposeHandle                          | DISCARD PICHANDLE
-        JMP     (A1)                            | and return

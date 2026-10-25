@@ -194,7 +194,7 @@ RANDOM_UPDATE:
         CLR     D0                              | YES, RETURN ZERO INSTEAD
 RANDOM_UPDATE_NO:
         MOVE    D0,0x4(SP)                      | RETURN LO WORD AS RESULT
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from RANDOM_UPDATE_NO
 
 | .PROC ForeColor,1
 | .DEF BackColor,PortLong,ColorBit,PortWord
@@ -268,7 +268,7 @@ L_mPortWord:
 |
 GetMaskTable:
         LEA.L   DT_mMaskTab(PC),A0              | POINT TO MASK TABLE
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from GetMaskTable
 
 | ----------------------------------------------------------
 |
@@ -283,7 +283,7 @@ LeftMask:
 | LeftMask
         ADD     D0,D0                           | DOUBLE FOR TABLE
         MOVE    DT_MMASKTAB_CONT(PC,D0.W),D0    | GET LEFTMASK
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from LeftMask
 
 | ----------------------------------------------------------
 |
@@ -298,7 +298,7 @@ RightMask:
 | RIGHTMASK
         ADD     D0,D0                           | DOUBLE FOR TABLE
         MOVE    DT_mMaskTab(PC,D0.W),D0         | GET RIGHT MASK
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from RightMask
 
 | ----------------------------------------------------------
 |
@@ -310,7 +310,7 @@ BitMask:
 | RTS
         ADD     D0,D0                           | DOUBLE FOR TABLE
         MOVE    DT_MMASKTAB_CONT_2(PC,D0.W),D0  | GET BITMASK
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from BitMask
 
 | ----------------------------------------------------------
 |
@@ -452,7 +452,7 @@ THINLP:
 PATEXPAND_DONE:
         MOVE.L  (SP)+,A4                        | DONE: RESTORE REG
         UNLK    A6                              | RELEASE STACK FRAME
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from PATEXPAND_DONE
 
 | ----------------------------------------------------------
 |
@@ -558,7 +558,7 @@ NEWMODE:
         MOVE    D3,0x1C(SP)                     | CHANGE INPUT MODE
 COLOROK:
         MOVEM.L (SP)+,D0-D3/A0                  | RESTORE REGS
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from COLOROK
 
 | .FUNC GetPixel,2
 | .REF HideCursor,ShowCursor
@@ -631,7 +631,7 @@ NEXTHEX:
         ADDI.B  #0x9,D0                         | ADD CORRECTION
 SMALL:
         ANDI.B  #0xF,D0                         | TREAT MOD 16 TO ALLOW LOWER CASE
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from SMALL
 
 | .PROC XorSlab
 | .REF MaskTab
@@ -704,7 +704,7 @@ XORSLAB_INVLONG_CONT:
         NOT     (A0)+                           | YES, DO LAST FULL WORD
 XORSLAB_ENDWORD:
         EOR     D6,(A0)                         | ENDWORD: XOR RIGHTMASK INTO BUFFER
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from XORSLAB_ENDWORD
 
 |
 | LOCAL ROUTINE TO GET NEXT HEX DIGIT AND CONVERT ASCII TO BINARY
@@ -775,7 +775,7 @@ DRAWSLAB_RIGHTOK:
 |
 | Called during boot.
 DONESLAB:
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from DONESLAB
 
 | ---------------------------------------------------------
 |
@@ -812,7 +812,7 @@ NEXT8:
 NEXT8_CONT:
         BGT.B   NEXT8                           | LOOP FOR ALL WORDS IN ROW
         BEQ.B   DRAWSLAB_END8                   | DO LAST WORD WITH MASK
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from NEXT8_CONT
 
 
 | -------------------------------------------------------
@@ -830,7 +830,7 @@ NEXT9:
 NEXT9_CONT:
         BGT.B   NEXT9                           | LOOP FOR ALL WORDS IN ROW
         BEQ.B   END9                            | DO LAST WORD WITH MASK
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from NEXT9_CONT
 
 
 | -------------------------------------------------------
@@ -848,7 +848,7 @@ NEXT10:
 NEXT10_CONT:
         BGT.B   NEXT10                          | LOOP FOR ALL WORDS IN ROW
         BEQ.B   END10                           | DO LAST WORD WITH MASK
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from NEXT10_CONT
 
 
 | -------------------------------------------------------
@@ -867,7 +867,7 @@ NEXT11:
 NEXT11_CONT:
         BGT.B   NEXT11                          | LOOP FOR ALL WORDS IN ROW
         BEQ.B   END11                           | DO LAST WORD WITH MASK
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from NEXT11_CONT
 
 | --------------------------------------------
 |
@@ -884,7 +884,7 @@ SlabMode:
         LEA.L   SLABMODE_MODE_TBL(PC),A4        | POINT TO MODE TABLE
         MOVE.B  0x0(A4,D2.W),D2                 | GET OFFSET FROM MODETAB
         SUB     D2,A4                           | GET CASE JUMP ADDRESS
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from SlabMode
 
 | ----------------------------------------------------------
 |
@@ -993,7 +993,7 @@ FastSlabMode:
         LEA.L   FASTSLABMODE_MODE_TBL(PC),A4    | POINT TO MODE TABLE
         MOVE.B  0x0(A4,D2.W),D2                 | GET OFFSET FROM FASTTAB
         SUB     D2,A4                           | GET CASE JUMP ADDRESS
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from FastSlabMode
 
 | ----------------------------------------------------------
 |

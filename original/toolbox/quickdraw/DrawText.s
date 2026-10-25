@@ -139,7 +139,7 @@ PICITEM_CONT:
         CLR.B   -(SP)                           | room for boolean result
         MOVE.L  24(A3),-(SP)                    | push visRgn handle
         PEA.L     -28(A6)                       | push @minRect
-        JSR     RectInRgn(PC)                   | visRgn intersect minRect rect?
+        JSR     TrimRect(PC)                    | visRgn intersect minRect rect?
         TST.B   (SP)+                           | boolean result
         BEQ.B   DRTEXT_NOTFAST                  | non-rect -> slow path
 STDTEXT_FAST_Y:
@@ -161,8 +161,8 @@ STDTEXT_FAST_X:
         MOVE    6(A3),-0x28(A6)                 | dstRow = portBits.rowBytes
         MOVE    10(A3),-0x2A(A6)                | dstLeft = portBits.left
         PEA.L     -28(A6)                       | push @minRect
-        MOVE.L  8(A3),-(SP)                     | REMEMBER WHERE BUFFER ENDS
-        JSR     DrawControls(PC)                | dispatch fast text rendering
+        MOVE.L  8(A3),-(SP)                     | push portBits.bounds.topLeft (offset)
+        JSR     ShieldCursor(PC)                | ShieldCursor(minRect, offset)
         BRA.B   CLRLOOP_CONT                    | done -> exit
 | Slow case: Setup for an off-screen buffer.
 | Calc bufLeft: (word-align to avoid shift)
@@ -379,7 +379,7 @@ CHARDONE:
         SUB     8(A2),D7                        | - kernMax = pen.h after string
         TST.B   -0x66(A6)                       | fastFlag set?
         BEQ.B   CKBOLD                          | slow path -> styling
-        JSR     FMQD_ShowCursor(PC)             | YES, RESTORE CURSOR
+        JSR     ShowCursor(PC)                  | YES, RESTORE CURSOR
         BRA.W   NOSHAD_EXIT                     | fast path done -> exit
 FORCE_STRDONE:
         CLR     20(A6)                          | zero count to abort loop
@@ -483,13 +483,13 @@ UL2:
         SUB     D7,D0                           | CLEAR X-BIT
         SUBQ.W  #0x1,D0                         | -1 for DBRA
         LSR     #0x4,D0                         | /16 -> word count
-        BRA.B   CLEAR_CKDDB_LOOP_DBF            | GO TO LOOP START
+        BRA.B   CHECKUL_CLEAR_DBF               | GO TO LOOP START
 
-| Clear checked disk block table
-CLEAR_CKDDB_LOOP:
+| clear the underline buffer
+CHECKUL_CLEAR_LOOP:
         CLR     -(A0)                           | ERASE SOME UNDERLINE
-CLEAR_CKDDB_LOOP_DBF:
-        DBRA    D0,CLEAR_CKDDB_LOOP             | LOOP ALL FULL WORDS
+CHECKUL_CLEAR_DBF:
+        DBRA    D0,CHECKUL_CLEAR_LOOP           | LOOP ALL FULL WORDS
         MOVE    D7,D0                           | SET SRC PTR TO END OF BUF2
         SUB     10(A3),D0                       | D0 = pen.h - portBits.left
         JSR     LeftMask(PC)                    | COMPUTE A MASK

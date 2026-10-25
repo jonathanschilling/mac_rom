@@ -701,7 +701,7 @@
 
 
 | Additional TERec field offsets (from MPW 1.0 TextEdit.h C struct):
-| teSelRect and teClikLoc are defined above — see the TERec block
+| teSelRect and teClikLoc are defined above -- see the TERec block
 | around line 303 for the canonical definitions.
 .equ teFontAsc, 0x1A                            | font ascent [word] (alias for teAscent)
 .equ teSelPt, 0x1C                              | selection point [Point] (alias for teSelPoint)

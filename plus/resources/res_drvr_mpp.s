@@ -1,2329 +1,2525 @@
-| DRVR 9 - .MPP (AppleTalk, Macintosh Packet Protocol) driver
+| DRVR 9 - .MPP (AppleTalk Macintosh Packet Protocol) driver
 | resource : 'DRVR' 9 '.MPP'
 |
-| Implements DDP (Datagram Delivery Protocol) and LAP (Link Access Protocol)
-| over the SCC serial port using LocalTalk framing.
+| LocalTalk link access (LAP) on SCC channel B (the printer port), DDP,
+| RTMP (network number and bridge only) and NBP.  Control calls (csCode -
+| 242 indexes E_MPP_CONTROL_DISPATCH_TBL, 250-255 go to the NBP code;
+| csCodes from MPW 1.0 ATalkEqu, parameter blocks Inside Macintosh
+| II-307..324):
+|   242 LookupReply   LOOKUPREPLY   (queued to itself by NIS_LISTENER)
+|   243 WriteLAP      WRITELAP      send a LAP frame
+|   244 DetachPH      DETACHPH      remove a LAP protocol handler
+|   245 AttachPH      ATTACHPH      install a LAP protocol handler
+|   246 WriteDDP      WRITEDDP      send a datagram
+|   247 CloseSkt      CLOSESKT      close a DDP socket
+|   248 OpenSkt       OPENSKT       open a DDP socket
+|   249 LoadNBP       LOADNBP       no-op (NBP is in ROM)
+|   250 ConfirmName   CONFIRMNAME   \
+|   251 LookupName    LOOKUPNAME     |
+|   252 RemoveName    REMOVENAME     | via NBP_DISPATCH
+|   253 RegisterName  REGISTERNAME   |
+|   254 KillNBP       KILLNBP        |
+|   255 UnloadNBP     UNLOADNBP     /
+| csCode 1 (killCode) returns at once.  csCode < 0 (goodbye kiss, sent
+| by _Launch because the driver has dNeedGoodbye) unlinks names-table
+| entries that lie in the application heap, then completes as UnloadNBP.
 |
-| Provides:
-| - DDP socket management (OpenSkt, CloseSkt, WriteDDP)
-| - NBP name registration/lookup (Register, Lookup, Confirm, Remove)
-| - LAP protocol handler installation
-| - SCC interrupt-driven packet receive/transmit
+| Receive path: LAP_RCVINT (SCC Rx interrupt) reads the LAP header and the
+| length word into the read header area (RHA) and jumps to the protocol
+| handler of the LAP type (DDP_RCVSHORT / DDP_RCVLONG for types 1 and 2),
+| which reads the DDP header and jumps to the listener of the destination
+| socket; handlers and listeners read the rest through READPACKET and
+| READREST (A4 -> LAP_READ_JT).  Transmit path: LAPWRITE (CSMA/CA with
+| lapRTS/lapCTS dialog, random backoff, synchronous; deferred to an
+| interrupt when the line is busy).  While interrupts are off, bytes
+| arriving on the modem port (SCC channel A, VIA PA7 = W/REQ) are saved on
+| the stack and handed to PollProc (as the disk driver does).
 |
-| Data structures:
-| ABusVars (low-memory global): AppleTalk state, node ID, socket table
-| MPPParamBlock: csCode dispatch for all protocol operations
+| MPP variables (ABusVars, $FC bytes; names as in Apple's later LAPvars /
+| vardefs sources):
+|   +$00 sysLAPAddr (node ID), +$01 RHA (toRHA, 24 bytes), +$19
+|   sysABridge (node of a bridge, 0 = none), +$1A sysNetNum, +$1C
+|   vSCCEnable (SR enabling SCC interrupts), +$1E atpVars (.ATP)
+|   +$22 4 LAP protocol types ($FF = free; 2 = longDDP, 1 = shortDDP)
+|   +$26 4 protocol handler addresses
+|   +$36 14 DDP socket numbers (0 = free; last = 1, the RTMP socket)
+|   +$44 14 socket listener addresses
+|   +$7C VBL task (MPP_VBLTASK, every 20 ticks)
+|   +$8A NRPtr: NBP code (NBP_DISPATCH), bit 31 = installed
+|   +$8E LookupPtr: lookup-reply code (LUCODE), bit 31 = NIS open
+|   +$92 NRVars: NBP variables ($47 bytes, see NBP_INIT)
+|   +$96 JDDPWrite: MPP_JDDPWRITE (+0 DDPWrite, +2 open socket)
+|   +$9A NTQueueHd: names table (list of names-table entries)
+|   +$9E LUQElPtr: lookup-reply parameter block/buffer ($98 bytes) + $1A
+|   LAP: +$A2 WDSPtr, +$A6 LAPWrtRtn, +$AA RandomSeed, +$AC DestNode,
+|   +$AD fLAPAdrValid, +$AE fGoodCTS, +$AF fAdrInUse, +$B0 fSendENQ,
+|   +$B1 VBLDeferCnt, +$B2 lbackOff, +$B3 backoff, +$B4 collsnHistory,
+|   +$B5 deferHistory, +$B6 deferTries, +$B7 collsnTries, +$B8
+|   BridgeTime, +$B9 abort-sequence delay, +$BA SaveA45, +$C2
+|   SaveDskRtn, +$C6 SavePS, +$CA SaveBIn, +$CE SaveBOut, +$D2
+|   SaveVects (3), +$DE SaveRegs (5), +$F2 VIA vBufA address, +$F6
+|   VSTData (6 SCC writes after a send; +$F7 = VDisTxRTS)
 |
-Driver_MPP:
-  .short 0x5C00                                 | drvrFlags (needsLock|needsTime|needsGoodbye)
+
+| resource header
+        .long   0xC0000FD6                      | ROM resource header: tag $C0, physical size $FD6 (8 + $FCE)
+        .long   0x00000064                      | relative handle: master pointer at ROM zone + $64
+_DRVR_9_.MPP:
+  .short 0x5C00                                 | drvrFlags: dNeedLock, dNeedGoodbye, dStatEnable, dCtlEnable
   .short 0x0000                                 | drvrDelay
   .short 0x0000                                 | drvrEMask
   .short 0x0000                                 | drvrMenu
-  .short 0x07FC                                 | drvrOpen offset
-  .short 0x0290                                 | drvrPrime offset
-  .short 0x001A                                 | drvrCtl offset
-  .short 0x0284                                 | drvrStatus offset
-  .short 0x0774                                 | drvrClose offset
+  .short 0x07FC                                 | drvrOpen offset: E_MPP_Open
+  .short 0x0290                                 | drvrPrime offset: E_MPP_Prime
+  .short 0x001A                                 | drvrCtl offset: E_MPP_Control
+  .short 0x0284                                 | drvrStatus offset: E_MPP_Status
+  .short 0x0774                                 | drvrClose offset: E_MPP_Close
   .byte 0x04                                    | drvrName length
 
 | Name
-  .ascii ".MPP"                                 | drvrName: driver name string
+  .ascii ".MPP"                                 | drvrName
 
 | end of Name
-  .byte 0x20,0x28,0x13                          | padding to word-align entry point
+  .byte 0x20,0x28,0x13                          | pad byte and two unreferenced bytes ($13 = 19 = the driver version set by Open)
 
-| .MPP Control: dispatch AppleTalk control calls
-| csCodes: 248=WriteDDP, 249=OpenSkt, 250=CloseSkt, 251=WriteLAP,
-| 252=SetSelfSend, 253=AttachPH, 254=DetachPH, 255=GetNodeAddr,
-| 256=Register, 257=Lookup, 258=Confirm, 259=Remove, 260=KillNBP
+| .MPP Control: A0 = parameter block, A1 = .MPP DCE.  Calls the
+| AtalkHk1 hook, then dispatches with A2 = MPP variables, D1.B =
+| csParam+0 (socket / protType / interval), A1 = csParam+2 (listener /
+| wdsPointer / handler / entityPtr / ntQElPtr), D3 = csCode - 242.
 E_MPP_Control:
-        MOVE.L  (AtalkHk1).w,D3                 | AppleTalk hook installed?
-        BLE.B   E_MPP_CONTROL_NO                | no ->
-        MOVE.L  D3,A2                           | A2 = hook proc
-        JSR     (A2)                            | call hook before dispatch
-E_MPP_CONTROL_NO:
-        MOVE.L  (ABusVars).w,A2                 | A2 = AppleTalk bus variables
-        MOVE.L  A2,D0                           | initialized?
-        BNE.B   E_MPP_CONTROL_OK                | yes ->
-        MOVEQ.L #-0x11,D0                       | ddpLenErr: not initialized
-        BRA     E_MPP_STATUS_ERR                | -> error exit
+        MOVE.L  (AtalkHk1).w,D3                 | AtalkHk1: AppleTalk hook
+        BLE.B   E_MPP_CONTROL_NOHOOK            | none (<= 0) ->
+        MOVE.L  D3,A2                           | A2 = hook routine
+        JSR     (A2)                            | call it
+E_MPP_CONTROL_NOHOOK:
+        MOVE.L  (ABusVars).w,A2                 | A2 = MPP variables
+        MOVE.L  A2,D0                           | .MPP open?
+        BNE.B   E_MPP_CONTROL_CSCODE            | yes ->
+        MOVEQ.L #-0x11,D0                       | controlErr (-17)
+        BRA     MPP_DONE_A1                     | -> IODone
 | dispatch on csCode
-E_MPP_CONTROL_OK:
+E_MPP_CONTROL_CSCODE:
         MOVE    0x1A(A0),D3                     | D3 = csCode
-        BMI.B   E_MPP_CONTROL_CONT              | negative: close/reopen ->
-| csCode 1 = KillIO (no-op for MPP)
+        BMI.B   E_MPP_CONTROL_GOODBYE           | negative: goodbye kiss ->
+| csCode 1 (killCode)
         SUBQ.W  #0x1,D3                         | csCode 1?
-        BNE.B   E_MPP_CONTROL_NO_2              | no ->
-        RTS                                     | KillIO: just return
-| validate csCode range (242-255 = MPP operations)
-E_MPP_CONTROL_NO_2:
-        MOVEQ.L #-0x11,D0                       | assume paramErr
-        SUBI    #0xF1,D3                        | D3 -= 242 (base MPP csCode - 1)
-        BLT     E_MPP_STATUS_ERR                | < 242: invalid ->
+        BNE.B   E_MPP_CONTROL_RANGE             | no ->
+        RTS                                     | KillIO: nothing to cancel, return
+| csCode must be 242..255
+E_MPP_CONTROL_RANGE:
+        MOVEQ.L #-0x11,D0                       | controlErr (-17) if out of range
+        SUBI    #0xF1,D3                        | D3 = csCode - 242 (after the -1 above)
+        BLT     MPP_DONE_A1                     | < 242 -> controlErr
         CMPI    #0xD,D3                         | > 255?
-        BGT     E_MPP_STATUS_ERR                | yes, invalid ->
-| set up common params and dispatch
-        MOVE.B  0x1C(A0),D1                     | D1 = socket number from csParam
-        MOVE.L  0x1E(A0),A1                     | A1 = data pointer from csParam
-        CMPI    #0x7,D3                         | DDP operation (0-7)?
-        BGT.B   E_MPP_CONTROL_NO_3              | no, NBP operation ->
-| dispatch DDP/LAP operations via jump table
-        LEA.L   E_MPP_CONTROL_DISPATCH_TBL(PC),A3 | DDP dispatch table
-        ADDA    D3,A3                           | index by csCode
-        ADDA    D3,A3                           | word offset
-        MOVE    (A3),A3                         | get relative offset
-        PEA.L   Driver_MPP(PC)                  | base address
-        ADDA.L  (SP)+,A3                        | absolute handler address
-        JMP     (A3)                            | dispatch
+        BGT     MPP_DONE_A1                     | yes -> controlErr
+| common arguments; 242..249 are resident, 250..255 are NBP calls
+        MOVE.B  0x1C(A0),D1                     | D1 = csParam+0
+        MOVE.L  0x1E(A0),A1                     | A1 = csParam+2
+        CMPI    #0x7,D3                         | csCode > 249?
+        BGT.B   E_MPP_CONTROL_NBP               | yes -> NBP code
+| 242..249 through the dispatch table
+        LEA.L   E_MPP_CONTROL_DISPATCH_TBL(PC),A3 | A3 = dispatch table
+        ADDA    D3,A3                           | + index
+        ADDA    D3,A3                           | (word entries)
+        MOVE    (A3),A3                         | offset from the driver start
+        PEA.L   _DRVR_9_.MPP(PC)                | driver start
+        ADDA.L  (SP)+,A3                        | A3 = handler
+        JMP     (A3)                            | -> handler
 
-| DDP dispatch table (offsets from Driver_MPP):
-| 0=WriteLAP, 1=AttachPH, 2=DetachPH, 3=WriteDDP,
-| 4=CloseSkt, 5=OpenSkt, 6=GetNodeAddr, 7=SetSelfSend
+| E_MPP_CONTROL_DISPATCH_TBL - csCode 242..249, offsets from _DRVR_9_.MPP
 E_MPP_CONTROL_DISPATCH_TBL:
-  .byte  0x00,0x96,0x02,0x72,0x02,0x5E          | WriteLAP=+150, AttachPH=+626, DetachPH=+606
-  .byte 0x02,0x2E,0x01,0x1E,0x01,0x00           | WriteDDP=+558, CloseSkt=+286, OpenSkt=+256
-  .byte 0x00,0xB6,0x00,0xA0                     | GetNodeAddr=+182, SetSelfSend=+160
-| negative csCode: call close/reopen hooks
-E_MPP_CONTROL_CONT:
-        MOVE.L  0x8E(A2),D1                     | close hook installed?
-        BPL.B   E_MPP_CONTROL_NO_3              | no ->
-        MOVE.L  D1,A3                           | A3 = close hook routine address
-        JSR     PORTBITS(A3)                    | call close hook
-| NBP operations: dispatch via NBP handler
-E_MPP_CONTROL_NO_3:
-        MOVE.L  0x8A(A2),D2                     | NBP handler installed?
-        BPL.B   E_MPP_CONTROL_NO_4              | no ->
-        MOVE.L  D2,A3                           | A3 = NBP handler routine address
-        JMP     (A3)                            | dispatch to NBP handler
+  .byte  0x00,0x96,0x02,0x72,0x02,0x5E          | 242 LookupReply $96, 243 WriteLAP $272, 244 DetachPH $25E
+  .byte 0x02,0x2E,0x01,0x1E,0x01,0x00           | 245 AttachPH $22E, 246 WriteDDP $11E, 247 CloseSkt $100
+  .byte 0x00,0xB6,0x00,0xA0                     | 248 OpenSkt $B6, 249 LoadNBP $A0
+| negative csCode (goodbye kiss): if the NIS is open, LUCODE+2 drops the
+| names in the application heap; then on to the NBP code (with D3 < 0)
+E_MPP_CONTROL_GOODBYE:
+        MOVE.L  0x8E(A2),D1                     | D1 = LookupPtr
+        BPL.B   E_MPP_CONTROL_NBP               | NIS not open ->
+        MOVE.L  D1,A3                           | A3 = LUCODE
+        JSR     0x2(A3)                         | NBP_DROPAPPLNAMES (via LUCODE_GOODBYE)
+| csCode 250..255 (and the goodbye kiss): to the NBP code via NRPtr
+E_MPP_CONTROL_NBP:
+        MOVE.L  0x8A(A2),D2                     | D2 = NRPtr
+        BPL.B   E_MPP_CONTROL_DONE              | NBP code not installed -> IODone (controlErr)
+        MOVE.L  D2,A3                           | A3 = NBP_DISPATCH
+        JMP     (A3)                            | -> NBP code
 
 | ----------------------------------------------------------
 |
-| E_MPP_CONTROL_CONT_2
+| LookupReply (csCode 242): issued by NIS_LISTENER (to this driver) for a
+| received LkUp packet; runs the lookup-reply code via LookupPtr
 |
-E_MPP_CONTROL_CONT_2:
-        MOVE.L  0x8E(A2),D2                     | close/reopen hook address
-        BPL.B   E_MPP_CONTROL_NO_4              | not installed ->
-        MOVE.L  D2,A3                           | A3 = hook procedure
-        JMP     (A3)                            | dispatch to close/reopen hook
+LOOKUPREPLY:
+        MOVE.L  0x8E(A2),D2                     | D2 = LookupPtr
+        BPL.B   E_MPP_CONTROL_DONE              | not installed -> IODone (controlErr)
+        MOVE.L  D2,A3                           | A3 = LUCODE
+        JMP     (A3)                            | -> LUCODE_REPLY -> NBP_LKUPREPLY
 
 | ----------------------------------------------------------
 |
-| E_MPP_CONTROL_CONT_3
+| LoadNBP (csCode 249): nothing to load in the ROM driver - noErr
 |
-E_MPP_CONTROL_CONT_3:
-        CLR     D0                              | noErr: operation succeeded
-E_MPP_CONTROL_NO_4:
-        BRA     E_MPP_STATUS_CONT               | -> IODone completion
+LOADNBP:
+        CLR     D0                              | noErr
+E_MPP_CONTROL_DONE:
+        BRA     MPP_DONE                        | -> IODone with D0
 
 | ----------------------------------------------------------
 |
-| E_MPP_CONTROL_CONT_4
+| MPP_INSTALLNBP: store NRPtr = NBP_DISPATCH (bit 31 set) and jump into
+| it; E_MPP_Open calls this with D3 = 7, i.e. NBP_INIT
 |
-E_MPP_CONTROL_CONT_4:
-        LEA.L   E_MPP_OPEN_DISPATCH_TBL(PC),A3  | A3 = NBP dispatch table
-        MOVE.L  A3,0x8A(A2)                     | install NBP handler in ABusVars
-        BSET    #0x7,0x8A(A2)                   | set high bit = handler valid
-        JMP     (A3)                            | jump into NBP dispatcher
+MPP_INSTALLNBP:
+        LEA.L   NBP_DISPATCH(PC),A3             | A3 = NBP code entry
+        MOVE.L  A3,0x8A(A2)                     | NRPtr
+        BSET    #0x7,0x8A(A2)                   | bit 31: NBP code installed
+        JMP     (A3)                            | -> NBP_DISPATCH
 
 | ----------------------------------------------------------
 |
 | OPENSKT
 |
-| OpenSkt (csCode 249): open a DDP socket
-| D1 = requested socket number (0 = dynamic assignment)
+| OpenSkt (csCode 248): socket = 1..127 to open that socket, 0 to get a
+| new one (128..254, returned in socket); listener = socket listener.
+| ddpSktErr if in use, >= 128 or the socket table (14 entries) is full.
 OPENSKT:
-        BSR.B   RETURNS                         | allocate DDP socket
-        MOVE.B  D1,0x1C(A0)                     | return assigned socket in csParam
-        BRA.B   E_MPP_CONTROL_DONE              | -> complete
+        BSR.B   MPP_OPENSOCKET                  | open socket D1, listener A1
+        MOVE.B  D1,0x1C(A0)                     | return the socket number
+        BRA.B   CLOSESKT_DONE                   | -> IODone with D0
 
 | ----------------------------------------------------------
 |
-| RETURNS: allocate a DDP socket
-| D1 = requested socket (0=dynamic, 1-254=specific)
-| Returns: D1 = assigned socket, D0 = error if failed
+| MPP_OPENSOCKET: enter socket D1 (0 = assign one) with listener A1 in the
+| socket table -> D1 = socket, D0 = noErr or ddpSktErr.  Uses D2.
+| Also called through JDDPWrite+2 (MPP_JOPENSOCKET) by the NBP code.
 |
-RETURNS:
-        MOVEQ.L #-0x5B,D0                       | ddpSktErr: assume socket error
+MPP_OPENSOCKET:
+        MOVEQ.L #-0x5B,D0                       | ddpSktErr (-91)
         MOVE    SR,-(SP)                        | save SR
-        MOVE    #0x2600,SR                      | raise IPL (critical section)
-        TST.B   D1                              | dynamic assignment?
-        BEQ.B   E_MPP_CONTROL_OK_2              | yes, find free ->
-        BMI.B   E_MPP_CONTROL_CONT_5            | invalid (negative) ->
-        BSR.B   RETURNS_2                       | check if specific socket available
-        BEQ.B   E_MPP_CONTROL_CONT_5            | already in use ->
-| find a free socket slot (scan 14 slots)
-E_MPP_CONTROL_OK_2:
-        MOVEQ.L #0xD,D2                         | 14 socket slots (0-13)
-E_MPP_CONTROL_LOOP:
-        TST.B   0x36(A2,D2.W)                   | slot available?
-        DBEQ    D2,E_MPP_CONTROL_LOOP           | try next
-        BNE.B   E_MPP_CONTROL_CONT_5            | all in use ->
-        TST.B   D1                              | specific socket requested?
-        BNE.B   E_MPP_CONTROL_OK_3              | yes, use it ->
-        BSR     RETURNS_5                       | generate pseudo-random number
-        ANDI.B  #0xF0,D0                        | keep high nibble as randomizer
-        OR.B    D2,D0                           | combine with slot index
-        BSET    #0x7,D0                         | set bit 7 (dynamic socket range)
-        MOVE.B  D0,D1                           | D1 = dynamically assigned socket
-E_MPP_CONTROL_OK_3:
-        MOVE.B  D1,0x36(A2,D2.W)                | store socket number in table slot
-        LSL     #0x2,D2                         | D2 *= 4 (long word index)
-        MOVE.L  A1,0x44(A2,D2.W)                | store socket listener in handler table
-        CLR     D0                              | noErr: socket opened
-E_MPP_CONTROL_CONT_5:
-        MOVE    (SP)+,SR                        | restore saved interrupt state
-        RTS                                     | return to caller
+        MOVE    #0x2600,SR                      | interrupts off (IPL 6)
+        TST.B   D1                              | socket 0?
+        BEQ.B   MPP_OPENSOCKET_FREE             | yes: assign one ->
+        BMI.B   MPP_OPENSOCKET_EXIT             | >= 128 -> ddpSktErr
+        BSR.B   MPP_FINDSKT                     | already open?
+        BEQ.B   MPP_OPENSOCKET_EXIT             | yes -> ddpSktErr
+| find a free entry in the socket table
+MPP_OPENSOCKET_FREE:
+        MOVEQ.L #0xD,D2                         | 14 entries
+MPP_OPENSOCKET_LOOP:
+        TST.B   0x36(A2,D2.W)                   | entry free?
+        DBEQ    D2,MPP_OPENSOCKET_LOOP          | no -> next
+        BNE.B   MPP_OPENSOCKET_EXIT             | table full -> ddpSktErr
+        TST.B   D1                              | socket given?
+        BNE.B   MPP_OPENSOCKET_STORE            | yes ->
+        BSR     MPP_RANDOM                      | D0 = random number
+        ANDI.B  #0xF0,D0                        | random high nibble
+        OR.B    D2,D0                           | entry number in the low nibble
+        BSET    #0x7,D0                         | 128..254 (dynamic sockets)
+        MOVE.B  D0,D1                           | D1 = new socket number
+MPP_OPENSOCKET_STORE:
+        MOVE.B  D1,0x36(A2,D2.W)                | socket number
+        LSL     #0x2,D2                         | long index
+        MOVE.L  A1,0x44(A2,D2.W)                | socket listener
+        CLR     D0                              | noErr
+MPP_OPENSOCKET_EXIT:
+        MOVE    (SP)+,SR                        | restore SR
+        RTS                                     | return from MPP_OPENSOCKET
 
 | ----------------------------------------------------------
 |
-| E_MPP_CONTROL_CONT_6: CloseSkt - close a DDP socket by number
+| CloseSkt (csCode 247): remove socket D1 from the socket table.
+| ddpSktErr if 0 or not open.
 |
-E_MPP_CONTROL_CONT_6:
-        MOVEQ.L #-0x5B,D0                       | ddpSktErr: assume socket error
-        TST.B   D1                              | socket number specified?
-        BEQ.B   E_MPP_CONTROL_DONE              | no, invalid ->
-        BSR.B   RETURNS_2                       | find socket in table
-        BNE.B   E_MPP_CONTROL_DONE              | not found ->
-        CLR.B   0x36(A2,D2.W)                   | clear socket from table (free slot)
-        CLR     D0                              | noErr: socket closed
-E_MPP_CONTROL_DONE:
-        BRA.B   E_MPP_CONTROL_NO_4              | -> IODone completion
-
-| ----------------------------------------------------------
-|
-| RETURNS_2: find socket D1 in socket table
-| Returns: D2 = slot index, Z flag set if found
-|
-RETURNS_2:
-        MOVEQ.L #0xD,D2                         | scan 14 socket slots (13..0)
-E_MPP_CONTROL_LOOP_2:
-        CMP.B   0x36(A2,D2.W),D1                | slot matches socket number?
-        DBEQ    D2,E_MPP_CONTROL_LOOP_2         | no, try next slot
-        RTS                                     | Z=1 if found, D2=slot index
-
-| ----------------------------------------------------------
-|
-| CLOSESKT
-|
-| CloseSkt (csCode 250): close a DDP socket
 CLOSESKT:
-        MOVE.B  0x1D(A0),D3                     | D3 = socket listener flag
-        BSR.B   E_MPP_CONTROL_CONT_7            | close the socket
-        BRA.B   E_MPP_CONTROL_DONE              | -> IODone
+        MOVEQ.L #-0x5B,D0                       | ddpSktErr (-91)
+        TST.B   D1                              | socket 0?
+        BEQ.B   CLOSESKT_DONE                   | yes -> ddpSktErr
+        BSR.B   MPP_FINDSKT                     | D2 = its entry
+        BNE.B   CLOSESKT_DONE                   | not open -> ddpSktErr
+        CLR.B   0x36(A2,D2.W)                   | free the entry
+        CLR     D0                              | noErr
+CLOSESKT_DONE:
+        BRA.B   E_MPP_CONTROL_DONE              | -> IODone with D0
 
 | ----------------------------------------------------------
 |
-| E_MPP_CONTROL_CONT_7: close DDP socket D1
+| MPP_FINDSKT: find socket D1 in the socket table -> EQ and D2 = entry if
+| found
 |
-E_MPP_CONTROL_CONT_7:
-        BRA.B   E_MPP_CONTROL_CONT_9            | -> close implementation
+MPP_FINDSKT:
+        MOVEQ.L #0xD,D2                         | 14 entries
+MPP_FINDSKT_LOOP:
+        CMP.B   0x36(A2,D2.W),D1                | this socket?
+        DBEQ    D2,MPP_FINDSKT_LOOP             | no -> next
+        RTS                                     | EQ = found
 
 | ----------------------------------------------------------
 |
-| E_MPP_CONTROL_CONT_8: SetSelfSend (csCode 252) - configure self-send mode
-| Reuses OpenSkt to register a loopback socket
+| WRITEDDP
 |
-E_MPP_CONTROL_CONT_8:
-        BRA.B   RETURNS                         | reuse OpenSkt socket allocator
+| WriteDDP (csCode 246): send the datagram described by the WDS at
+| wdsPointer from socket D1; checksumFlag = checksum long headers.
+WRITEDDP:
+        MOVE.B  0x1D(A0),D3                     | D3 = checksumFlag
+        BSR.B   MPP_JDDPWRITE                   | DDPWRITE
+        BRA.B   CLOSESKT_DONE                   | -> IODone with D0
 
 | ----------------------------------------------------------
 |
-| E_MPP_CONTROL_CONT_9
+| MPP_JDDPWRITE: JDDPWrite+0 (MPP variables +$96) - DDPWRITE
 |
-| E_MPP_CONTROL_CONT_9: close DDP socket - deregister and free slot
-E_MPP_CONTROL_CONT_9:
-        MOVEQ.L #-0x5B,D0                       | ddpSktErr
-        TST.B   D1                              | socket number valid?
-        BEQ.B   E_MPP_CONTROL_ERR               | zero: invalid ->
-        BSR.B   RETURNS_2                       | find socket in table -> A1
-        BNE.B   E_MPP_CONTROL_ERR               | not found ->
-| build DDP close packet
-        MOVE.L  A1,-(SP)                        | save socket table entry
-        ADDQ.W  #0x2,A1                         | skip socket number
-        MOVE.L  (A1)+,A3                        | A3 = socket listener record
-        ADDQ.W  #0x7,A3                         | point to DDP header area
-        MOVE.B  D1,0x7(A3)                      | set source socket in header
-        MOVE    (A3),D0                         | destination network number
-        BEQ.B   E_MPP_CONTROL_EMPTY_3           | zero: no close needed ->
-        CMP     0x1A(A2),D0                     | same network as ours?
-        BEQ.B   E_MPP_CONTROL_EMPTY_3           | yes ->
-| send close notification to remote network
-        MOVE    0x1A(A2),PORTBITS(A3)           | set source network number
-        MOVE.B  (A2),0x5(A3)                    | set source node ID
-        MOVE.B  0x4(A3),D1                      | dest socket from header
-        MOVE.L  A3,A0                           | A0 = packet data
-        CLR     -(A3)                           | clear packet header
-        TST.B   D3                              | listener flag?
-        BEQ.B   E_MPP_CONTROL_EMPTY_2           | no listener ->
-        MOVEQ.L #0x9,D0                         | DDP type 9 = close notification
-        CLR     D3                              | clear flag
-        BSR.B   E_MPP_CONTROL_CONT_10           | send close notification
-E_MPP_CONTROL_NEXT:
-        MOVE    (A1)+,D0                        | next data chunk length
-        BEQ.B   E_MPP_CONTROL_EMPTY             | zero = end of data list ->
-        MOVE.L  (A1)+,A0                        | A0 = chunk data pointer
-        BSR.B   E_MPP_CONTROL_CONT_10           | checksum this chunk
-        BRA.B   E_MPP_CONTROL_NEXT              | continue with next chunk
+MPP_JDDPWRITE:
+        BRA.B   DDPWRITE                        | -> DDPWRITE
 
 | ----------------------------------------------------------
 |
-| E_MPP_CONTROL_EMPTY
+| MPP_JOPENSOCKET: JDDPWrite+2 - MPP_OPENSOCKET
 |
-E_MPP_CONTROL_EMPTY:
-        MOVE    D3,(A3)                         | store running checksum
-        BNE.B   E_MPP_CONTROL_EMPTY_2           | non-zero ->
-        SUBQ.W  #0x1,(A3)                       | force checksum to -1 (0 = no cksum)
-E_MPP_CONTROL_EMPTY_2:
-        MOVEQ.L #0x2,D3                         | DDP type 2 = extended header
-        MOVEQ.L #0x10,D0                        | 16 bytes in extended DDP header
-        MOVE.B  0x19(A2),D2                     | D2 = bridge node (router)
-        BNE.B   E_MPP_CONTROL_NO_5              | have a router ->
-        MOVE.B  D1,D2                           | use dest node as next hop
-        TST     0x1A(A2)                        | our network number known?
-        BEQ.B   E_MPP_CONTROL_NO_5              | no, proceed anyway ->
-        MOVEQ.L #-0x5D,D0                       | ddpBadSkt: can't route without bridge
-        ADDQ.W  #0x4,SP                         | discard return address
-        RTS                                     | return error to caller
+MPP_JOPENSOCKET:
+        BRA.B   MPP_OPENSOCKET                  | -> MPP_OPENSOCKET
 
 | ----------------------------------------------------------
 |
-| E_MPP_CONTROL_CONT_10: DDP checksum - rotate-add D0 bytes from (A0) into D3
+| DDPWRITE
 |
-E_MPP_CONTROL_CONT_10:
-        MOVE.B  (A0)+,D2                        | fetch next data byte
-        ADD     D2,D3                           | add to running checksum
-        ROL     #0x1,D3                         | rotate left (CRC-like mixing)
-        SUBQ.W  #0x1,D0                         | decrement byte count
-        BNE.B   E_MPP_CONTROL_CONT_10           | more bytes ->
-E_MPP_CONTROL_ERR:
-        RTS                                     | return with checksum in D3
+| DDPWRITE: send a datagram.  A1 = WDS (first entry -> 16-byte header
+| area at an odd address: +7 dest net, +11 dest node, +13 dest socket,
+| +15 DDP type), D1 = source socket, D3.B = checksum flag.  Builds a
+| short header (dest net 0 or ours) or a long one, then LAPWRITE.
+| D0 = noErr, ddpSktErr, ddpLenErr or noBridgeErr.
+DDPWRITE:
+        MOVEQ.L #-0x5B,D0                       | ddpSktErr (-91)
+        TST.B   D1                              | socket 0?
+        BEQ.B   DDPWRITE_EXIT                   | yes -> ddpSktErr
+        BSR.B   MPP_FINDSKT                     | socket open?
+        BNE.B   DDPWRITE_EXIT                   | no -> ddpSktErr
+| complete the header in the first WDS entry
+        MOVE.L  A1,-(SP)                        | save the WDS pointer
+        ADDQ.W  #0x2,A1                         | skip the length of entry 1
+        MOVE.L  (A1)+,A3                        | A3 = header area
+        ADDQ.W  #0x7,A3                         | A3 -> +7 dest network
+        MOVE.B  D1,0x7(A3)                      | +14 source socket
+        MOVE    (A3),D0                         | D0 = dest network
+        BEQ.B   DDPWRITE_SHORT                  | 0 = this network -> short header
+        CMP     0x1A(A2),D0                     | = sysNetNum?
+        BEQ.B   DDPWRITE_SHORT                  | yes -> short header
+| long header: source network and node, optional checksum
+        MOVE    0x1A(A2),0x2(A3)                | +9 source network = sysNetNum
+        MOVE.B  (A2),0x5(A3)                    | +12 source node = sysLAPAddr
+        MOVE.B  0x4(A3),D1                      | D1 = dest node (+11)
+        MOVE.L  A3,A0                           | A0 -> checksummed part (from +7)
+        CLR     -(A3)                           | +5 ddpChecksum = 0
+        TST.B   D3                              | checksum wanted?
+        BEQ.B   DDPWRITE_LONG                   | no ->
+        MOVEQ.L #0x9,D0                         | 9 header bytes (+7..+15)
+        CLR     D3                              | checksum = 0
+        BSR.B   DDPWRITE_CHECKSUM               | add them
+DDPWRITE_CKSLOOP:
+        MOVE    (A1)+,D0                        | D0 = length of the next WDS entry
+        BEQ.B   DDPWRITE_CKSDONE                | 0 = end of WDS ->
+        MOVE.L  (A1)+,A0                        | A0 = its data
+        BSR.B   DDPWRITE_CHECKSUM               | add them
+        BRA.B   DDPWRITE_CKSLOOP                | next entry
 
 | ----------------------------------------------------------
 |
-| E_MPP_CONTROL_EMPTY_3: build short-form DDP header (same network, no routing)
+| DDPWRITE_CKSDONE
 |
-E_MPP_CONTROL_EMPTY_3:
-        MOVE.L  A3,A0                           | A0 = DDP header start
-        ADDQ.W  #0x8,A0                         | point past short header
-        MOVE.B  (A0),(A3)                       | copy DDP type byte
-        MOVE    -(A0),-(A3)                     | copy dest/src socket pair
-        SUBQ.W  #0x2,A0                         | back up to dest node
-        MOVE.B  (A0),D2                         | D2 = destination node
-        MOVEQ.L #0x1,D3                         | DDP type 1 = short header
-        MOVEQ.L #0x8,D0                         | 8 bytes in short DDP header
-E_MPP_CONTROL_NO_5:
-        MOVE.L  (SP)+,A1                        | restore socket table entry pointer
-        MOVE    D0,(A1)                         | store header length in data list
-        CLR     D1                              | D1 = total packet length accumulator
-        MOVE.L  A1,A0                           | A0 = scan pointer for data list
-E_MPP_CONTROL_NEXT_2:
-        TST     (A0)                            | end of data list?
-        BEQ.B   E_MPP_CONTROL_OK_4              | yes ->
-        BMI.B   E_MPP_CONTROL_ERR_2             | error marker ->
-        ADD     (A0),D1                         | accumulate chunk length
-        ADDQ.W  #0x6,A0                         | advance past length+pointer entry
-        BRA.B   E_MPP_CONTROL_NEXT_2            | scan next chunk
+| store the checksum (a computed 0 is sent as $FFFF)
+DDPWRITE_CKSDONE:
+        MOVE    D3,(A3)                         | ddpChecksum
+        BNE.B   DDPWRITE_LONG                   | not 0 ->
+        SUBQ.W  #0x1,(A3)                       | 0 -> $FFFF
+| LAP type longDDP; the frame goes to the bridge, if one is known
+DDPWRITE_LONG:
+        MOVEQ.L #0x2,D3                         | D3 = LAP type 2 (longDDP)
+        MOVEQ.L #0x10,D0                        | header entry: 3 LAP + 13 DDP bytes
+        MOVE.B  0x19(A2),D2                     | D2 = sysABridge
+        BNE.B   DDPWRITE_LENGTH                 | bridge known -> send to it
+        MOVE.B  D1,D2                           | else send to the dest node directly ...
+        TST     0x1A(A2)                        | ... when no network number is known
+        BEQ.B   DDPWRITE_LENGTH                 | sysNetNum = 0 ->
+        MOVEQ.L #-0x5D,D0                       | noBridgeErr (-93)
+        ADDQ.W  #0x4,SP                         | drop the WDS pointer
+        RTS                                     | return with the error
 
 | ----------------------------------------------------------
 |
-| E_MPP_CONTROL_OK_4: finalize DDP packet length and transmit
+| DDPWRITE_CHECKSUM: DDP checksum over D0 bytes at (A0)+ into D3
+| (add, rotate left one bit); D2 bits 15-8 must be clear
 |
-E_MPP_CONTROL_OK_4:
-        MOVE    D1,-(A3)                        | store total length in header
-        SUBQ.W  #0x3,(A3)                       | subtract 3 (LAP header not counted)
-        SUB     D0,D1                           | D1 = data length without header
-        CMPI    #0x24A,D1                       | exceeds max DDP data (586 bytes)?
-        BHI.B   E_MPP_CONTROL_ERR_2             | yes, packet too large ->
-        MOVE.B  D3,-(A3)                        | store LAP type byte in frame
-        SUBQ.W  #0x2,A3                         | back up past LAP dest/src
-        MOVE.B  D2,(A3)                         | store destination node ID
-        BRA     E_MPP_PRIME_CONT                | -> transmit LAP frame
+DDPWRITE_CHECKSUM:
+        MOVE.B  (A0)+,D2                        | next byte
+        ADD     D2,D3                           | add it
+        ROL     #0x1,D3                         | rotate left one bit
+        SUBQ.W  #0x1,D0                         | count
+        BNE.B   DDPWRITE_CHECKSUM               | loop
+DDPWRITE_EXIT:
+        RTS                                     | return from DDPWRITE_CHECKSUM / DDPWRITE
 
 | ----------------------------------------------------------
 |
-| E_MPP_CONTROL_ERR_2: DDP packet too large error
+| DDPWRITE_SHORT: short header - move dest socket, source socket and type
+| down to +5..+7 (over the high byte of the dest network); LAP
+| destination = dest node, LAP type shortDDP
 |
-E_MPP_CONTROL_ERR_2:
-        MOVEQ.L #-0x5C,D0                       | ddpLenErr: packet exceeds max size
-        BRA.B   E_MPP_CONTROL_ERR               | -> return error
+DDPWRITE_SHORT:
+        MOVE.L  A3,A0                           | A0 -> +7
+        ADDQ.W  #0x8,A0                         | A0 -> +15 DDP type
+        MOVE.B  (A0),(A3)                       | +7 = DDP type (sDDPType)
+        MOVE    -(A0),-(A3)                     | +5/+6 = dest/source socket (from +13/+14)
+        SUBQ.W  #0x2,A0                         | A0 -> +11
+        MOVE.B  (A0),D2                         | D2 = dest node
+        MOVEQ.L #0x1,D3                         | D3 = LAP type 1 (shortDDP)
+        MOVEQ.L #0x8,D0                         | header entry: 3 LAP + 5 DDP bytes
+| total length from the WDS
+DDPWRITE_LENGTH:
+        MOVE.L  (SP)+,A1                        | A1 = WDS
+        MOVE    D0,(A1)                         | length of entry 1 = header size
+        CLR     D1                              | D1 = total length
+        MOVE.L  A1,A0                           | A0 -> first entry
+DDPWRITE_LENLOOP:
+        TST     (A0)                            | length 0 = end?
+        BEQ.B   DDPWRITE_SEND                   | yes ->
+        BMI.B   DDPWRITE_LENERR                 | negative -> ddpLenErr
+        ADD     (A0),D1                         | add the length
+        ADDQ.W  #0x6,A0                         | next entry (6 bytes)
+        BRA.B   DDPWRITE_LENLOOP                | loop
 
 | ----------------------------------------------------------
 |
-| E_MPP_CONTROL_CONT_11: receive handler for extended DDP packets (type 2)
-| Reads extended DDP header (11 additional bytes after LAP)
+| DDPWRITE_SEND: ddpLength, LAP type and destination, then LAPWRITE
 |
-E_MPP_CONTROL_CONT_11:
-        MOVEQ.L #0xB,D3                         | 11 bytes in extended DDP header body
-        MOVE    0x1A(A2),D2                     | D2 = our network number
-        JSR     (A4)                            | read header bytes from SCC
-        BNE.B   E_MPP_CONTROL_ERR               | receive error ->
-        CMP     0x8(A2),D2                      | dest network matches ours?
-        BEQ.B   E_MPP_CONTROL_OK_5              | yes, deliver to socket ->
-        BRA.B   E_MPP_CONTROL_NO_6              | wrong network, discard ->
+DDPWRITE_SEND:
+        MOVE    D1,-(A3)                        | +3 length word = total
+        SUBQ.W  #0x3,(A3)                       | - LAP header = datagram length
+        SUB     D0,D1                           | D1 = data length
+        CMPI    #0x24A,D1                       | > ddpMaxData (586)?
+        BHI.B   DDPWRITE_LENERR                 | yes -> ddpLenErr
+        MOVE.B  D3,-(A3)                        | +2 lapType
+        SUBQ.W  #0x2,A3                         | A3 -> +0
+        MOVE.B  D2,(A3)                         | +0 lapDstAdr (+1 lapSrcAdr: set by LAP_SENDFRAME)
+        BRA     LAPWRITE                        | send the frame (A1 = WDS)
 
 | ----------------------------------------------------------
 |
-| E_MPP_CONTROL_CONT_12: receive handler for short DDP packets (type 1)
-| Reads 3 bytes: length, dest socket, src socket
+| DDPWRITE_LENERR: datagram too long
 |
-E_MPP_CONTROL_CONT_12:
-        MOVEQ.L #0x3,D3                         | 3 bytes in short DDP header body
-        JSR     (A4)                            | read header bytes from SCC
-        BNE.B   E_MPP_CONTROL_ERR               | receive error ->
-| E_MPP_CONTROL_OK_5: dispatch received DDP packet to socket listener
-E_MPP_CONTROL_OK_5:
-        MOVEQ.L #0xD,D2                         | scan 14 socket table slots
-        MOVE.B  -0x3(A3),D0                     | D0 = destination socket number
-        BEQ.B   E_MPP_CONTROL_NO_6              | socket 0 = invalid ->
-E_MPP_CONTROL_LOOP_3:
-        CMP.B   0x36(A2,D2.W),D0                | match socket in table?
-        DBEQ    D2,E_MPP_CONTROL_LOOP_3         | no, try next slot
-        BNE.B   E_MPP_CONTROL_NO_6              | socket not registered ->
-        LSL     #0x2,D2                         | D2 *= 4 (long word index)
-        MOVE.L  0x44(A2,D2.W),A5                | A5 = socket listener handler
-        JMP     (A5)                            | dispatch to socket listener
+DDPWRITE_LENERR:
+        MOVEQ.L #-0x5C,D0                       | ddpLenErr (-92)
+        BRA.B   DDPWRITE_EXIT                   | -> return
 
 | ----------------------------------------------------------
 |
-| E_MPP_CONTROL_NO_6: discard packet - flush remaining SCC data
+| DDP_RCVLONG: protocol handler of LAP type 2 (longDDP).  Reads the other
+| 11 header bytes into the RHA; delivers only datagrams for our network.
 |
-E_MPP_CONTROL_NO_6:
-        JMP     0x2(A4)                         | jump to SCC flush/abort receive
+DDP_RCVLONG:
+        MOVEQ.L #0xB,D3                         | 11 bytes (13-byte header, length already read)
+        MOVE    0x1A(A2),D2                     | D2 = sysNetNum
+        JSR     (A4)                            | ReadPacket
+        BNE.B   DDPWRITE_EXIT                   | error -> return
+        CMP     0x8(A2),D2                      | ddpDstNet (RHA+7) = our network?
+        BEQ.B   DDP_RCVSOCKET                   | yes -> to the socket listener
+        BRA.B   DDP_RCVDISCARD                  | no -> drop
 
 | ----------------------------------------------------------
 |
-| E_MPP_CONTROL_CONT_13: receive AARP (AppleTalk Address Resolution Protocol) packet
-| Validates AARP hardware type, extracts network number
+| DDP_RCVSHORT: protocol handler of LAP type 1 (shortDDP).  Reads the
+| other 3 header bytes (dest socket, source socket, type) into the RHA.
 |
-E_MPP_CONTROL_CONT_13:
-        SUBQ.B  #0x1,-(A3)                      | decrement remaining LAP bytes
-        BNE.B   E_MPP_CONTROL_NO_6              | not AARP type -> discard
-        MOVEQ.L #0x4,D3                         | read 4 AARP header bytes
-        JSR     0x2(A4)                         | receive from SCC
-        BNE.B   E_MPP_CONTROL_ERR_3             | error ->
-        MOVE.B  -(A3),D2                        | D2 = sender's node ID
-        SUBQ.B  #0x8,-(A3)                      | check hardware type (8 = Ethernet)
-        BNE.B   E_MPP_CONTROL_ERR_3             | wrong hw type -> ignore
-        MOVE.B  D2,0x19(A2)                     | store bridge/router node ID
-        ST.B    0xB8(A2)                        | set AARP response received flag
-        MOVE    -(A3),0x1A(A2)                  | store our network number from AARP
-E_MPP_CONTROL_ERR_3:
-        RTS                                     | return to interrupt handler
+DDP_RCVSHORT:
+        MOVEQ.L #0x3,D3                         | 3 bytes (5-byte header, length already read)
+        JSR     (A4)                            | ReadPacket
+        BNE.B   DDPWRITE_EXIT                   | error -> return
+| DDP_RCVSOCKET: jump to the listener of the destination socket (D0)
+DDP_RCVSOCKET:
+        MOVEQ.L #0xD,D2                         | 14 socket table entries
+        MOVE.B  -0x3(A3),D0                     | D0 = destination socket (3 bytes before A3)
+        BEQ.B   DDP_RCVDISCARD                  | socket 0 -> drop
+DDP_RCVSOCKET_LOOP:
+        CMP.B   0x36(A2,D2.W),D0                | this socket?
+        DBEQ    D2,DDP_RCVSOCKET_LOOP           | no -> next
+        BNE.B   DDP_RCVDISCARD                  | not open -> drop
+        LSL     #0x2,D2                         | long index
+        MOVE.L  0x44(A2,D2.W),A5                | A5 = socket listener
+        JMP     (A5)                            | -> listener
 
 | ----------------------------------------------------------
 |
-| E_MPP_CONTROL_CONT_14: AttachPH - install a LAP protocol handler
-| D1 = LAP type, A1 = handler address
+| DDP_RCVDISCARD: drop the packet - ReadRest with D3 = 0 (left 0 by the
+| successful ReadPacket)
 |
-E_MPP_CONTROL_CONT_14:
-        MOVEQ.L #-0x5E,D0                       | lapProtErr: assume protocol error
-        TST.B   D1                              | LAP type valid (> 0)?
-        BLE.B   E_MPP_CONTROL_ERR_4             | no, invalid ->
-        BSR.B   RETURNS_3                       | check if type already registered
-        BEQ.B   E_MPP_CONTROL_ERR_4             | already attached -> error
-        MOVEQ.L #0x3,D2                         | scan 4 LAP handler slots (3..0)
-E_MPP_CONTROL_LOOP_4:
-        LEA.L   0x22(A2,D2.W),A3                | A3 -> LAP type slot
-        TST.B   (A3)                            | slot empty ($FF = empty)?
-        DBMI    D2,E_MPP_CONTROL_LOOP_4         | not empty, try next
-        BPL.B   E_MPP_CONTROL_ERR_4             | all slots full -> error
-        LSL     #0x2,D2                         | D2 *= 4 (handler table index)
-        MOVE.L  A1,0x26(A2,D2.W)                | install handler address
-        MOVE.B  D1,(A3)                         | register LAP type in slot
-E_MPP_CONTROL_EXIT:
-        CLR     D0                              | noErr: handler attached
-E_MPP_CONTROL_ERR_4:
-        BRA.B   E_MPP_STATUS_CONT               | -> IODone completion
+DDP_RCVDISCARD:
+        JMP     0x2(A4)                         | ReadRest: discard the rest, return to MPP
 
 | ----------------------------------------------------------
 |
-| RETURNS_3: find LAP protocol handler for type D1
-| Returns: Z=1 if found, D2 = slot index
+| RTMP_LISTENER: listener of socket 1 (RTMP).  From an RTMP data packet
+| (DDP type 1) it takes the network number and the router's node ID
+| (ID length 8): sysNetNum, sysABridge, BridgeTime = 255 (aged by
+| MPP_VBLTASK).  The RTMP header is read over the DDP type byte, so the
+| network number lands word aligned.
 |
-RETURNS_3:
-        MOVEQ.L #0x3,D2                         | scan 4 LAP handler slots (3..0)
-E_MPP_CONTROL_LOOP_5:
-        CMP.B   0x22(A2,D2.W),D1                | slot matches LAP type?
-        DBEQ    D2,E_MPP_CONTROL_LOOP_5         | no, try next
-        RTS                                     | Z=1 if found
+RTMP_LISTENER:
+        SUBQ.B  #0x1,-(A3)                      | A3 back to the DDP type byte: type 1 (RTMP data)?
+        BNE.B   DDP_RCVDISCARD                  | no -> drop
+        MOVEQ.L #0x4,D3                         | 4 bytes: network, ID length, ID
+        JSR     0x2(A4)                         | ReadRest
+        BNE.B   RTMP_LISTENER_EXIT              | error -> return
+        MOVE.B  -(A3),D2                        | D2 = router node ID (rtmpID)
+        SUBQ.B  #0x8,-(A3)                      | rtmpIDLen = 8 bits?
+        BNE.B   RTMP_LISTENER_EXIT              | no -> ignore
+        MOVE.B  D2,0x19(A2)                     | sysABridge = router node
+        ST.B    0xB8(A2)                        | BridgeTime = 255 VBL periods
+        MOVE    -(A3),0x1A(A2)                  | sysNetNum = rtmpNet
+RTMP_LISTENER_EXIT:
+        RTS                                     | return to MPP
 
 | ----------------------------------------------------------
 |
-| E_MPP_CONTROL_CONT_15: DetachPH - remove a LAP protocol handler
-| D1 = LAP type to detach
+| AttachPH (csCode 245): enter protocol handler handler for LAP type
+| protType (1..127) in the protocol table.  lapProtErr if invalid,
+| already attached or the table (4 entries, 2 used by DDP) is full.
 |
-E_MPP_CONTROL_CONT_15:
-        MOVEQ.L #-0x5E,D0                       | lapProtErr: assume not found
-        MOVEQ.L #0x3,D2                         | scan 4 LAP handler slots
-E_MPP_CONTROL_LOOP_6:
-        CMP.B   0x22(A2,D2.W),D1                | slot matches LAP type?
-        DBEQ    D2,E_MPP_CONTROL_LOOP_6         | no, try next
-        BNE.B   E_MPP_CONTROL_ERR_4             | not found -> error
-        ST.B    0x22(A2,D2.W)                   | mark slot as empty ($FF)
-        BRA.B   E_MPP_CONTROL_EXIT              | -> return noErr
+ATTACHPH:
+        MOVEQ.L #-0x5E,D0                       | lapProtErr (-94)
+        TST.B   D1                              | protType 1..127?
+        BLE.B   ATTACHPH_DONE                   | no -> lapProtErr
+        BSR.B   MPP_FINDPH                      | already attached?
+        BEQ.B   ATTACHPH_DONE                   | yes -> lapProtErr
+        MOVEQ.L #0x3,D2                         | 4 entries
+ATTACHPH_LOOP:
+        LEA.L   0x22(A2,D2.W),A3                | A3 -> protocol type of the entry
+        TST.B   (A3)                            | free ($FF)?
+        DBMI    D2,ATTACHPH_LOOP                | no -> next
+        BPL.B   ATTACHPH_DONE                   | table full -> lapProtErr
+        LSL     #0x2,D2                         | long index
+        MOVE.L  A1,0x26(A2,D2.W)                | protocol handler
+        MOVE.B  D1,(A3)                         | protocol type
+ATTACHPH_NOERR:
+        CLR     D0                              | noErr
+ATTACHPH_DONE:
+        BRA.B   MPP_DONE                        | -> IODone with D0
 
 | ----------------------------------------------------------
 |
-| E_MPP_CONTROL_CONT_16: WriteLAP - send a raw LAP frame
-| A1+2 = pointer to LAP write data structure
+| MPP_FINDPH: find LAP type D1 in the protocol table -> EQ and D2 =
+| entry if found
 |
-E_MPP_CONTROL_CONT_16:
-        MOVE.L  0x2(A1),A0                      | A0 = LAP write data pointer
-        MOVEQ.L #-0x5E,D0                       | lapProtErr: assume protocol error
-        TST.B   0x2(A0)                         | LAP type valid (> 0)?
-        BLE.B   E_MPP_CONTROL_ERR_4             | no -> error
-        MOVE.B  (A0),D2                         | D2 = destination node for LAP frame
-        BSR.B   E_MPP_PRIME_CONT                | transmit LAP frame
-        BRA.B   E_MPP_STATUS_CONT               | -> IODone completion
+MPP_FINDPH:
+        MOVEQ.L #0x3,D2                         | 4 entries
+MPP_FINDPH_LOOP:
+        CMP.B   0x22(A2,D2.W),D1                | this type?
+        DBEQ    D2,MPP_FINDPH_LOOP              | no -> next
+        RTS                                     | EQ = found
+
+| ----------------------------------------------------------
+|
+| DetachPH (csCode 244): remove LAP type protType from the protocol
+| table.  lapProtErr if not attached.
+|
+DETACHPH:
+        MOVEQ.L #-0x5E,D0                       | lapProtErr (-94)
+        MOVEQ.L #0x3,D2                         | 4 entries
+DETACHPH_LOOP:
+        CMP.B   0x22(A2,D2.W),D1                | this type?
+        DBEQ    D2,DETACHPH_LOOP                | no -> next
+        BNE.B   ATTACHPH_DONE                   | not attached -> lapProtErr
+        ST.B    0x22(A2,D2.W)                   | entry free ($FF)
+        BRA.B   ATTACHPH_NOERR                  | -> IODone, noErr
+
+| ----------------------------------------------------------
+|
+| WriteLAP (csCode 243): send the frame described by the WDS at
+| wdsPointer (first entry: lapDstAdr, lapSrcAdr filled in, lapType
+| 1..127, then the data).  lapProtErr, excessCollsns.
+|
+WRITELAP:
+        MOVE.L  0x2(A1),A0                      | A0 = first WDS entry (LAP header)
+        MOVEQ.L #-0x5E,D0                       | lapProtErr (-94)
+        TST.B   0x2(A0)                         | lapType 1..127?
+        BLE.B   ATTACHPH_DONE                   | no -> lapProtErr
+        MOVE.B  (A0),D2                         | D2 = lapDstAdr
+        BSR.B   LAPWRITE                        | send it (A1 = WDS)
+        BRA.B   MPP_DONE                        | -> IODone with D0
 
 | ----------------------------------------------------------
 |
 | E_MPP_Status
 |
-| .MPP Status: not implemented (returns statusErr)
+| .MPP Status: no status calls - statusErr
 E_MPP_Status:
         MOVEQ.L #-0x12,D0                       | statusErr (-18)
-E_MPP_STATUS_CONT:
-        MOVE.L  (ABusVars_dce).w,A1             | DCE for IODone
-E_MPP_STATUS_ERR:
-        MOVE.L  (JIODone).w,-(SP)               | JIODone vector
-        RTS                                     | -> IODone
+| MPP_DONE / MPP_DONE_A1: IODone with D0 (A1 = .MPP DCE from AbusDCE /
+| already in A1)
+MPP_DONE:
+        MOVE.L  (ABusVars_dce).w,A1             | A1 = .MPP DCE (AbusDCE)
+MPP_DONE_A1:
+        MOVE.L  (JIODone).w,-(SP)               | push the IODone vector
+        RTS                                     | -> IODone (completes the current call)
 
 | ----------------------------------------------------------
 |
-| .MPP Prime: not implemented (clear busy, return)
+| .MPP Prime: not supported - clear drvrActive and return without
+| completing the call
 |
 E_MPP_Prime:
-        BCLR    #0x7,0x5(A1)                    | clear DCE busy flag
-        RTS                                     | return to caller
+        BCLR    #0x7,0x5(A1)                    | dCtlFlags: clear drvrActive
+        RTS                                     | return from E_MPP_Prime
 
 | ----------------------------------------------------------
 |
-| E_MPP_PRIME_CONT
+| LAPWRITE
 |
-| E_MPP_PRIME_CONT: set up LocalTalk transmit - begin LAP frame assembly
-| A1 = data pointer, D2 = LAP type byte
-E_MPP_PRIME_CONT:
-        CLR.B   0xB0(A2)                        | clear transmit state
-        MOVE.L  A1,0xA2(A2)                     | save data pointer
-| E_MPP_PRIME_CONT_2: common transmit entry - set up collision backoff
-E_MPP_PRIME_CONT_2:
-        MOVE.L  (SP)+,0xA6(A2)                  | save return address for completion
-        MOVE.L  (ATalkHk2).w,D3                 | transmit hook installed?
-        BLE.B   E_MPP_PRIME_NO                  | no ->
-        MOVE.L  D3,A3                           | A3 = transmit hook routine address
-        JSR     (A3)                            | call transmit hook
-E_MPP_PRIME_NO:
-        MOVE.B  D2,0xAC(A2)                     | save LAP type
-| collision backoff: CSMA/CA with random exponential backoff
-        LEA.L   0xB3(A2),A3                     | A3 = collision state
-        MOVE.B  (A3)+,D3                        | D3 = backoff counter
-        MOVE.B  (A3),D2                         | D2 = collision history byte
-        ADD.B   D2,(A3)+                        | shift collision history
-        BSR.B   E_MPP_PRIME_CONT_3              | count collisions in history
-        BLE.B   E_MPP_PRIME_CONT_4              | few collisions ->
-| many collisions: increase backoff interval
-        ADD.B   D3,D3                           | double backoff
-        ADDQ.B  #0x1,D3                         | + 1
-        ANDI    #0xF,D3                         | clamp to 15 slots
-        CLR.B   -0x1(A3)                        | clear collision history
-        BRA.B   E_MPP_PRIME_CONT_5              | -> start backoff timer
+| LAPWRITE: send a LocalTalk frame.  A1 = WDS (first entry: frame header),
+| D2 = destination node ($FF = broadcast).  The return address is kept in
+| LAPWrtRtn and the write ends with a jump there (D0 = noErr or
+| excessCollsns); when the line is busy the call returns to the caller's
+| caller at once and the write resumes later from LAP_EXTINT or
+| MPP_VBLTASK.  Each attempt: random wait (lbackOff), inter-dialog gap,
+| sync pulse, lapRTS (lapENQ when fSendENQ is set) to D2, wait for lapCTS
+| (none for a broadcast), then the data frame (LAP_SENDFRAME).
+LAPWRITE:
+        CLR.B   0xB0(A2)                        | fSendENQ = 0: a data frame
+        MOVE.L  A1,0xA2(A2)                     | WDSPtr = WDS
+| LAPWRITE_ENQ: entry used to send an ENQ (fSendENQ set by the caller)
+LAPWRITE_ENQ:
+        MOVE.L  (SP)+,0xA6(A2)                  | LAPWrtRtn = return address
+        MOVE.L  (ATalkHk2).w,D3                 | AtalkHk2: AppleTalk hook
+        BLE.B   LAPWRITE_NOHOOK                 | none (<= 0) ->
+        MOVE.L  D3,A3                           | A3 = hook routine
+        JSR     (A3)                            | call it
+LAPWRITE_NOHOOK:
+        MOVE.B  D2,0xAC(A2)                     | DestNode
+| adapt the global backoff mask to the collision/deferral history
+        LEA.L   0xB3(A2),A3                     | A3 -> backoff
+        MOVE.B  (A3)+,D3                        | D3 = backoff (global mask)
+        MOVE.B  (A3),D2                         | D2 = collsnHistory
+        ADD.B   D2,(A3)+                        | collsnHistory << 1 (one send older)
+        BSR.B   LAP_COUNTBITS                   | collisions in the last 8 sends - 2
+        BLE.B   LAPWRITE_DEFERS                 | 2 or fewer -> look at the deferrals
+| more than 2 collisions: double the mask
+        ADD.B   D3,D3                           | backoff * 2 ...
+        ADDQ.B  #0x1,D3                         | ... + 1
+        ANDI    #0xF,D3                         | at most $F
+        CLR.B   -0x1(A3)                        | collsnHistory = 0
+        BRA.B   LAPWRITE_INIT                   | ->
 
 | ----------------------------------------------------------
 |
-| E_MPP_PRIME_CONT_3: count set bits in D2 (collision frequency estimator)
-| Returns D0 = bit count - 2 (positive = many collisions)
+| LAP_COUNTBITS: D0 = (number of 1 bits in D2.B) - 2, condition codes set
+| (GT = 3 or more).  Uses D1.
 |
-E_MPP_PRIME_CONT_3:
-        MOVEQ.L #0x0,D0                         | D0 = bit counter
-        MOVEQ.L #0x7,D1                         | 8 bits to test
-E_MPP_PRIME_LOOP:
+LAP_COUNTBITS:
+        MOVEQ.L #0x0,D0                         | count = 0
+        MOVEQ.L #0x7,D1                         | 8 bits
+LAP_COUNTBITS_LOOP:
         BTst    D1,D2                           | bit set?
-        BEQ.B   E_MPP_PRIME_NO_2                | no ->
+        BEQ.B   LAP_COUNTBITS_NEXT              | no ->
         ADDQ.W  #0x1,D0                         | count it
-E_MPP_PRIME_NO_2:
-        DBF     D1,E_MPP_PRIME_LOOP             | loop through all LAP entries
-        SUBQ.B  #0x2,D0                         | threshold: > 2 = heavy traffic
-        RTS                                     | return to caller
+LAP_COUNTBITS_NEXT:
+        DBF     D1,LAP_COUNTBITS_LOOP           | next bit
+        SUBQ.B  #0x2,D0                         | - 2
+        RTS                                     | return from LAP_COUNTBITS
 
 | ----------------------------------------------------------
 |
-| E_MPP_PRIME_CONT_4: few recent collisions - try reducing backoff
+| LAPWRITE_DEFERS: few collisions - halve the mask when fewer than 2 of
+| the last 8 sends were deferred (deferHistory then set to $FF)
 |
-E_MPP_PRIME_CONT_4:
-        MOVE.B  (A3),D2                         | D2 = recent collision history
-        BSR.B   E_MPP_PRIME_CONT_3              | count collisions
-        BGE.B   E_MPP_PRIME_CONT_5              | still moderate traffic ->
-        LSR.B   #0x1,D3                         | halve backoff (channel is quiet)
-        ST.B    (A3)                            | reset collision history
-| E_MPP_PRIME_CONT_5: begin CSMA/CA transmit attempt with computed backoff
-E_MPP_PRIME_CONT_5:
-        MOVE.B  (A3),D2                         | D2 = collision history byte
-        ADD.B   D2,(A3)+                        | shift history, advance pointer
-        MOVEQ.L #0x20,D0                        | 32 = max inter-frame delay slots
-        MOVE.B  D0,(A3)+                        | store retry limit (32 attempts)
-        MOVE.B  D0,(A3)                         | store second retry limit
-        SUBQ.W  #0x5,A3                         | rewind to backoff counter fields
-        MOVE.B  D3,(A3)+                        | store backoff count (primary)
-        MOVE.B  D3,(A3)+                        | store backoff count (secondary)
-        MOVEM.L (SCCRd).w,A0-A1                 | A0=SCC read base, A1=SCC write base
-| E_MPP_PRIME_LOOP_2: CSMA/CA transmit loop - sense carrier, backoff, transmit
-E_MPP_PRIME_LOOP_2:
-        MOVE    SR,-(SP)                        | save SR for restore on collision
-E_MPP_PRIME_RETRY:
-        MOVE    D0,D3                           | D3 = remaining inter-frame slots
-        BTST    #0x4,(A0)                       | SCC RR0 bit 4: DCD (carrier detect)
-        BEQ.B   E_MPP_PRIME_CONT_7              | carrier present -> defer
-        BSR     RETURNS_5                       | generate random backoff delay
-        AND.B   0xB2(A2),D0                     | mask with backoff window
-        ANDI    #0xF,D0                         | clamp to 0-15 slot times
-        MOVE    D0,D3                           | D3 = random backoff count
-        BEQ.B   E_MPP_PRIME_EMPTY               | zero wait -> go ahead
-E_MPP_PRIME_CONT_6:
-        BSR.B   RETURNS_4                       | wait one slot time, check carrier
-        BEQ.B   E_MPP_PRIME_CONT_7              | carrier appeared -> defer
-        SUBQ.W  #0x1,D0                         | decrement wait counter
-        BNE.B   E_MPP_PRIME_CONT_6              | more slots to wait ->
-| E_MPP_PRIME_EMPTY: channel idle - begin transmit sequence
-E_MPP_PRIME_EMPTY:
-        MOVE    #0x2600,SR                      | raise IPL (no interrupts during TX)
-        MOVE.B  #0xE,(A1)                       | SCC WR14: enter DPLL search mode
-        MOVEQ.L #0x3,D0                         | 3 additional CTS checks
-        ADDQ.W  #0x3,D3                         | add to collision counter
-        MOVE.B  #0x41,(A1)                      | SCC WR14: enable DPLL + BR gen
-E_MPP_PRIME_LOOP_3:
-        BSR.B   RETURNS_4                       | wait one slot, check CTS
-        DBEQ    D0,E_MPP_PRIME_LOOP_3           | loop until CTS or timeout
-| E_MPP_PRIME_CONT_7: check if channel acquired
-E_MPP_PRIME_CONT_7:
-        BEQ     E_MPP_PRIME_CONT_9              | channel busy -> collision backoff
-        MOVE.B  #0xA,(A1)                       | SCC WR10: select FM0 encoding
-        MOVE.B  0xAC(A2),D2                     | D2 = LAP type from saved state
-        TST.B   (A0)                            | check SCC RR0 for DCD loss
-        BMI     E_MPP_PRIME_CONT_9              | DCD dropped -> collision
-        MOVE.B  #0x5,(A1)                       | SCC WR5 register select
-        MOVEQ.L #-0x7C,D0                       | 0x84 = TX enable, RTS, 8bit, CRC
-        MOVE.B  #0x62,(A1)                      | SCC WR5: CRC preset + SDLC mode
-        TST.B   0xB0(A2)                        | ENQ/ACK mode (AARP probe)?
-        BEQ.B   E_MPP_PRIME_NO_3                | no, normal DDP ->
-        MOVEQ.L #-0x7F,D0                       | 0x81 = TX enable, no RTS (probe)
-| E_MPP_PRIME_NO_3: program SCC for SDLC transmit
-E_MPP_PRIME_NO_3:
-        MOVE.B  #0x5,(A1)                       | SCC WR5 register select
-        NOP                                     | SCC register access delay
-        MOVE.B  0xF7(A2),(A1)                   | load SCC WR5 with TX config byte
-        BSR     E_MPP_PRIME_CONT_15             | send SDLC opening flags + LAP header
-        ADDQ.B  #0x1,D2                         | D2 was $FF (broadcast)? -> 0
-        BEQ.B   E_MPP_PRIME_SKIP                | broadcast: skip data body ->
-        CLR.B   0xAE(A2)                        | clear TX-complete flag
-        BSR     E_MPP_PRIME_CONT_13             | transmit packet data body via SCC
-        TST.B   0xB0(A2)                        | ENQ/ACK mode (probe)?
-        BEQ.B   E_MPP_PRIME_NO_4                | no, check normal TX result ->
-        TST.B   0xAF(A2)                        | probe collision detected?
-        BEQ.B   E_MPP_PRIME_RETRY_2             | yes -> retry with new backoff
-        BRA.B   E_MPP_PRIME_EXIT                | probe succeeded -> return OK
+LAPWRITE_DEFERS:
+        MOVE.B  (A3),D2                         | D2 = deferHistory
+        BSR.B   LAP_COUNTBITS                   | deferrals - 2
+        BGE.B   LAPWRITE_INIT                   | 2 or more -> keep the mask
+        LSR.B   #0x1,D3                         | backoff / 2
+        ST.B    (A3)                            | deferHistory = $FF
+| tries, local and global backoff for this send
+LAPWRITE_INIT:
+        MOVE.B  (A3),D2                         | D2 = deferHistory
+        ADD.B   D2,(A3)+                        | deferHistory << 1
+        MOVEQ.L #0x20,D0                        | 32
+        MOVE.B  D0,(A3)+                        | deferTries = 32
+        MOVE.B  D0,(A3)                         | collsnTries = 32
+        SUBQ.W  #0x5,A3                         | A3 -> lbackOff
+        MOVE.B  D3,(A3)+                        | lbackOff = backoff
+        MOVE.B  D3,(A3)+                        | backoff = new mask
+        MOVEM.L (SCCRd).w,A0-A1                 | A0/A1 = SCC channel B control (read/write)
+| LAPWRITE_START: begin (or resume) the transmission, SR on the stack
+LAPWRITE_START:
+        MOVE    SR,-(SP)                        | save SR
+| LAPWRITE_TRY: one attempt; D3 = D0 so that LAPWRITE_BUSY can tell how
+| long we waited
+LAPWRITE_TRY:
+        MOVE    D0,D3                           | D3 = D0 (no wait yet)
+        BTST    #0x4,(A0)                       | RR0 Sync/Hunt: receiver hunting (no frame on the line)?
+        BEQ.B   LAPWRITE_SENSE                  | no, a frame is in progress -> busy
+        BSR     MPP_RANDOM                      | D0 = random number
+        AND.B   0xB2(A2),D0                     | masked with lbackOff
+        ANDI    #0xF,D0                         | 0..15
+        MOVE    D0,D3                           | D3 = random wait in ~100 us steps
+        BEQ.B   LAPWRITE_IDG                    | none ->
+LAPWRITE_WAIT:
+        BSR.B   LAP_WAIT100                     | wait ~100 us; frame on the line?
+        BEQ.B   LAPWRITE_SENSE                  | yes -> busy
+        SUBQ.W  #0x1,D0                         | count down
+        BNE.B   LAPWRITE_WAIT                   | loop
+| inter-dialog gap: 4 more steps with interrupts off; the DPLL watches
+| for any activity meanwhile
+LAPWRITE_IDG:
+        MOVE    #0x2600,SR                      | interrupts off (IPL 6)
+        MOVE.B  #0xE,(A1)                       | WR0: select WR14
+        MOVEQ.L #0x3,D0                         | 4 steps
+        ADDQ.W  #0x3,D3                         | D3 = steps waited when the gap ends
+        MOVE.B  #0x41,(A1)                      | WR14 = $41: DPLL reset missing clock, BRG on
+LAPWRITE_IDGLOOP:
+        BSR.B   LAP_WAIT100                     | wait ~100 us; frame on the line?
+        DBEQ    D0,LAPWRITE_IDGLOOP             | no -> next step
+| line still free?
+LAPWRITE_SENSE:
+        BEQ     LAPWRITE_BUSY                   | frame seen -> busy
+        MOVE.B  #0xA,(A1)                       | WR0: select RR10
+        MOVE.B  0xAC(A2),D2                     | D2 = DestNode
+        TST.B   (A0)                            | RR10 bit 7: one clock missing?
+        BMI     LAPWRITE_BUSY                   | yes: activity during the gap (e.g. a sync pulse) -> busy
+| line free: sync pulse (RTS on, off), then lapRTS or lapENQ
+        MOVE.B  #0x5,(A1)                       | WR0: select WR5
+        MOVEQ.L #-0x7C,D0                       | D0 = $84 (lapRTS)
+        MOVE.B  #0x62,(A1)                      | WR5 = $62: RTS on (line driver on), Tx off
+        TST.B   0xB0(A2)                        | fSendENQ?
+        BEQ.B   LAPWRITE_SENDCTL                | no ->
+        MOVEQ.L #-0x7F,D0                       | D0 = $81 (lapENQ)
+| end the sync pulse, send the control frame
+LAPWRITE_SENDCTL:
+        MOVE.B  #0x5,(A1)                       | WR0: select WR5
+        NOP                                     | SCC recovery time
+        MOVE.B  0xF7(A2),(A1)                   | WR5 = VDisTxRTS ($60): RTS off
+        BSR     LAP_SENDCTL                     | send lapRTS/lapENQ to DestNode
+        ADDQ.B  #0x1,D2                         | DestNode = $FF?
+        BEQ.B   LAPWRITE_BCAST                  | broadcast: no lapCTS ->
+        CLR.B   0xAE(A2)                        | fGoodCTS = 0
+        BSR     LAP_POLLRCV                     | receive the answer, if any
+        TST.B   0xB0(A2)                        | sending ENQs?
+        BEQ.B   LAPWRITE_CHKCTS                 | no ->
+        TST.B   0xAF(A2)                        | fAdrInUse (ACK or other frame for the address)?
+        BEQ.B   LAPWRITE_COLLISION              | no answer -> send the ENQ again
+        BRA.B   LAPWRITE_NOERR                  | answered -> done
 
 | ----------------------------------------------------------
 |
-| E_MPP_PRIME_NO_4: check normal DDP transmit result
+| LAPWRITE_CHKCTS: lapCTS received? then send the data frame
 |
-E_MPP_PRIME_NO_4:
-        TST.B   0xAE(A2)                        | TX underrun detected?
-        BEQ.B   E_MPP_PRIME_RETRY_2             | yes -> retry with collision backoff
-        BRA.B   E_MPP_PRIME_DONE                | TX complete -> send closing flags
+LAPWRITE_CHKCTS:
+        TST.B   0xAE(A2)                        | fGoodCTS?
+        BEQ.B   LAPWRITE_COLLISION              | no lapCTS: assume a collision
+        BRA.B   LAPWRITE_DATA                   | -> data frame
 
 | ----------------------------------------------------------
 |
-| RETURNS_4: wait one LocalTalk slot time (~400us), test carrier
-| Returns: Z=1 if carrier detected (DCD low)
+| LAP_WAIT100: wait ~100 us, then test RR0 Sync/Hunt -> EQ if the
+| receiver has left hunt mode (a frame is on the line).  Uses D1.
 |
-RETURNS_4:
-        MOVEQ.L #0x3C,D1                        | 60 iterations (~400us at 7.8MHz)
-E_MPP_PRIME_LOOP_4:
-        DBF     D1,E_MPP_PRIME_LOOP_4           | busy-wait delay loop
-        BTST    #0x4,(A0)                       | SCC RR0 bit 4: DCD (carrier detect)
-        RTS                                     | Z=1 if carrier present
+LAP_WAIT100:
+        MOVEQ.L #0x3C,D1                        | 61 iterations
+LAP_WAIT100_LOOP:
+        DBF     D1,LAP_WAIT100_LOOP             | delay
+        BTST    #0x4,(A0)                       | RR0 Sync/Hunt
+        RTS                                     | EQ = frame on the line
 
 | ----------------------------------------------------------
 |
-| E_MPP_PRIME_SKIP: broadcast frame - wait for slot then close
+| LAPWRITE_BCAST: broadcast - after the lapRTS the line must stay quiet
+| for ~100 us
 |
-E_MPP_PRIME_SKIP:
-        BSR.B   RETURNS_4                       | wait one slot time, check carrier
-        BEQ.B   E_MPP_PRIME_RETRY_2             | carrier collision -> retry
-| E_MPP_PRIME_DONE: send SDLC closing flags and CRC
-E_MPP_PRIME_DONE:
-        BSR     E_MPP_PRIME_ERR_2               | transmit CRC, closing flag, abort
-| E_MPP_PRIME_EXIT: transmit complete - return success
-E_MPP_PRIME_EXIT:
-        MOVEQ.L #0x0,D0                         | noErr: transmit succeeded
-| E_MPP_PRIME_CONT_8: restore SR and return to caller via saved return address
-E_MPP_PRIME_CONT_8:
-        MOVE    (SP)+,SR                        | restore saved interrupt state
-        MOVE.L  0xA6(A2),A0                     | A0 = saved completion return address
-        JMP     (A0)                            | return to transmit caller
+LAPWRITE_BCAST:
+        BSR.B   LAP_WAIT100                     | wait ~100 us; frame on the line?
+        BEQ.B   LAPWRITE_COLLISION              | yes -> collision
+| send the data frame
+LAPWRITE_DATA:
+        BSR     LAP_SENDFRAME                   | send the frame of WDSPtr
+| done
+LAPWRITE_NOERR:
+        MOVEQ.L #0x0,D0                         | noErr
+| return through LAPWrtRtn
+LAPWRITE_EXIT:
+        MOVE    (SP)+,SR                        | restore SR
+        MOVE.L  0xA6(A2),A0                     | A0 = LAPWrtRtn
+        JMP     (A0)                            | continue the caller
 
 | ----------------------------------------------------------
 |
-| E_MPP_PRIME_RETRY_2: collision detected - exponential backoff and retry
+| LAPWRITE_COLLISION: no lapCTS (or line busy after a broadcast lapRTS):
+| record a collision, widen lbackOff, retry up to collsnTries times
 |
-E_MPP_PRIME_RETRY_2:
-        MOVE    (SP),SR                         | restore SR (keep on stack for retry)
-        BSET    #0x0,0xB4(A2)                   | set collision-occurred flag
-        MOVE.B  0xB2(A2),D0                     | D0 = current backoff window
-        ADD.B   D0,D0                           | double the backoff window
-        ADDQ.B  #0x1,D0                         | ensure odd (randomizer spread)
-        MOVE.B  D0,0xB2(A2)                     | store widened backoff window
-        MOVEQ.L #-0x5F,D0                       | cbNotFound: collision error code
-        SUBQ.B  #0x1,0xB7(A2)                   | decrement retry counter
-        BEQ.B   E_MPP_PRIME_CONT_8              | retries exhausted -> give up
-        BRA     E_MPP_PRIME_RETRY               | -> retry CSMA/CA from backoff
+LAPWRITE_COLLISION:
+        MOVE    (SP),SR                         | restore SR (it stays on the stack)
+        BSET    #0x0,0xB4(A2)                   | collsnHistory: collision in this send
+        MOVE.B  0xB2(A2),D0                     | lbackOff ...
+        ADD.B   D0,D0                           | ... * 2 ...
+        ADDQ.B  #0x1,D0                         | ... + 1
+        MOVE.B  D0,0xB2(A2)                     | store it
+        MOVEQ.L #-0x5F,D0                       | excessCollsns (-95)
+        SUBQ.B  #0x1,0xB7(A2)                   | collsnTries - 1
+        BEQ.B   LAPWRITE_EXIT                   | used up -> excessCollsns
+        BRA     LAPWRITE_TRY                    | try again
 
 | ----------------------------------------------------------
 |
-| E_MPP_PRIME_CONT_9: deferred transmit - channel was busy, handle collision
+| LAPWRITE_BUSY: the line is busy.  If it went busy after we had waited
+| at least 4 steps, count a deferral (deferTries; lbackOff and
+| deferHistory bit 0); then wait for the end of the frame on the line.
 |
-E_MPP_PRIME_CONT_9:
-        SUB     D0,D3                           | adjust collision counter
-        SUBQ.W  #0x4,D3                         | subtract initial CTS checks
-        BLT.B   E_MPP_PRIME_SKIP_2              | short defer, not a real collision ->
-        MOVEQ.L #-0x5F,D0                       | cbNotFound: collision error
-        SUBQ.B  #0x1,0xB6(A2)                   | decrement deferred-retry counter
-        BEQ.B   E_MPP_PRIME_CONT_8              | retries exhausted -> give up
-        BSET    #0x0,0xB2(A2)                   | widen backoff window (set bit 0)
-        BSET    #0x0,0xB5(A2)                   | mark deferred collision flag
-| E_MPP_PRIME_SKIP_2: set SCC to receive mode and schedule deferred transmit
-E_MPP_PRIME_SKIP_2:
-        MOVE    #0x2600,SR                      | raise IPL for SCC register access
-        MOVE.B  #0xF,(A1)                       | SCC WR15 register select
-        MOVEQ.L #-0x78,D0                       | 0x88 = DCD + break/abort IE
-        MOVE.B  D0,(A1)                         | enable DCD interrupt for carrier sense
-        ADDQ.B  #0x2,0xB1(A2)                   | set deferred-transmit pending flag
-        MOVEQ.L #0x0,D0                         | noErr (deferred, not failed)
-        MOVE    (SP)+,SR                        | restore interrupt state
-        RTS                                     | return (TX will resume on interrupt)
+LAPWRITE_BUSY:
+        SUB     D0,D3                           | D3 = steps waited
+        SUBQ.W  #0x4,D3                         | fewer than 4?
+        BLT.B   LAPWRITE_DEFER                  | yes -> just wait
+        MOVEQ.L #-0x5F,D0                       | excessCollsns (-95)
+        SUBQ.B  #0x1,0xB6(A2)                   | deferTries - 1
+        BEQ.B   LAPWRITE_EXIT                   | used up -> excessCollsns
+        BSET    #0x0,0xB2(A2)                   | lbackOff at least 1
+        BSET    #0x0,0xB5(A2)                   | deferHistory: deferral in this send
+| wait: the abort at the end of the frame raises an external/status
+| interrupt (LAP_EXTINT); MPP_VBLTASK resumes after 20-40 ticks anyway
+LAPWRITE_DEFER:
+        MOVE    #0x2600,SR                      | interrupts off (IPL 6)
+        MOVE.B  #0xF,(A1)                       | WR0: select WR15
+        MOVEQ.L #-0x78,D0                       | $88
+        MOVE.B  D0,(A1)                         | WR15 = $88: break/abort and DCD interrupts
+        ADDQ.B  #0x2,0xB1(A2)                   | VBLDeferCnt + 2
+        MOVEQ.L #0x0,D0                         | noErr
+        MOVE    (SP)+,SR                        | restore SR
+        RTS                                     | return to the caller's caller (write pending)
 
 | ----------------------------------------------------------
 |
-| E_MPP_PRIME_CONT_10: SCC external/status interrupt handler
-| Called when SCC detects DCD change (carrier sense) or break/abort
+| LAP_EXTINT: SCC channel B external/status interrupt (ExtStsDT[0]:
+| changes other than DCD alone; D1 = changed enabled RR0 bits).  Resumes
+| a deferred LAPWRITE; otherwise passes a DCD change to the mouse handler.
 |
-E_MPP_PRIME_CONT_10:
-        MOVE.L  (ABusVars).w,A2                 | A2 = AppleTalk bus variables
-        TST.B   0xB1(A2)                        | deferred transmit pending?
-        BNE.B   E_MPP_PRIME_OK                  | yes, resume deferred TX ->
-        BTST    #0x3,D1                         | SCC RR0 bit 3: DCD interrupt?
-        BEQ.B   E_MPP_PRIME_EMPTY_2             | no, not our interrupt ->
-        MOVE.L  (ExtStsDT_1).w,A3               | A3 = previous ext/status handler
-        JMP     (A3)                            | chain to original handler
+LAP_EXTINT:
+        MOVE.L  (ABusVars).w,A2                 | A2 = MPP variables
+        TST.B   0xB1(A2)                        | write waiting (VBLDeferCnt)?
+        BNE.B   LAP_EXTINT_RESUME               | yes -> resume it
+        BTST    #0x3,D1                         | DCD (mouse Y) changed too?
+        BEQ.B   LAP_RTS                         | no -> ignore
+        MOVE.L  (ExtStsDT_1).w,A3               | A3 = DCD handler (ExtStsDT[1], mouse Y)
+        JMP     (A3)                            | -> it
 
 | ----------------------------------------------------------
 |
-| E_MPP_PRIME_OK: resume deferred transmit after carrier-sense interrupt
+| LAP_EXTINT_RESUME
 |
-E_MPP_PRIME_OK:
-        CLR.B   0xB1(A2)                        | clear deferred-TX pending flag
-E_MPP_PRIME_CONT_11:
-        MOVE.B  #0xF,(A1)                       | SCC WR15 register select
-        MOVEQ.L #0x8,D0                         | 0x08 = DCD interrupt enable only
-        MOVE.B  D0,(A1)                         | restore minimal interrupt mask
-        MOVE    0x1C(A2),SR                     | restore saved SR from ABusVars
-        BRA     E_MPP_PRIME_LOOP_2              | -> resume CSMA/CA transmit loop
+| LAP_EXTINT_RESUME / LAP_RESUMEWRITE: resume a deferred LAPWRITE
+LAP_EXTINT_RESUME:
+        CLR.B   0xB1(A2)                        | VBLDeferCnt = 0
+LAP_RESUMEWRITE:
+        MOVE.B  #0xF,(A1)                       | WR0: select WR15
+        MOVEQ.L #0x8,D0                         | $08
+        MOVE.B  D0,(A1)                         | WR15 = $08: DCD (mouse) interrupt only
+        MOVE    0x1C(A2),SR                     | SR = vSCCEnable
+        BRA     LAPWRITE_START                  | next attempt
 
 | ----------------------------------------------------------
 |
-| E_MPP_PRIME_CONT_12: VBL task - periodic AppleTalk housekeeping (20 ticks)
-| Decrements AARP timer, handles deferred transmit countdown
+| MPP_VBLTASK: VBL task, every 20 ticks (A0 = task).  Ages BridgeTime
+| (sysABridge forgotten after 255 periods without RTMP) and resumes a
+| deferred LAPWRITE when VBLDeferCnt runs out.
 |
-E_MPP_PRIME_CONT_12:
-        MOVE    #0x14,0xA(A0)                   | reschedule VBL in 20 ticks (1/3 sec)
-        MOVE.L  (ABusVars).w,A2                 | A2 = ABusVars
-        SUBQ.B  #0x1,0xB8(A2)                   | decrement AARP validity timer
-        BNE.B   E_MPP_PRIME_NO_5                | not expired ->
-        CLR.B   0x19(A2)                        | timer expired: clear bridge node ID
-E_MPP_PRIME_NO_5:
-        TST.B   0xB1(A2)                        | deferred transmit pending?
-        BEQ.B   E_MPP_PRIME_EMPTY_2             | no ->
-        SUBQ.B  #0x1,0xB1(A2)                   | decrement deferred-TX countdown
-        BNE.B   E_MPP_PRIME_EMPTY_2             | not zero yet ->
-        MOVEM.L (SCCRd).w,A0-A1                 | A0=SCC read, A1=SCC write
-        MOVE    #0x2600,SR                      | disable interrupts for SCC access
-        BSR     E_MPP_PRIME_CONT_25             | reset SCC to receive mode
-        BRA.B   E_MPP_PRIME_CONT_11             | -> resume deferred transmit
+MPP_VBLTASK:
+        MOVE    #0x14,0xA(A0)                   | vblCount = 20 ticks
+        MOVE.L  (ABusVars).w,A2                 | A2 = MPP variables
+        SUBQ.B  #0x1,0xB8(A2)                   | BridgeTime - 1
+        BNE.B   MPP_VBLTASK_DEFER               | not expired ->
+        CLR.B   0x19(A2)                        | sysABridge = 0 (no bridge)
+| deferred write waiting?
+MPP_VBLTASK_DEFER:
+        TST.B   0xB1(A2)                        | VBLDeferCnt
+        BEQ.B   LAP_RTS                         | no write waiting -> return
+        SUBQ.B  #0x1,0xB1(A2)                   | count down
+        BNE.B   LAP_RTS                         | not yet -> return
+        MOVEM.L (SCCRd).w,A0-A1                 | A0/A1 = SCC channel B control
+        MOVE    #0x2600,SR                      | interrupts off (IPL 6)
+        BSR     LAP_RCVRESET                    | receiver back to hunt mode
+        BRA.B   LAP_RESUMEWRITE                 | resume the write
 
 | ----------------------------------------------------------
 |
-| E_MPP_PRIME_CONT_13: poll SCC for incoming packet during transmit gap
-| Handles any received frame that arrives while we own the bus
+| LAP_POLLRCV: poll ~125 times for a received byte (the answer to a
+| lapRTS/lapENQ, or the data frame after our lapCTS) and receive the frame
+| through LAP_RCVFRAME.  Preserves A0-A2.
 |
-E_MPP_PRIME_CONT_13:
-        MOVEM.L A0-A2,-(SP)                     | save registers across receive check
-        MOVEQ.L #0x7D,D1                        | 125 iteration poll timeout
-E_MPP_PRIME_LOOP_5:
-        BTst    #0x0,(A0)                       | SCC RR0 bit 0: RX char available?
-        DBNE    D1,E_MPP_PRIME_LOOP_5           | no, keep polling
-        BEQ.B   E_MPP_PRIME_NO_6                | timeout with no data ->
-        BSR     E_MPP_PRIME_CONT_21             | process received LAP frame
-E_MPP_PRIME_NO_6:
-        MOVEM.L (SP)+,A0-A2                     | restore registers
-E_MPP_PRIME_EMPTY_2:
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| RETURNS_5: pseudo-random number generator (linear congruential)
-| seed = seed * 773 + 1, then byte-swap for better randomness
-| Returns: D0 = random 16-bit value
-|
-RETURNS_5:
-        MOVE    0xAA(A2),D0                     | D0 = current PRNG seed
-        MULU    #0x305,D0                       | multiply by 773
-        ADDQ.W  #0x1,D0                         | add 1 (LCG increment)
-        MOVE    D0,-(SP)                        | push result to stack
-        LSL     #0x8,D0                         | shift high byte to low position
-        MOVE.B  (SP)+,D0                        | merge: swap high/low bytes
-        MOVE    D0,0xAA(A2)                     | store new seed in ABusVars
-        RTS                                     | return random value in D0
-
-| ----------------------------------------------------------
-|
-| E_MPP_PRIME_CONT_14: SCC WR5/WR3 reset command bytes (inline data)
-|
-E_MPP_PRIME_CONT_14:
-  .byte  0x05,0x6B,0x03,0xD0                    | WR5=0x6B (TX off), WR3=0xD0 (RX off)
-| RETURNS_6: wait for SCC TX buffer empty, send byte D3
-| Returns: Z=1 if timeout (D1 exhausted), NZ if sent
-RETURNS_6:
-        MOVEQ.L #0x1E,D1                        | 30 iteration poll timeout
-E_MPP_PRIME_LOOP_6:
-        BTst    #0x2,(A0)                       | SCC RR0 bit 2: TX buffer empty?
-        DBNE    D1,E_MPP_PRIME_LOOP_6           | not empty, keep waiting
-        BEQ.B   E_MPP_PRIME_SKIP_3              | timeout -> skip write
-        MOVE.B  D3,0x4(A1)                      | write byte D3 to SCC TX data reg
-E_MPP_PRIME_SKIP_3:
-        TST     D1                              | set Z flag based on timeout
-        RTS                                     | Z=1 if timed out
-
-| ----------------------------------------------------------
-|
-| E_MPP_PRIME_ERR: reset SCC TX/RX and send SDLC abort sequence
-| Disables TX/RX via WR5/WR3, then sends abort pattern
-|
-E_MPP_PRIME_ERR:
-        LEA.L   E_MPP_PRIME_CONT_14(PC),A3      | A3 = SCC reset command bytes
-        MOVEQ.L #0x4,D3                         | 4 register/value pairs
-        BSR     E_MPP_PRIME_CONT_19             | write reset commands to SCC
-        MOVEQ.L #0x28,D3                        | 40 iteration delay
-E_MPP_PRIME_LOOP_7:
-        DBF     D3,E_MPP_PRIME_LOOP_7           | wait for SCC to settle
-        MOVE.B  #0x80,(A1)                      | SCC: send SDLC abort (8 ones)
-        RTS                                     | return with TX/RX disabled
-
-| ----------------------------------------------------------
-|
-| E_MPP_PRIME_ERR_2: transmit packet data body, CRC, closing flag
-| Iterates through data chunk list at (A2+$A2), sends via SCC
-|
-E_MPP_PRIME_ERR_2:
-        MOVEM.L A0-A1/A4-A6,0xDE(A2)            | save registers in ABusVars scratch
-        MOVE.L  (DskRtnAdr).w,-(SP)             | save disk return address
-        MOVE.L  (PollStack).w,-(SP)             | save poll stack pointer
-        MOVE.L  A7,(PollStack).w                | set current SP as poll stack
-        MOVE.L  0xF2(A2),A5                     | A5 = VIA Port A address
-        LEA.L   0x6(A0),A6                      | A6 = SCC data read register
-        MOVE.L  0xA2(A2),A4                     | A4 = data chunk list pointer
-        BSR.B   E_MPP_PRIME_ERR                 | reset SCC TX/RX, send abort
-        MOVE    (A4)+,D3                        | D3 = first chunk byte count
-        MOVE.L  (A4)+,A3                        | A3 = first chunk data pointer
-        MOVE.B  (A3)+,0x4(A1)                   | send first byte to SCC TX data
-        SUBQ.W  #0x1,D3                         | decrement chunk byte count
-        MOVE.B  (A2),(A3)                       | patch our node ID into data
-| E_MPP_PRIME_NEXT: transmit loop - send data bytes via SCC
-E_MPP_PRIME_NEXT:
-        MOVEQ.L #0x1E,D0                        | 30 iteration TX-ready poll timeout
-E_MPP_PRIME_LOOP_8:
-        BTst    #0x2,(A0)                       | SCC RR0 bit 2: TX buffer empty?
-        DBNE    D0,E_MPP_PRIME_LOOP_8           | not ready, keep polling
-        BNE.B   E_MPP_PRIME_NEXT_2              | TX ready -> send next byte
-        BSR.B   E_MPP_PRIME_ERR_3               | timeout: abort transmit sequence
-        BRA.B   E_MPP_PRIME_EXIT_2              | -> cleanup and return
-
-| ----------------------------------------------------------
-|
-| E_MPP_PRIME_NEXT_2: send next data byte and check for incoming frame
-|
-E_MPP_PRIME_NEXT_2:
-        MOVE.B  (A3)+,0x4(A1)                   | write next byte to SCC TX data
-        TST.B   (A5)                            | VIA Port A: check for RX activity
-        BMI.B   E_MPP_PRIME_NO_7                | no incoming frame ->
-        MOVE.B  (A6),-(SP)                      | read SCC RX byte (discard on stack)
-E_MPP_PRIME_NO_7:
-        SUBQ.W  #0x1,D3                         | decrement chunk byte count
-        BGT.B   E_MPP_PRIME_NEXT                | more bytes in chunk ->
-        MOVE    (A4)+,D3                        | D3 = next chunk byte count
-        BEQ.B   E_MPP_PRIME_EMPTY_3             | zero = end of data list ->
-        MOVE.L  (A4)+,A3                        | A3 = next chunk data pointer
-        BRA.B   E_MPP_PRIME_NEXT                | -> transmit next chunk
-
-| ----------------------------------------------------------
-|
-| E_MPP_PRIME_EMPTY_3: all data sent - transmit CRC and closing flag
-|
-E_MPP_PRIME_EMPTY_3:
-        BSR.B   E_MPP_PRIME_CONT_16             | send CRC, SDLC closing flag, cleanup
-| E_MPP_PRIME_EXIT_2: post-transmit cleanup - call poll proc, restore state
-E_MPP_PRIME_EXIT_2:
-        MOVE.L  (PollProc).w,D3                 | disk poll procedure installed?
-        BEQ.B   E_MPP_PRIME_NO_8                | no ->
-        MOVE.L  D3,A4                           | A4 = poll procedure
-        JSR     (A4)                            | call disk poll (cooperative multitask)
-        MOVE.L  (ABusVars).w,A2                 | reload A2 (may have been clobbered)
-E_MPP_PRIME_NO_8:
-        MOVEM.L 0xDE(A2),A0-A1/A4-A6            | restore saved registers
-        MOVE.L  (PollStack).w,SP                | restore stack pointer
-        MOVE.L  (SP)+,(PollStack).w             | restore original poll stack
-        MOVE.L  (SP)+,(DskRtnAdr).w             | restore disk return address
-        RTS                                     | return to transmit caller
-
-| ----------------------------------------------------------
-|
-| E_MPP_PRIME_CONT_15: send SDLC opening flags + LAP dest/src header bytes
-| D2 = LAP type, (A2) = our node ID
-|
-E_MPP_PRIME_CONT_15:
-        BSR     E_MPP_PRIME_ERR                 | reset SCC, send abort pattern
-        MOVE.B  D2,0x4(A1)                      | TX first byte: LAP dest node
-        MOVE.B  (A2),D3                         | D3 = our node ID (LAP source)
-        BSR     RETURNS_6                       | wait TX ready, send source node
-        BEQ.B   E_MPP_PRIME_ERR_3               | TX timeout -> abort
-        MOVE.B  D0,D3                           | D3 = LAP type byte
-        BSR     RETURNS_6                       | wait TX ready, send LAP type
-        BEQ.B   E_MPP_PRIME_ERR_3               | TX timeout -> abort
-| E_MPP_PRIME_CONT_16: send CRC and SDLC closing flag
-E_MPP_PRIME_CONT_16:
-        MOVE.B  #0xC0,(A1)                      | SCC: reset TX CRC generator
-        LSL     #0x1,D3                         | shift (delay for CRC calc)
-E_MPP_PRIME_CONT_17:
-        BTst    #0x6,(A0)                       | SCC RR0 bit 6: TX underrun/EOM?
-        BEQ.B   E_MPP_PRIME_CONT_17             | wait for underrun latch ->
-E_MPP_PRIME_CONT_18:
-        BTst    #0x2,(A0)                       | SCC RR0 bit 2: TX buffer empty?
-        BEQ.B   E_MPP_PRIME_CONT_18             | wait for last byte to shift out ->
-        MOVE.B  #0x5,(A1)                       | SCC WR5 register select
-        MOVEQ.L #0x0,D3                         | clear D3 for delay counter
-        MOVE.B  #0x62,(A1)                      | SCC WR5: TX enable, SDLC/CRC mode
-        MOVE.B  0xB9(A2),D3                     | D3 = post-TX settling delay count
-E_MPP_PRIME_LOOP_9:
-        DBF     D3,E_MPP_PRIME_LOOP_9           | wait for CRC to transmit
-| E_MPP_PRIME_ERR_3: write SCC register cleanup sequence (6 bytes from ABusVars+$F6)
-E_MPP_PRIME_ERR_3:
-        LEA.L   0xF6(A2),A3                     | A3 = SCC register init table
-        MOVEQ.L #0x6,D3                         | 6 bytes to write
-| E_MPP_PRIME_CONT_19: write D3 bytes from (A3) to SCC write register
-E_MPP_PRIME_CONT_19:
-        MOVE.B  (A3)+,(A1)                      | write next byte to SCC
-        SUBQ.W  #0x1,D3                         | decrement count
-        BNE.B   E_MPP_PRIME_CONT_19             | more bytes ->
-        RTS                                     | return with SCC configured
-
-| ----------------------------------------------------------
-|
-| E_MPP_PRIME_CONT_20: SCC receive interrupt handler - incoming LAP frame
-| Reads LAP header bytes (dest, src, type), dispatches to protocol handler
-|
-E_MPP_PRIME_CONT_20:
-        MOVE.L  (ABusVars).w,A2                 | A2 = AppleTalk bus variables
-| E_MPP_PRIME_CONT_21 -- process received LAP frame.
-E_MPP_PRIME_CONT_21:
-        LEA.L   0x1(A2),A3                      | A3 = LAP header buffer in ABusVars
-        MOVE.B  0x4(A0),(A3)+                   | read LAP dest node from SCC RX data
-        MOVEQ.L #0x28,D1                        | 40 iteration RX poll timeout
-E_MPP_PRIME_LOOP_10:
-        BTst    #0x0,(A0)                       | SCC RR0 bit 0: RX char available?
-        DBNE    D1,E_MPP_PRIME_LOOP_10          | wait for next byte
-        BEQ.B   E_MPP_PRIME_ERR_4               | timeout -> abort receive
-        MOVE.B  0x4(A0),(A3)+                   | read LAP source node
-E_MPP_PRIME_LOOP_11:
-        BTst    #0x0,(A0)                       | RX char available?
-        DBNE    D1,E_MPP_PRIME_LOOP_11          | wait for LAP type byte
-        BEQ.B   E_MPP_PRIME_ERR_4               | timeout ->
-        MOVE.B  0x4(A0),D0                      | D0 = LAP type byte
-        MOVE.B  D0,(A3)+                        | store in header buffer
-        BMI.B   E_MPP_PRIME_CONT_22             | bit 7 set: control frame ->
-| look up LAP protocol handler for this type
-        MOVEQ.L #0x3,D2                         | scan 4 LAP handler slots
-E_MPP_PRIME_LOOP_12:
-        CMP.B   0x22(A2,D2.W),D0                | slot matches LAP type?
-        DBEQ    D2,E_MPP_PRIME_LOOP_12          | no, try next
-        LSL     #0x2,D2                         | D2 *= 4 (handler table index)
-| read DDP length/hop count word (first 2 bytes of DDP header)
-        MOVEQ.L #0x28,D0                        | 40 iteration poll timeout
-E_MPP_PRIME_LOOP_13:
-        BTst    #0x0,(A0)                       | RX char available?
-        DBNE    D0,E_MPP_PRIME_LOOP_13          | wait
-        BEQ.B   E_MPP_PRIME_ERR_4               | timeout ->
-        MOVE.B  0x4(A0),(A3)                    | read DDP length high byte
-        MOVEQ.L #0x3,D1                         | mask for 10-bit length (high 2 bits)
-        AND.B   (A3)+,D1                        | D1 = length high bits (0-3)
-        LSL     #0x8,D1                         | shift to high byte position
-        MOVEM.L A4-A5,0xBA(A2)                  | save A4-A5 in ABusVars scratch
-E_MPP_PRIME_LOOP_14:
-        BTst    #0x0,(A0)                       | RX char available?
-        DBNE    D0,E_MPP_PRIME_LOOP_14          | wait for length low byte
-E_MPP_PRIME_ERR_4:
-        BEQ.B   E_MPP_PRIME_CONT_24             | timeout -> discard frame
-        MOVE.B  0x4(A0),D1                      | read DDP length low byte
-        MOVE.B  D1,(A3)+                        | store in receive buffer
-        SUBQ.W  #0x2,D1                         | subtract 2 (already read 2 header bytes)
-        TST     D2                              | LAP handler found? (D2 >= 0)
-        BMI.B   E_MPP_PRIME_NO_9                | no handler for this type ->
-        MOVE.L  0x26(A2,D2.W),A5                | A5 = LAP protocol handler
-        LEA.L   E_MPP_PRIME_CONT_28(PC),A4      | A4 = SCC byte-read subroutine
-        JMP     (A5)                            | dispatch to protocol handler
-
-| ----------------------------------------------------------
-|
-| E_MPP_PRIME_NO_9: no LAP handler - try default receive into buffer
-|
-E_MPP_PRIME_NO_9:
-        MOVE.B  #0x1,(A1)                       | SCC: point to RR1 (special conditions)
-        MOVEQ.L #-0x60,D0                       | 0xA0 mask: end-of-frame + RX overrun
-        AND.B   (A0),D0                         | check SCC RR1 status
-        BNE     E_MPP_PRIME_ERR_6               | frame error -> abort
-        CLR     D3                              | D3 = 0 (no bytes to store)
-        BRA     E_MPP_PRIME_CONT_29             | -> receive remaining data to stack
-
-| ----------------------------------------------------------
-|
-| E_MPP_PRIME_CONT_22: LAP control frame (type $80-$85)
-| Handles ENQ/ACK for AARP node address acquisition
-|
-E_MPP_PRIME_CONT_22:
-        MOVEQ.L #0x7F,D2                        | mask off high bit
-        AND.B   D0,D2                           | D2 = control frame subtype (0-5)
-        CMPI.B  #0x5,D2                         | valid control type (0-5)?
-        BGT.B   E_MPP_PRIME_CONT_24             | invalid -> discard frame
-        BSR.B   RETURNS_7                       | receive control frame body via SCC
-        BNE.B   E_MPP_PRIME_ERR_5               | receive error ->
-        CMPI.B  #0xFF,0x1(A2)                   | LAP dest was broadcast ($FF)?
-        SEQ.B   D1                              | D1 = $FF if broadcast, 0 if unicast
-        BEQ.B   E_MPP_PRIME_OK_2                | broadcast -> process control frame
-        TST.B   0xAD(A2)                        | AARP probe phase complete?
-        BNE.B   E_MPP_PRIME_OK_2                | yes -> accept unicast control
-        ST.B    0xAF(A2)                        | set collision flag (address in use)
-E_MPP_PRIME_ERR_5:
-        RTS                                     | return to interrupt handler
-
-| ----------------------------------------------------------
-|
-| E_MPP_PRIME_OK_2: dispatch LAP control frame by subtype
-| 1=ENQ, 4=ACK, 5=RTS/CTS
-|
-E_MPP_PRIME_OK_2:
-        SUBQ.B  #0x1,D2                         | subtype 1 (ENQ)?
-        BEQ.B   E_MPP_PRIME_OK_5                | yes -> send ACK response
-        SUBQ.B  #0x3,D2                         | subtype 4 (ACK)?
-        BEQ.B   E_MPP_PRIME_OK_3                | yes -> handle ACK
-        SUBQ.B  #0x1,D2                         | subtype 5 (RTS)?
-        SEQ.B   0xAE(A2)                        | set TX-complete flag if RTS
-        RTS                                     | return to interrupt handler
-
-| ----------------------------------------------------------
-|
-| E_MPP_PRIME_OK_3: received ACK - if broadcast, ignore; else respond
-|
-E_MPP_PRIME_OK_3:
-        TST.B   D1                              | was it a broadcast ACK?
-        BNE.B   E_MPP_PRIME_OK_4                | yes -> ignore (poll for bus activity)
-        MOVEQ.L #0x14,D0                        | 20 iteration delay
-E_MPP_PRIME_LOOP_15:
-        DBF     D0,E_MPP_PRIME_LOOP_15          | wait before responding
-        MOVEQ.L #-0x7B,D0                       | 0x85 = LAP CTS control frame type
-        BSR.B   E_MPP_PRIME_CONT_23             | send CTS response frame
-E_MPP_PRIME_OK_4:
-        BRA     E_MPP_PRIME_CONT_13             | -> poll for more incoming data
-
-| ----------------------------------------------------------
-|
-| E_MPP_PRIME_OK_5: received ENQ - reply with ACK
-|
-E_MPP_PRIME_OK_5:
-        MOVEQ.L #-0x7E,D0                       | 0x82 = LAP ACK control frame type
-| E_MPP_PRIME_CONT_23: send LAP control frame (type in D0, dest = sender)
-E_MPP_PRIME_CONT_23:
-        MOVE.B  0x2(A2),D2                      | D2 = sender's node (from LAP header)
-        BRA     E_MPP_PRIME_CONT_15             | -> transmit control frame
-
-| ----------------------------------------------------------
-|
-| E_MPP_PRIME_CONT_24: discard frame - reset SCC receiver twice (flush FIFO)
-|
-E_MPP_PRIME_CONT_24:
-        BSR.B   E_MPP_PRIME_CONT_25             | first SCC receiver reset
-        BRA.B   E_MPP_PRIME_CONT_25             | second reset (clears 3-byte FIFO)
-
-| ----------------------------------------------------------
-|
-| RETURNS_7: receive LAP control frame body (2 data bytes + CRC check)
-| Returns: D0 = 0 if good CRC, nonzero if error
-|
-RETURNS_7:
-        CLR     D0                              | D0 = error accumulator (0 = OK)
-        MOVEQ.L #0x10,D1                        | 16 iteration RX poll timeout
-E_MPP_PRIME_LOOP_16:
-        BTst    #0x0,(A0)                       | SCC RR0 bit 0: RX char available?
-        DBNE    D1,E_MPP_PRIME_LOOP_16          | wait for first data byte
-        BEQ.B   E_MPP_PRIME_ERR_7               | timeout -> error
-        BSR.B   E_MPP_PRIME_CONT_27             | read RR1 status into D1
-        BMI.B   E_MPP_PRIME_ERR_6               | framing error -> adjust error count
-        TST.B   0x4(A0)                         | read and discard RX data byte
-        MOVEQ.L #0x10,D1                        | 16 iteration poll timeout
-E_MPP_PRIME_LOOP_17:
-        BTst    #0x0,(A0)                       | RX char available?
-        DBNE    D1,E_MPP_PRIME_LOOP_17          | wait for second byte
-        BEQ.B   E_MPP_PRIME_ERR_7               | timeout ->
-        BSR.B   E_MPP_PRIME_CONT_27             | read RR1 status
-        BPL.B   E_MPP_PRIME_ERR_6               | no end-of-frame -> error
-        LSL.B   #0x1,D1                         | shift to check CRC error bit
-        BMI.B   E_MPP_PRIME_ERR_8               | CRC error -> return error
-| E_MPP_PRIME_CONT_25: reset SCC receiver - flush FIFO, re-enable hunt mode
-E_MPP_PRIME_CONT_25:
-        BSR.B   E_MPP_PRIME_CONT_27             | read SCC RR1 into D1
-        BTST    #0x5,D1                         | RR1 bit 5: end-of-frame?
-        BEQ.B   E_MPP_PRIME_NO_10               | no ->
-        BCLR    #0x7,(IntFlag).w                | clear interrupt pending flag
-E_MPP_PRIME_NO_10:
-        MOVEQ.L #-0x30,D1                       | 0xD0 = WR3: RX 8bit, enter hunt, RX en
-        BSR.B   E_MPP_PRIME_CONT_26             | write to SCC WR3
-        MOVEQ.L #0x2,D1                         | 3 bytes to drain from FIFO
-E_MPP_PRIME_LOOP_18:
-        TST.B   0x4(A0)                         | read and discard SCC RX data
-        DBF     D1,E_MPP_PRIME_LOOP_18          | drain remaining FIFO bytes
-        MOVEQ.L #-0x23,D1                       | 0xDD = WR3: RX 8bit, auto-enable, RX en
-        BSR.B   E_MPP_PRIME_CONT_26             | write to SCC WR3
-        MOVE.B  #0x30,(A1)                      | SCC: reset highest IUS (end interrupt)
-        MOVE    (SP),(SP)                       | NOP-style delay (SCC recovery time)
-        MOVE.B  #0x20,(A1)                      | SCC: reset RX interrupt on next char
-        TST     D0                              | set flags based on error accumulator
-        RTS                                     | return with Z flag from D0
-
-| ----------------------------------------------------------
-|
-| E_MPP_PRIME_CONT_26: write SCC WR3 register with value in D1
-|
-E_MPP_PRIME_CONT_26:
-        MOVE.B  #0x3,(A1)                       | SCC WR3 register select
-        NOP                                     | SCC register access delay
-        MOVE.B  D1,(A1)                         | write WR3 value
+LAP_POLLRCV:
+        MOVEM.L A0-A2,-(SP)                     | save A0-A2
+        MOVEQ.L #0x7D,D1                        | 126 polls
+LAP_POLLRCV_LOOP:
+        BTst    #0x0,(A0)                       | RR0: Rx character available?
+        DBNE    D1,LAP_POLLRCV_LOOP             | no -> poll again
+        BEQ.B   LAP_POLLRCV_EXIT                | nothing came ->
+        BSR     LAP_RCVFRAME                    | receive the frame
+LAP_POLLRCV_EXIT:
+        MOVEM.L (SP)+,A0-A2                     | restore A0-A2
+LAP_RTS:
         RTS                                     | return
 
 | ----------------------------------------------------------
 |
-| E_MPP_PRIME_CONT_27: read SCC RR1 (special receive conditions) into D1
+| MPP_RANDOM: RandomSeed = byte-swapped (RandomSeed * 773 + 1); returns
+| it in D0
 |
-E_MPP_PRIME_CONT_27:
-        MOVE.B  #0x1,(A1)                       | SCC RR1 register select
-        NOP                                     | SCC register access delay
-        MOVE.B  (A0),D1                         | D1 = RR1 (framing/CRC/overrun status)
-        RTS                                     | return with status in D1
+MPP_RANDOM:
+        MOVE    0xAA(A2),D0                     | D0 = RandomSeed
+        MULU    #0x305,D0                       | * 773
+        ADDQ.W  #0x1,D0                         | + 1
+        MOVE    D0,-(SP)                        | push it
+        LSL     #0x8,D0                         | low byte to the high byte
+        MOVE.B  (SP)+,D0                        | old high byte to the low byte
+        MOVE    D0,0xAA(A2)                     | new RandomSeed
+        RTS                                     | return from MPP_RANDOM
 
 | ----------------------------------------------------------
 |
-| E_MPP_PRIME_ERR_6: receive error - accumulate error code and reset SCC
-| Each error path falls through to subtract different amounts from D0
+| LAP_TXON_TBL: SCC writes for LAP_TXON - WR5 = $6B (Tx on, RTS on, 8
+| bits, Tx CRC on), WR3 = $D0 (receiver off, enter hunt mode)
 |
-E_MPP_PRIME_ERR_6:
-        BTst    #0x5,D1                         | RR1 bit 5: end-of-frame?
-        BNE.B   E_MPP_PRIME_ERR_9               | yes, just -1 (minor error)
-        MOVEQ.L #-0x1,D0                        | D0 = -1 (will become -4 total)
-E_MPP_PRIME_ERR_7:
-        SUBQ.W  #0x1,D0                         | -2: timeout error
-E_MPP_PRIME_ERR_8:
-        SUBQ.W  #0x1,D0                         | -3: CRC error
-E_MPP_PRIME_ERR_9:
-        SUBQ.W  #0x1,D0                         | -1/-2/-3/-4: error severity
-        BRA.B   E_MPP_PRIME_CONT_25             | -> reset SCC receiver
+LAP_TXON_TBL:
+  .byte  0x05,0x6B,0x03,0xD0                    | WR0 = 5, WR5 = $6B, WR0 = 3, WR3 = $D0
+| LAP_SENDBYTE: wait (31 polls) for the Tx buffer, then write D3 to the
+| channel B data register.  Returns TST D1: EQ only if D1 = 0; a timeout
+| leaves D1 = -1 (NE) without writing, which the callers do not catch.
+LAP_SENDBYTE:
+        MOVEQ.L #0x1E,D1                        | 31 polls
+LAP_SENDBYTE_LOOP:
+        BTst    #0x2,(A0)                       | RR0: Tx buffer empty?
+        DBNE    D1,LAP_SENDBYTE_LOOP            | no -> poll again
+        BEQ.B   LAP_SENDBYTE_EXIT               | timeout -> no write
+        MOVE.B  D3,0x4(A1)                      | write the byte
+LAP_SENDBYTE_EXIT:
+        TST     D1                              | EQ if D1 = 0
+        RTS                                     | return from LAP_SENDBYTE
 
 | ----------------------------------------------------------
 |
-| E_MPP_PRIME_CONT_28: SCC data read subroutine - used as A4 callback by protocol handlers
+| LAP_TXON: turn the transmitter on (LAP_TXON_TBL), let it send flags for
+| a moment, then reset the Tx CRC generator
 |
-E_MPP_PRIME_CONT_28:
-        BRA.B   E_MPP_PRIME_CONT_31             | -> read D3 bytes from SCC into (A3)
+LAP_TXON:
+        LEA.L   LAP_TXON_TBL(PC),A3             | A3 = SCC writes
+        MOVEQ.L #0x4,D3                         | 4 bytes
+        BSR     LAP_SCCWRITE                    | write them
+        MOVEQ.L #0x28,D3                        | 41 iterations
+LAP_TXON_DELAY:
+        DBF     D3,LAP_TXON_DELAY               | opening flags go out meanwhile
+        MOVE.B  #0x80,(A1)                      | WR0 = $80: reset Tx CRC generator
+        RTS                                     | return from LAP_TXON
 
 | ----------------------------------------------------------
 |
-| E_MPP_PRIME_CONT_29: receive remaining packet data into buffer (A3) and stack
-| D1 = remaining byte count, D3 = buffer capacity
+| LAP_SENDFRAME: send the frame of the WDS at WDSPtr (lapSrcAdr filled in
+| with our node), then CRC, closing flag and abort (LAP_ENDFRAME).
+| Interrupts are off: received modem-port bytes (VIA PA7 low) are pushed
+| on the stack and handed to PollProc afterwards.
 |
-E_MPP_PRIME_CONT_29:
-        MOVE.L  0xF2(A2),A5                     | A5 = VIA Port A address
-        MOVE.L  A7,A4                           | A4 = save stack pointer
-| E_MPP_PRIME_NEXT_3: receive loop - one byte per iteration
-E_MPP_PRIME_NEXT_3:
-        MOVEQ.L #0x10,D0                        | 16 iteration RX poll timeout
-        SUBQ.W  #0x1,D1                         | decrement expected byte count
-        BMI.B   E_MPP_PRIME_CONT_30             | all bytes received -> finish
-E_MPP_PRIME_LOOP_19:
-        BTst    #0x0,(A0)                       | SCC RR0 bit 0: RX char available?
-        DBNE    D0,E_MPP_PRIME_LOOP_19          | wait for data
-        BEQ.B   E_MPP_PRIME_CONT_30             | timeout -> finish early
-        MOVE.B  0x4(A0),D0                      | D0 = received data byte
-        TST.B   (A5)                            | VIA Port A: check handshake line
-        BMI.B   E_MPP_PRIME_NO_11               | no collision ->
-        MOVE.B  0x6(A0),-(SP)                   | push SCC special condition byte
-E_MPP_PRIME_NO_11:
-        SUBQ.W  #0x1,D3                         | decrement buffer space
-        BMI.B   E_MPP_PRIME_NEXT_3              | buffer full, discard but keep reading
-        MOVE.B  D0,(A3)+                        | store byte in receive buffer
-        BRA.B   E_MPP_PRIME_NEXT_3              | -> next byte
+LAP_SENDFRAME:
+        MOVEM.L A0-A1/A4-A6,0xDE(A2)            | save registers (SaveRegs)
+        MOVE.L  (DskRtnAdr).w,-(SP)             | save DskRtnAdr
+        MOVE.L  (PollStack).w,-(SP)             | save PollStack
+        MOVE.L  A7,(PollStack).w                | PollStack = start of the polled bytes
+        MOVE.L  0xF2(A2),A5                     | A5 = VIA vBufA (PA7 = SCC W/REQ)
+        LEA.L   0x6(A0),A6                      | A6 = SCC channel A data (read)
+        MOVE.L  0xA2(A2),A4                     | A4 = WDS (WDSPtr)
+        BSR.B   LAP_TXON                        | transmitter on
+        MOVE    (A4)+,D3                        | D3 = length of the first entry
+        MOVE.L  (A4)+,A3                        | A3 = its data (frame header)
+        MOVE.B  (A3)+,0x4(A1)                   | send lapDstAdr
+        SUBQ.W  #0x1,D3                         | one byte less
+        MOVE.B  (A2),(A3)                       | lapSrcAdr = sysLAPAddr
+| byte loop
+LAP_SENDFRAME_LOOP:
+        MOVEQ.L #0x1E,D0                        | 31 polls
+LAP_SENDFRAME_WAIT:
+        BTst    #0x2,(A0)                       | RR0: Tx buffer empty?
+        DBNE    D0,LAP_SENDFRAME_WAIT           | no -> poll again
+        BNE.B   LAP_SENDFRAME_BYTE              | yes ->
+        BSR.B   LAP_TXOFF                       | timeout: transmitter off
+        BRA.B   LAP_SENDFRAME_POLL              | -> finish
 
 | ----------------------------------------------------------
 |
-| E_MPP_PRIME_CONT_30: packet receive complete - check CRC, call poll proc
+| LAP_SENDFRAME_BYTE
 |
-E_MPP_PRIME_CONT_30:
-        BSR     RETURNS_7                       | receive CRC bytes, validate frame
-        MOVE.L  (PollStack).w,0xC6(A2)          | save current poll stack in ABusVars
-        MOVE.L  A4,(PollStack).w                | set our saved SP as poll stack
-        MOVE.L  (PollProc).w,D1                 | disk poll procedure installed?
-        BEQ.B   E_MPP_PRIME_NO_12               | no ->
-        MOVEM.L D0/D2-D3/A3/A6,0xDE(A2)         | save registers in ABusVars scratch
-        LEA.L   0x6(A0),A6                      | A6 = SCC data read address
-        MOVE.L  D1,A0                           | A0 = poll procedure address
-        MOVE.L  (DskRtnAdr).w,0xC2(A2)          | save disk return address
-        JSR     (A0)                            | call disk poll (cooperative multitask)
-        MOVE.L  (ABusVars).w,A2                 | reload A2 (poll may have changed it)
-        MOVE.L  0xC2(A2),(DskRtnAdr).w          | restore disk return address
-        MOVEM.L 0xDE(A2),D0/D2-D3/A3/A6         | restore saved registers
-E_MPP_PRIME_NO_12:
-        MOVE.L  (PollStack).w,SP                | restore stack pointer
-        MOVE.L  0xC6(A2),(PollStack).w          | restore original poll stack
-| E_MPP_PRIME_ERR_10: finish receive - restore A4-A5, set flags, return
-E_MPP_PRIME_ERR_10:
-        MOVEM.L 0xBA(A2),A4-A5                  | restore A4-A5 from ABusVars scratch
-        TST     D0                              | set Z flag from receive result
-E_MPP_PRIME_EXIT_3:
-        RTS                                     | return to caller
+| send the next byte; save a modem-port byte, if one arrived
+LAP_SENDFRAME_BYTE:
+        MOVE.B  (A3)+,0x4(A1)                   | next byte to the Tx buffer
+        TST.B   (A5)                            | VIA PA7 low (channel A byte waiting)?
+        BMI.B   LAP_SENDFRAME_COUNT             | no ->
+        MOVE.B  (A6),-(SP)                      | yes: push it for PollProc
+LAP_SENDFRAME_COUNT:
+        SUBQ.W  #0x1,D3                         | count
+        BGT.B   LAP_SENDFRAME_LOOP              | more in this entry ->
+        MOVE    (A4)+,D3                        | D3 = length of the next entry
+        BEQ.B   LAP_SENDFRAME_END               | 0 = end of WDS ->
+        MOVE.L  (A4)+,A3                        | A3 = its data
+        BRA.B   LAP_SENDFRAME_LOOP              | send it
 
 | ----------------------------------------------------------
 |
-| E_MPP_PRIME_CONT_31: read D3 bytes from SCC into buffer at (A3)
-| Called via JMP (A4) or JSR (A4) by DDP receive handlers
+| LAP_SENDFRAME_END
 |
-E_MPP_PRIME_CONT_31:
-        SUB     D3,D1                           | adjust remaining packet length
-E_MPP_PRIME_CONT_32:
-        MOVEQ.L #0x10,D0                        | 16 iteration RX poll timeout
-E_MPP_PRIME_LOOP_20:
-        BTst    #0x0,(A0)                       | SCC RR0 bit 0: RX char available?
-        DBNE    D0,E_MPP_PRIME_LOOP_20          | wait for data byte
-        BEQ.B   E_MPP_PRIME_ERR_11              | timeout -> error
-        MOVE.B  0x4(A0),(A3)+                   | read byte from SCC into buffer
-        SUBQ.W  #0x1,D3                         | decrement byte count
-        BNE.B   E_MPP_PRIME_CONT_32             | more bytes to read ->
-        MOVE.B  #0x1,(A1)                       | SCC: select RR1 (status register)
-        MOVEQ.L #-0x60,D0                       | 0xA0 mask: end-of-frame + overrun
-        AND.B   (A0),D0                         | check receive status
-        BEQ.B   E_MPP_PRIME_EXIT_3              | clean -> return OK (Z=1)
-        BMI.B   E_MPP_PRIME_ERR_12              | end-of-frame (premature) -> error
-        MOVEQ.L #-0x1,D0                        | RX overrun error
-        BRA.B   E_MPP_PRIME_ERR_13              | -> reset and return error
+| all bytes sent: end the frame
+LAP_SENDFRAME_END:
+        BSR.B   LAP_ENDFRAME                    | CRC, flag, abort, transmitter off
+| let PollProc process the saved modem-port bytes
+LAP_SENDFRAME_POLL:
+        MOVE.L  (PollProc).w,D3                 | PollProc installed?
+        BEQ.B   LAP_SENDFRAME_EXIT              | no ->
+        MOVE.L  D3,A4                           | A4 = PollProc
+        JSR     (A4)                            | call it
+        MOVE.L  (ABusVars).w,A2                 | A2 = MPP variables again
+LAP_SENDFRAME_EXIT:
+        MOVEM.L 0xDE(A2),A0-A1/A4-A6            | restore registers
+        MOVE.L  (PollStack).w,SP                | drop the polled bytes
+        MOVE.L  (SP)+,(PollStack).w             | restore PollStack
+        MOVE.L  (SP)+,(DskRtnAdr).w             | restore DskRtnAdr
+        RTS                                     | return from LAP_SENDFRAME
 
 | ----------------------------------------------------------
 |
-| E_MPP_PRIME_ERR_11: SCC receive timeout during byte read
+| LAP_SENDCTL: send a LAP control frame: lapDstAdr = D2, lapSrcAdr =
+| sysLAPAddr, lapType = D0.B ($81 lapENQ, $82 lapACK, $84 lapRTS,
+| $85 lapCTS); falls into LAP_ENDFRAME
 |
-E_MPP_PRIME_ERR_11:
-        MOVEQ.L #-0x3,D0                        | timeout error code
-        BRA.B   E_MPP_PRIME_ERR_13              | -> reset and return error
+LAP_SENDCTL:
+        BSR     LAP_TXON                        | transmitter on
+        MOVE.B  D2,0x4(A1)                      | send lapDstAdr
+        MOVE.B  (A2),D3                         | D3 = sysLAPAddr
+        BSR     LAP_SENDBYTE                    | send lapSrcAdr
+        BEQ.B   LAP_TXOFF                       | (see LAP_SENDBYTE) -> transmitter off
+        MOVE.B  D0,D3                           | D3 = lapType
+        BSR     LAP_SENDBYTE                    | send it
+        BEQ.B   LAP_TXOFF                       | (see LAP_SENDBYTE) -> transmitter off
+| LAP_ENDFRAME: let the SCC append CRC and closing flag at the underrun,
+| then hold the line marking (abort sequence) and turn the transmitter off
+LAP_ENDFRAME:
+        MOVE.B  #0xC0,(A1)                      | WR0 = $C0: reset Tx underrun/EOM latch
+        LSL     #0x1,D3                         | delay
+LAP_ENDFRAME_EOM:
+        BTst    #0x6,(A0)                       | RR0: Tx underrun/EOM (CRC being sent)?
+        BEQ.B   LAP_ENDFRAME_EOM                | no -> wait
+LAP_ENDFRAME_TBE:
+        BTst    #0x2,(A0)                       | RR0: Tx buffer empty?
+        BEQ.B   LAP_ENDFRAME_TBE                | no -> wait
+        MOVE.B  #0x5,(A1)                       | WR0: select WR5
+        MOVEQ.L #0x0,D3                         | D3.W = 0
+        MOVE.B  #0x62,(A1)                      | WR5 = $62: Tx off, RTS on: line marks (abort)
+        MOVE.B  0xB9(A2),D3                     | D3 = abort-sequence delay
+LAP_ENDFRAME_ABORT:
+        DBF     D3,LAP_ENDFRAME_ABORT           | wait
+| LAP_TXOFF: write VSTData - WR5 = $60 (RTS off), WR14 = $41 (DPLL reset
+| missing clock, BRG on), WR3 = $DD (receiver on, hunt mode)
+LAP_TXOFF:
+        LEA.L   0xF6(A2),A3                     | A3 = VSTData
+        MOVEQ.L #0x6,D3                         | 6 bytes
+| LAP_SCCWRITE: write D3 bytes from (A3) to the channel B control register
+LAP_SCCWRITE:
+        MOVE.B  (A3)+,(A1)                      | next byte
+        SUBQ.W  #0x1,D3                         | count
+        BNE.B   LAP_SCCWRITE                    | loop
+        RTS                                     | return from LAP_SCCWRITE
 
 | ----------------------------------------------------------
 |
-| E_MPP_PRIME_ERR_12: premature end-of-frame during byte read
+| LAP_RCVINT: SCC channel B receive interrupt (Lvl2DT[2]); A0/A1 = SCC
+| channel B control.  LAP_RCVFRAME (also from LAP_POLLRCV): read lapDstAdr,
+| lapSrcAdr, lapType into the RHA; control frames -> LAP_RCVCTL; data
+| frames: read the length word and jump to the protocol handler (A4 =
+| LAP_READ_JT, D1 = bytes left, A3 -> RHA, A4/A5 saved in SaveA45).
 |
-E_MPP_PRIME_ERR_12:
-        MOVEQ.L #-0x4,D0                        | premature EOF error code
-E_MPP_PRIME_ERR_13:
-        BSR     E_MPP_PRIME_CONT_25             | reset SCC receiver
-        BRA.B   E_MPP_PRIME_ERR_10              | -> restore regs, return error status
+LAP_RCVINT:
+        MOVE.L  (ABusVars).w,A2                 | A2 = MPP variables
+| LAP_RCVFRAME
+LAP_RCVFRAME:
+        LEA.L   0x1(A2),A3                      | A3 = RHA (toRHA)
+        MOVE.B  0x4(A0),(A3)+                   | lapDstAdr
+        MOVEQ.L #0x28,D1                        | poll budget for the header
+LAP_RCVFRAME_SRC:
+        BTst    #0x0,(A0)                       | RR0: Rx character available?
+        DBNE    D1,LAP_RCVFRAME_SRC             | no -> poll again
+        BEQ.B   LAP_RCVFRAME_TIMEOUT            | timeout ->
+        MOVE.B  0x4(A0),(A3)+                   | lapSrcAdr
+LAP_RCVFRAME_TYPE:
+        BTst    #0x0,(A0)                       | Rx character available?
+        DBNE    D1,LAP_RCVFRAME_TYPE            | no -> poll again
+        BEQ.B   LAP_RCVFRAME_TIMEOUT            | timeout ->
+        MOVE.B  0x4(A0),D0                      | D0 = lapType
+        MOVE.B  D0,(A3)+                        | into the RHA
+        BMI.B   LAP_RCVCTL                      | $80-$FF: control frame ->
+| find the protocol handler of the type
+        MOVEQ.L #0x3,D2                         | 4 entries
+LAP_RCVFRAME_FINDPH:
+        CMP.B   0x22(A2,D2.W),D0                | this type?
+        DBEQ    D2,LAP_RCVFRAME_FINDPH          | no -> next
+        LSL     #0x2,D2                         | long index (negative: none)
+| length word (10 bits, includes itself)
+        MOVEQ.L #0x28,D0                        | poll budget
+LAP_RCVFRAME_LEN1:
+        BTst    #0x0,(A0)                       | Rx character available?
+        DBNE    D0,LAP_RCVFRAME_LEN1            | no -> poll again
+        BEQ.B   LAP_RCVFRAME_TIMEOUT            | timeout ->
+        MOVE.B  0x4(A0),(A3)                    | length high byte
+        MOVEQ.L #0x3,D1                         | 2 bits
+        AND.B   (A3)+,D1                        | D1 = length bits 9-8
+        LSL     #0x8,D1                         | to bits 9-8
+        MOVEM.L A4-A5,0xBA(A2)                  | save A4/A5 (SaveA45)
+LAP_RCVFRAME_LEN2:
+        BTst    #0x0,(A0)                       | Rx character available?
+        DBNE    D0,LAP_RCVFRAME_LEN2            | no -> poll again
+LAP_RCVFRAME_TIMEOUT:
+        BEQ.B   LAP_SPECIALINT                  | timeout -> discard the frame
+        MOVE.B  0x4(A0),D1                      | length bits 7-0
+        MOVE.B  D1,(A3)+                        | into the RHA
+        SUBQ.W  #0x2,D1                         | D1 = bytes left after the length word
+        TST     D2                              | protocol handler found?
+        BMI.B   LAP_RCVFRAME_NOPH               | no ->
+        MOVE.L  0x26(A2,D2.W),A5                | A5 = protocol handler
+        LEA.L   LAP_READ_JT(PC),A4              | A4 = ReadPacket/ReadRest jump table
+        JMP     (A5)                            | -> protocol handler
+
+| ----------------------------------------------------------
+|
+| LAP_RCVFRAME_NOPH: no handler for the type - read and drop the rest
+| (ReadRest with no buffer), unless the frame has already ended
+|
+LAP_RCVFRAME_NOPH:
+        MOVE.B  #0x1,(A1)                       | WR0: select RR1
+        MOVEQ.L #-0x60,D0                       | $A0
+        AND.B   (A0),D0                         | RR1: end of frame or Rx overrun?
+        BNE     LAP_LENERR                      | yes -> error, reset the receiver
+        CLR     D3                              | buffer size 0
+        BRA     READREST                        | read and drop the rest
+
+| ----------------------------------------------------------
+|
+| LAP_RCVCTL: control frame (lapType in D0).  Reads the CRC.  While our
+| address is not yet valid, a frame sent to it (not broadcast) means the
+| address is taken (fAdrInUse).  Else: lapENQ -> answer lapACK; lapRTS ->
+| answer lapCTS (not to a broadcast), then receive the data frame;
+| fGoodCTS = (frame is lapCTS).
+|
+LAP_RCVCTL:
+        MOVEQ.L #0x7F,D2                        | mask
+        AND.B   D0,D2                           | D2 = lapType - $80
+        CMPI.B  #0x5,D2                         | above $85?
+        BGT.B   LAP_SPECIALINT                  | yes -> discard
+        BSR.B   LAP_RCVCRC                      | read the CRC, check the frame
+        BNE.B   LAP_RCVCTL_EXIT                 | bad -> return
+        CMPI.B  #0xFF,0x1(A2)                   | lapDstAdr = $FF (broadcast)?
+        SEQ.B   D1                              | D1 = $FF if broadcast
+        BEQ.B   LAP_RCVCTL_TYPE                 | broadcast -> process
+        TST.B   0xAD(A2)                        | fLAPAdrValid?
+        BNE.B   LAP_RCVCTL_TYPE                 | yes -> process
+        ST.B    0xAF(A2)                        | no: fAdrInUse
+LAP_RCVCTL_EXIT:
+        RTS                                     | return
+
+| ----------------------------------------------------------
+|
+| LAP_RCVCTL_TYPE: dispatch on the control frame type
+|
+LAP_RCVCTL_TYPE:
+        SUBQ.B  #0x1,D2                         | $81 lapENQ?
+        BEQ.B   LAP_RCVCTL_ENQ                  | yes -> answer lapACK
+        SUBQ.B  #0x3,D2                         | $84 lapRTS?
+        BEQ.B   LAP_RCVCTL_RTS                  | yes -> answer lapCTS
+        SUBQ.B  #0x1,D2                         | $85 lapCTS?
+        SEQ.B   0xAE(A2)                        | fGoodCTS = (lapCTS)
+        RTS                                     | return
+
+| ----------------------------------------------------------
+|
+| LAP_RCVCTL_RTS: lapRTS - answer lapCTS unless it was broadcast, then
+| receive the data frame that follows
+|
+LAP_RCVCTL_RTS:
+        TST.B   D1                              | broadcast?
+        BNE.B   LAP_RCVCTL_DATA                 | yes: no lapCTS ->
+        MOVEQ.L #0x14,D0                        | 21 iterations
+LAP_RCVCTL_DELAY:
+        DBF     D0,LAP_RCVCTL_DELAY             | short delay
+        MOVEQ.L #-0x7B,D0                       | D0 = $85 (lapCTS)
+        BSR.B   LAP_REPLYCTL                    | send it to the sender
+LAP_RCVCTL_DATA:
+        BRA     LAP_POLLRCV                     | receive the data frame
+
+| ----------------------------------------------------------
+|
+| LAP_RCVCTL_ENQ
+|
+| lapENQ for our address: answer lapACK
+LAP_RCVCTL_ENQ:
+        MOVEQ.L #-0x7E,D0                       | D0 = $82 (lapACK)
+| LAP_REPLYCTL: send control frame D0 to the sender (lapSrcAdr in the RHA)
+LAP_REPLYCTL:
+        MOVE.B  0x2(A2),D2                      | D2 = lapSrcAdr of the received frame
+        BRA     LAP_SENDCTL                     | send it
+
+| ----------------------------------------------------------
+|
+| LAP_SPECIALINT: SCC channel B special receive condition (Lvl2DT[3]),
+| also used to drop a frame: reset the receiver (twice)
+|
+LAP_SPECIALINT:
+        BSR.B   LAP_RCVRESET                    | reset the receiver
+        BRA.B   LAP_RCVRESET                    | and once more
+
+| ----------------------------------------------------------
+|
+| LAP_RCVCRC: read the two CRC bytes that end the frame: the first must
+| not, the second must have end of frame, without CRC error; then reset
+| the receiver.  D0 = 0 or overrunErr (-1), crcErr (-2), underrunErr
+| (-3, timeout), lengthErr (-4); condition codes from D0.
+|
+LAP_RCVCRC:
+        CLR     D0                              | D0 = noErr
+        MOVEQ.L #0x10,D1                        | 17 polls
+LAP_RCVCRC_WAIT1:
+        BTst    #0x0,(A0)                       | RR0: Rx character available?
+        DBNE    D1,LAP_RCVCRC_WAIT1             | no -> poll again
+        BEQ.B   LAP_UNDERRUN                    | timeout -> underrunErr
+        BSR.B   LAP_GETRR1                      | D1 = RR1
+        BMI.B   LAP_LENERR                      | end of frame already: frame short -> lengthErr
+        TST.B   0x4(A0)                         | read (drop) the first CRC byte
+        MOVEQ.L #0x10,D1                        | 17 polls
+LAP_RCVCRC_WAIT2:
+        BTst    #0x0,(A0)                       | Rx character available?
+        DBNE    D1,LAP_RCVCRC_WAIT2             | no -> poll again
+        BEQ.B   LAP_UNDERRUN                    | timeout -> underrunErr
+        BSR.B   LAP_GETRR1                      | D1 = RR1
+        BPL.B   LAP_LENERR                      | no end of frame: frame long -> lengthErr
+        LSL.B   #0x1,D1                         | RR1 bit 6 (CRC error) -> N
+        BMI.B   LAP_CRCERR                      | CRC error -> crcErr
+| LAP_RCVRESET: re-arm the receiver for the next frame: receiver off and
+| hunt, drain the 3-byte FIFO, receiver on (hunt, address search), error
+| reset, interrupt on the next character.  Condition codes from D0.
+LAP_RCVRESET:
+        BSR.B   LAP_GETRR1                      | D1 = RR1
+        BTST    #0x5,D1                         | Rx overrun?
+        BEQ.B   LAP_RCVRESET_HUNT               | no ->
+        BCLR    #0x7,(IntFlag).w                | IntFlag bit 7 = 0: ask for shorter interrupts-off periods
+LAP_RCVRESET_HUNT:
+        MOVEQ.L #-0x30,D1                       | $D0
+        BSR.B   LAP_SETWR3                      | WR3 = $D0: receiver off, enter hunt mode
+        MOVEQ.L #0x2,D1                         | 3 bytes
+LAP_RCVRESET_DRAIN:
+        TST.B   0x4(A0)                         | read (drop) a FIFO byte
+        DBF     D1,LAP_RCVRESET_DRAIN           | loop
+        MOVEQ.L #-0x23,D1                       | $DD
+        BSR.B   LAP_SETWR3                      | WR3 = $DD: Rx on, 8 bits, hunt, CRC, address search
+        MOVE.B  #0x30,(A1)                      | WR0 = $30: error reset
+        MOVE    (SP),(SP)                       | delay (SCC recovery time)
+        MOVE.B  #0x20,(A1)                      | WR0 = $20: enable interrupt on next Rx character
+        TST     D0                              | condition codes = result
+        RTS                                     | return
+
+| ----------------------------------------------------------
+|
+| LAP_SETWR3: WR3 = D1
+|
+LAP_SETWR3:
+        MOVE.B  #0x3,(A1)                       | WR0: select WR3
+        NOP                                     | SCC recovery time
+        MOVE.B  D1,(A1)                         | WR3 = D1
+        RTS                                     | return from LAP_SETWR3
+
+| ----------------------------------------------------------
+|
+| LAP_GETRR1: D1 = RR1 (bit 7 end of frame, 6 CRC error, 5 Rx overrun)
+|
+LAP_GETRR1:
+        MOVE.B  #0x1,(A1)                       | WR0: select RR1
+        NOP                                     | SCC recovery time
+        MOVE.B  (A0),D1                         | D1 = RR1
+        RTS                                     | return from LAP_GETRR1
+
+| ----------------------------------------------------------
+|
+| LAP_LENERR / LAP_UNDERRUN / LAP_CRCERR / LAP_OVERRUN: subtract from D0
+| (0 on entry) down to the error code, then reset the receiver
+|
+LAP_LENERR:
+        BTst    #0x5,D1                         | Rx overrun?
+        BNE.B   LAP_OVERRUN                     | yes -> overrunErr
+        MOVEQ.L #-0x1,D0                        | lengthErr path: from -1 down to -4
+LAP_UNDERRUN:
+        SUBQ.W  #0x1,D0                         | underrunErr entry (D0 = 0): down to -3
+LAP_CRCERR:
+        SUBQ.W  #0x1,D0                         | crcErr entry (D0 = 0): down to -2
+LAP_OVERRUN:
+        SUBQ.W  #0x1,D0                         | overrunErr entry (D0 = 0): -1
+        BRA.B   LAP_RCVRESET                    | reset the receiver
+
+| ----------------------------------------------------------
+|
+| LAP_READ_JT: A4 for protocol handlers and socket listeners - JSR (A4) =
+| ReadPacket, JSR 2(A4) = ReadRest
+|
+LAP_READ_JT:
+        BRA.B   READPACKET                      | (A4): ReadPacket; 2(A4) = READREST below
+
+| ----------------------------------------------------------
+|
+| READREST: read the rest of the packet (D1 bytes left) into the buffer
+| at A3, D3 bytes long (excess bytes are dropped), then check the CRC
+| (LAP_RCVCRC).  D3 = 0 if it fit exactly, > 0 if bytes were left
+| unfilled, < 0 if (-D3) bytes did not fit.  Saves modem-port bytes for
+| PollProc.  Restores A4/A5; condition codes / D0 = result.
+|
+READREST:
+        MOVE.L  0xF2(A2),A5                     | A5 = VIA vBufA (PA7 = SCC W/REQ)
+        MOVE.L  A7,A4                           | A4 = start of the polled bytes
+| byte loop
+READREST_LOOP:
+        MOVEQ.L #0x10,D0                        | 17 polls
+        SUBQ.W  #0x1,D1                         | one byte less to go
+        BMI.B   READREST_END                    | all read ->
+READREST_WAIT:
+        BTst    #0x0,(A0)                       | RR0: Rx character available?
+        DBNE    D0,READREST_WAIT                | no -> poll again
+        BEQ.B   READREST_END                    | timeout -> end
+        MOVE.B  0x4(A0),D0                      | D0 = data byte
+        TST.B   (A5)                            | VIA PA7 low (channel A byte waiting)?
+        BMI.B   READREST_STORE                  | no ->
+        MOVE.B  0x6(A0),-(SP)                   | yes: push it for PollProc
+READREST_STORE:
+        SUBQ.W  #0x1,D3                         | room in the buffer?
+        BMI.B   READREST_LOOP                   | no -> drop the byte
+        MOVE.B  D0,(A3)+                        | store it
+        BRA.B   READREST_LOOP                   | next byte
+
+| ----------------------------------------------------------
+|
+| READREST_END
+|
+| end of packet: CRC, then let PollProc have the saved modem-port bytes
+READREST_END:
+        BSR     LAP_RCVCRC                      | CRC, end of frame; D0 = result
+        MOVE.L  (PollStack).w,0xC6(A2)          | save PollStack (SavePS)
+        MOVE.L  A4,(PollStack).w                | PollStack = start of the polled bytes
+        MOVE.L  (PollProc).w,D1                 | PollProc installed?
+        BEQ.B   READREST_NOPOLL                 | no ->
+        MOVEM.L D0/D2-D3/A3/A6,0xDE(A2)         | save registers (SaveRegs)
+        LEA.L   0x6(A0),A6                      | A6 = SCC channel A data (read)
+        MOVE.L  D1,A0                           | A0 = PollProc
+        MOVE.L  (DskRtnAdr).w,0xC2(A2)          | save DskRtnAdr (SaveDskRtn)
+        JSR     (A0)                            | call PollProc
+        MOVE.L  (ABusVars).w,A2                 | A2 = MPP variables again
+        MOVE.L  0xC2(A2),(DskRtnAdr).w          | restore DskRtnAdr
+        MOVEM.L 0xDE(A2),D0/D2-D3/A3/A6         | restore registers
+READREST_NOPOLL:
+        MOVE.L  (PollStack).w,SP                | drop the polled bytes
+        MOVE.L  0xC6(A2),(PollStack).w          | restore PollStack
+| READ_EXIT: restore A4/A5 (SaveA45), condition codes from D0
+READ_EXIT:
+        MOVEM.L 0xBA(A2),A4-A5                  | restore A4/A5
+        TST     D0                              | condition codes = result
+READPACKET_EXIT:
+        RTS                                     | return
+
+| ----------------------------------------------------------
+|
+| READPACKET: read D3 bytes of the packet into (A3)+; D1 -= D3.  D0/
+| condition codes = 0 if all were read; on overrunErr (-1), underrunErr
+| (-3, timeout) or lengthErr (-4, frame ended early) the receiver is
+| reset and A4/A5 restored (the caller must just return).
+|
+READPACKET:
+        SUB     D3,D1                           | bytes left after this read
+READPACKET_LOOP:
+        MOVEQ.L #0x10,D0                        | 17 polls
+READPACKET_WAIT:
+        BTst    #0x0,(A0)                       | RR0: Rx character available?
+        DBNE    D0,READPACKET_WAIT              | no -> poll again
+        BEQ.B   READPACKET_TIMEOUT              | timeout ->
+        MOVE.B  0x4(A0),(A3)+                   | store the byte
+        SUBQ.W  #0x1,D3                         | count
+        BNE.B   READPACKET_LOOP                 | loop (ends with D3 = 0)
+| frame ended early or overrun?
+        MOVE.B  #0x1,(A1)                       | WR0: select RR1
+        MOVEQ.L #-0x60,D0                       | $A0
+        AND.B   (A0),D0                         | RR1: end of frame / Rx overrun?
+        BEQ.B   READPACKET_EXIT                 | neither -> return (EQ)
+        BMI.B   READPACKET_LENERR               | end of frame -> lengthErr
+        MOVEQ.L #-0x1,D0                        | overrunErr (-1)
+        BRA.B   READPACKET_ERR                  | ->
+
+| ----------------------------------------------------------
+|
+| READPACKET_TIMEOUT: no byte came - underrunErr
+|
+READPACKET_TIMEOUT:
+        MOVEQ.L #-0x3,D0                        | underrunErr (-3)
+        BRA.B   READPACKET_ERR                  | ->
+
+| ----------------------------------------------------------
+|
+| READPACKET_LENERR: frame shorter than its length word - lengthErr
+|
+READPACKET_LENERR:
+        MOVEQ.L #-0x4,D0                        | lengthErr (-4)
+READPACKET_ERR:
+        BSR     LAP_RCVRESET                    | reset the receiver
+        BRA.B   READ_EXIT                       | restore A4/A5, return NE
 
 | ----------------------------------------------------------
 |
 | E_MPP_Close
 |
-| .MPP Close: shut down AppleTalk, restore serial drivers
-| Closes .ATP, removes SCC interrupt handler and VBL task,
-| restores .BIn/.BOut drivers to unit table, frees ABusVars
+| .MPP Close: closes .ATP (atpVars flag set first), resets SCC channel B
+| (mouse interrupt kept), removes the VBL task and the interrupt
+| handlers, gives units 7/8 (.BIn/.BOut) back and frees the variables.
 E_MPP_Close:
         MOVE.L  (UTableBase).w,A4               | A4 = unit table
-        ADDA    #0x28,A4                        | point past serial driver slots
-        MOVE.L  (ABusVars).w,A2                 | A2 = ABusVars
-        MOVE.L  A2,D0                           | initialized?
-        BEQ     E_MPP_CLOSE_NO                  | no, nothing to close ->
-| close .ATP driver first
-        ST.B    0x1E(A2)                        | mark as closing
-        SUBA    #0x32,SP                        | allocate IOParam on stack
-        MOVE.L  A7,A0                           | A0 = IOParam block on stack
+        ADDA    #0x28,A4                        | A4 -> unit 10 (.ATP) entry
+        MOVE.L  (ABusVars).w,A2                 | A2 = MPP variables
+        MOVE.L  A2,D0                           | .MPP open?
+        BEQ     E_MPP_CLOSE_PORT                | no -> only release the port
+| close .ATP
+        ST.B    0x1E(A2)                        | atpVars flag byte: .ATP must not call .MPP
+        SUBA    #0x32,SP                        | parameter block on the stack
+        MOVE.L  A7,A0                           | A0 = it
         MOVE    #-0xB,0x18(A0)                  | ioRefNum = -11 (.ATP)
-        _Close                                  | close .ATP driver
-        ADDA    #0x32,SP                        | pop IOParam
-| remove SCC interrupt handler and VBL task
+        _Close                                  | close .ATP
+        ADDA    #0x32,SP                        | drop the parameter block
+| SCC, VBL task, interrupt handlers
         MOVE    SR,-(SP)                        | save SR
-        MOVE    #0x2600,SR                      | disable interrupts
-        LEA.L   INIT_TBL(PC),A0                 | SCC init table (reset to default)
-        BSR.B   E_MPP_CLOSE_CONT                | reprogram SCC for normal serial
-        LEA.L   0x7C(A2),A0                     | VBL task record
-        _VRemove                                | remove retransmission VBL
-        LEA.L   0xD2(A2),A0                     | saved interrupt vectors in ABusVars
-        LEA.L   (Lvl2DT_2).w,A3                 | A3 = level 2 dispatch table slot
-        MOVE.L  (A0)+,(A3)+                     | restore original SCC RX handler
-        MOVE.L  (A0)+,(A3)+                     | restore original SCC TX handler
-        MOVE.L  (A0)+,(ExtStsDT).w              | restore original ext/status handler
-| restore .BOut and .BIn serial drivers to unit table
-        MOVE.L  -(A4),A0                        | A4 already past serial slots; back up
-        MOVE.L  0xCE(A2),D0                     | saved .BOut DCE handle
-        BEQ.B   E_MPP_CLOSE_EMPTY               | none saved ->
-        MOVE.L  D0,-0x4(A4)                     | restore .BOut to unit table
-E_MPP_CLOSE_EMPTY:
-        MOVE.L  0xCA(A2),D0                     | saved .BIn DCE handle
-        BEQ.B   E_MPP_CLOSE_EMPTY_2             | none saved ->
-        MOVE.L  D0,-0x8(A4)                     | restore .BIn to unit table
-E_MPP_CLOSE_EMPTY_2:
-        MOVE    (SP)+,SR                        | restore interrupt state
-        MOVE.L  A2,A0                           | A0 = ABusVars pointer
-        _DisposePtr                             | free ABusVars memory block
-E_MPP_CLOSE_NO:
-        ST.B    (PortBUse).w                    | mark port B as available ($FF)
-E_MPP_CLOSE_ERR:
-        RTS                                     | return to caller
+        MOVE    #0x2600,SR                      | interrupts off (IPL 6)
+        LEA.L   MPP_SCCRESET_TBL(PC),A0         | A0 = SCC table
+        BSR.B   MPP_SCCINIT                     | reset channel B
+        LEA.L   0x7C(A2),A0                     | A0 = VBL task
+        _VRemove                                | remove it
+        LEA.L   0xD2(A2),A0                     | A0 = SaveVects
+        LEA.L   (Lvl2DT_2).w,A3                 | A3 = Lvl2DT[2]
+        MOVE.L  (A0)+,(A3)+                     | Lvl2DT[2]: channel B Rx character
+        MOVE.L  (A0)+,(A3)+                     | Lvl2DT[3]: channel B special receive
+        MOVE.L  (A0)+,(ExtStsDT).w              | ExtStsDT[0]: channel B external/status
+| give units 8 (.BOut) and 7 (.BIn) back
+        MOVE.L  -(A4),A0                        | A4 -> unit 9 (.MPP) entry (A0 not used)
+        MOVE.L  0xCE(A2),D0                     | SaveBOut
+        BEQ.B   E_MPP_CLOSE_BIN                 | none ->
+        MOVE.L  D0,-0x4(A4)                     | unit 8 = .BOut DCE handle
+E_MPP_CLOSE_BIN:
+        MOVE.L  0xCA(A2),D0                     | SaveBIn
+        BEQ.B   E_MPP_CLOSE_FREE                | none ->
+        MOVE.L  D0,-0x8(A4)                     | unit 7 = .BIn DCE handle
+E_MPP_CLOSE_FREE:
+        MOVE    (SP)+,SR                        | restore SR
+        MOVE.L  A2,A0                           | A0 = MPP variables
+        _DisposePtr                             | free them
+E_MPP_CLOSE_PORT:
+        ST.B    (PortBUse).w                    | PortBUse = $FF: port B free
+E_MPP_CLOSE_EXIT:
+        RTS                                     | return
 
 | ----------------------------------------------------------
 |
-| E_MPP_CLOSE_CONT: program SCC from register/value table at (A0)
-| Table format: word pairs (reg, value), terminated by 0x0000
+| MPP_SCCINIT: write a table of words (value << 8) + register to SCC
+| channel B (register number, then value) up to a 0 word
 |
-E_MPP_CLOSE_CONT:
-        MOVE.L  (SCCWr).w,A3                    | A3 = SCC write register base
-E_MPP_CLOSE_NEXT:
-        MOVE    (A0)+,D0                        | D0 = next register/value word
-        BEQ.B   E_MPP_CLOSE_ERR                 | zero = end of table -> return
-        MOVE.B  D0,(A3)                         | write register number to SCC
-        ROR     #0x8,D0                         | swap bytes: value -> low byte
-        MOVE.B  D0,(A3)                         | write register value to SCC
-        BRA.B   E_MPP_CLOSE_NEXT                | -> next table entry
+MPP_SCCINIT:
+        MOVE.L  (SCCWr).w,A3                    | A3 = SCC channel B control (write)
+MPP_SCCINIT_LOOP:
+        MOVE    (A0)+,D0                        | D0 = next word
+        BEQ.B   E_MPP_CLOSE_EXIT                | 0 = end -> return
+        MOVE.B  D0,(A3)                         | WR0: register number (low byte)
+        ROR     #0x8,D0                         | value to the low byte
+        MOVE.B  D0,(A3)                         | write the value
+        BRA.B   MPP_SCCINIT_LOOP                | next word
 
 | ----------------------------------------------------------
 |
-| INIT_TBL
+| MPP_SCCRESET_TBL
 |
-INIT_TBL:
-  .byte  0x4A,0x09,0x00,0x0A,0x10,0x00          | SCC init: WR9=0x4A, WR0=0x0A, WR16=0x00
-  .byte 0x08,0x0F,0x01,0x01,0x00,0x00           | WR8=0x0F, WR1=0x01, terminator 0x0000
+| MPP_SCCRESET_TBL: channel B after Close - reset, mouse Y (DCD) on
+MPP_SCCRESET_TBL:
+  .byte  0x4A,0x09,0x00,0x0A,0x10,0x00          | WR9 = $4A (reset channel B, MIE, NV), WR10 = 0, WR0 = $10 (reset ext/status)
+  .byte 0x08,0x0F,0x01,0x01,0x00,0x00           | WR15 = $08 (DCD interrupt), WR1 = $01 (ext/status int. on), end
 
-| .MPP Open: initialize AppleTalk network
-| Allocates ABusVars ($FC = 252 bytes), configures SCC for LocalTalk,
-| takes over serial port from .AIn/.AOut drivers, gets node address
+| .MPP Open: port B must be free (PortBUse < 0) and configured for
+| AppleTalk or unconfigured (SPConfig); allocates the variables, takes
+| units 7/8 (.BIn/.BOut, if not opened) out of the unit table, sets up
+| SCC channel B for LocalTalk, picks a node ID (PRAM hint SPATalkB, else
+| random) and sends lapENQs until no node answers, installs DDP and
+| the RTMP socket, asks for a router (RTMP request), opens .ATP and
+| initializes NBP.  portInUse, portNotCf, memFullErr.
 E_MPP_Open:
-        MOVEQ.L #-0x61,D0                       | portInUse error
-        TST.B   (PortBUse).w                    | printer port already in use?
-        BPL.B   E_MPP_CLOSE_ERR                 | yes ->
-| check PRAM: port B must be configured for AppleTalk
-        MOVEQ.L #-0x62,D0                       | portNotCf error
-        MOVE.B  (SPConfig).w,D1                 | PRAM port config
-        ANDI.B  #0xF,D1                         | port B nibble (low 4 bits)
-        SUBQ.B  #0x1,D1                         | 1 = AppleTalk
-        BGT.B   E_MPP_CLOSE_ERR                 | not AppleTalk ->
-| allocate AppleTalk bus state block
-        CLR.L   (ABusVars).w                    | clear old pointer
-        MOVE.L  #0xFC,D0                        | 252 bytes for ABusVars
-        _NewPtrSysClear                         | allocate zeroed in system heap
-        BNE.B   E_MPP_CLOSE_ERR                 | failed ->
-| initialize AppleTalk state
-        MOVE.B  #0x1,(PortBUse).w               | mark port B as AppleTalk
-        MOVE.L  A0,A2                           | A2 = ABusVars
-        MOVE.L  A2,(ABusVars).w                 | save global pointer
-        MOVE.L  A1,(ABusVars_dce).w             | save DCE
-| steal .BIn and .BOut serial drivers (save and remove from unit table)
-        MOVE.L  (UTableBase).w,A0               | unit table
-        MOVE.L  0x20(A0),A3                     | unit 8 = .BOut DCE handle
+        MOVEQ.L #-0x61,D0                       | portInUse (-97)
+        TST.B   (PortBUse).w                    | port B in use (>= 0)?
+        BPL.B   E_MPP_CLOSE_EXIT                | yes -> return portInUse
+| SPConfig: port B use type must be useFree (0) or useATalk (1)
+        MOVEQ.L #-0x62,D0                       | portNotCf (-98)
+        MOVE.B  (SPConfig).w,D1                 | SPConfig
+        ANDI.B  #0xF,D1                         | port B use type (low nibble)
+        SUBQ.B  #0x1,D1                         | > useATalk?
+        BGT.B   E_MPP_CLOSE_EXIT                | yes -> return portNotCf
+| allocate the MPP variables
+        CLR.L   (ABusVars).w                    | ABusVars = nil meanwhile
+        MOVE.L  #0xFC,D0                        | $FC = 252 bytes
+        _NewPtrSysClear                         | zeroed block in the system heap
+        BNE.B   E_MPP_CLOSE_EXIT                | out of memory -> return
+| initialize
+        MOVE.B  #0x1,(PortBUse).w               | PortBUse = useATalk (1)
+        MOVE.L  A0,A2                           | A2 = MPP variables
+        MOVE.L  A2,(ABusVars).w                 | ABusVars
+        MOVE.L  A1,(ABusVars_dce).w             | AbusDCE = .MPP DCE
+| take unit 8 (.BOut) out of the unit table unless it has been opened
+        MOVE.L  (UTableBase).w,A0               | A0 = unit table
+        MOVE.L  0x20(A0),A3                     | A3 = unit 8 DCE handle (.BOut)
         MOVE.L  A3,D0                           | installed?
-        BEQ.B   E_MPP_OPEN_NO                   | no ->
-        MOVE.L  (A3),A3                         | dereference DCE
-        TST.B   0x7(A3)                         | driver open?
-        BNE.B   E_MPP_OPEN_NO                   | yes, can't steal ->
-        MOVE.L  D0,0xCE(A2)                     | save .BOut handle in ABusVars
-        CLR.L   0x20(A0)                        | remove from unit table
-| steal .BIn similarly
-E_MPP_OPEN_NO:
-        MOVE.L  0x1C(A0),A3                     | unit 7 = .BIn DCE handle
+        BEQ.B   E_MPP_OPEN_BIN                  | no ->
+        MOVE.L  (A3),A3                         | A3 = DCE
+        TST.B   0x7(A3)                         | dCtlQueue+1 (version, set by its Open)?
+        BNE.B   E_MPP_OPEN_BIN                  | set: driver in use -> leave it
+        MOVE.L  D0,0xCE(A2)                     | SaveBOut
+        CLR.L   0x20(A0)                        | remove it from the unit table
+| the same for unit 7 (.BIn)
+E_MPP_OPEN_BIN:
+        MOVE.L  0x1C(A0),A3                     | A3 = unit 7 DCE handle (.BIn)
         MOVE.L  A3,D0                           | installed?
-        BEQ.B   E_MPP_OPEN_NO_2                 | no ->
-        MOVE.L  (A3),A3                         | dereference
-        TST.B   0x7(A3)                         | open?
-        BNE.B   E_MPP_OPEN_NO_2                 | yes ->
-        MOVE.L  D0,0xCA(A2)                     | save .BIn handle
-        CLR.L   0x1C(A0)                        | remove from unit table
-| initialize LAP protocol handlers (4 slots, all empty)
-E_MPP_OPEN_NO_2:
-        MOVEQ.L #0x3,D0                         | 4 LAP handler slots
-E_MPP_OPEN_LOOP:
-        ST.B    0x22(A2,D0.W)                   | mark slot as empty ($FF)
-        DBF     D0,E_MPP_OPEN_LOOP              | loop to clear all DDP socket slots
-| set up SCC and VIA addresses for LocalTalk I/O
-        LEA.L   CONFIG_TBL(PC),A1               | A1 = SCC config table
-        LEA.L   (VIA_PortA2).l,A0               | VIA Port A for handshake
-        MOVE.L  A0,0xF2(A2)                     | store VIA address in ABusVars
-        MOVE.L  (A1)+,0xF6(A2)                  | SCC read/write base addresses
-        MOVE    (A1)+,0xFA(A2)                  | SCC channel offset
-        MOVE    (A1)+,0x1C(A2)                  | baud rate divisor
-        MOVE.B  (A1)+,0xB9(A2)                  | SCC interrupt mask
-| configure SCC for SDLC mode (LocalTalk framing)
+        BEQ.B   E_MPP_OPEN_PHTBL                | no ->
+        MOVE.L  (A3),A3                         | A3 = DCE
+        TST.B   0x7(A3)                         | dCtlQueue+1 (version, set by its Open)?
+        BNE.B   E_MPP_OPEN_PHTBL                | set: driver in use -> leave it
+        MOVE.L  D0,0xCA(A2)                     | SaveBIn
+        CLR.L   0x1C(A0)                        | remove it from the unit table
+| all 4 LAP protocol table entries free
+E_MPP_OPEN_PHTBL:
+        MOVEQ.L #0x3,D0                         | 4 entries
+E_MPP_OPEN_PHLOOP:
+        ST.B    0x22(A2,D0.W)                   | protocol type $FF = free
+        DBF     D0,E_MPP_OPEN_PHLOOP            | loop
+| LAP configuration from MPP_CONFIG_TBL
+        LEA.L   MPP_CONFIG_TBL(PC),A1           | A1 = configuration table
+        LEA.L   (VIA_PortA2).l,A0               | A0 = VIA vBufA (PA7 = SCC W/REQ)
+        MOVE.L  A0,0xF2(A2)                     | +$F2 = its address
+        MOVE.L  (A1)+,0xF6(A2)                  | VSTData bytes 0-3
+        MOVE    (A1)+,0xFA(A2)                  | VSTData bytes 4-5
+        MOVE    (A1)+,0x1C(A2)                  | vSCCEnable = $2100
+        MOVE.B  (A1)+,0xB9(A2)                  | abort-sequence delay = $46
+| install the interrupt handlers and the VBL task, set up the SCC
         MOVE    SR,-(SP)                        | save SR
-        MOVE    #0x2600,SR                      | disable interrupts for SCC init
-| install SCC interrupt handlers - save originals in ABusVars+$D2
-        LEA.L   (Lvl2DT_2).w,A3                 | A3 = level 2 interrupt dispatch table
-        LEA.L   0xD2(A2),A1                     | A1 = save area in ABusVars
-        LEA.L   E_MPP_PRIME_CONT_20(PC),A0      | A0 = our SCC RX interrupt handler
-        MOVE.L  (A3),(A1)+                      | save original RX handler
-        MOVE.L  A0,(A3)+                        | install our RX handler
-        LEA.L   E_MPP_PRIME_CONT_24(PC),A0      | A0 = our SCC TX interrupt handler
-        MOVE.L  (A3),(A1)+                      | save original TX handler
-        MOVE.L  A0,(A3)+                        | install our TX handler (discard frame)
-        LEA.L   E_MPP_PRIME_CONT_10(PC),A0      | A0 = our ext/status handler
-        MOVE.L  (ExtStsDT).w,(A1)               | save original ext/status handler
-        MOVE.L  A0,(ExtStsDT).w                 | install our ext/status handler
-| install VBL task for periodic AppleTalk housekeeping
-        LEA.L   0x7C(A2),A0                     | A0 = VBL task record in ABusVars
-        MOVE    #0x1,0x4(A0)                    | vblType = 1 (standard VBL)
-        LEA.L   E_MPP_PRIME_CONT_12(PC),A1      | A1 = VBL task procedure
-        MOVE.L  A1,0x6(A0)                      | store VBL proc address
-        MOVE    #0x14,0xA(A0)                   | vblCount = 20 ticks (1/3 second)
-        _VInstall                               | install VBL task
-        BSR     E_MPP_OPEN_CONT_5               | initialize SCC for SDLC/LocalTalk
-        MOVE    (Ticks_LoWord).w,0xAA(A2)       | seed PRNG with current tick count
-        MOVE    (SP)+,SR                        | restore interrupt state
-| acquire LocalTalk node address via AARP probing
-        MOVE.B  (SPATalkB).w,D0                 | D0 = PRAM AppleTalk node hint
-        BGT.B   E_MPP_OPEN_CONT                 | valid hint -> use it
-E_MPP_OPEN_RETRY:
-        BSR     RETURNS_5                       | generate random node address
-E_MPP_OPEN_CONT:
-        ANDI    #0x7F,D0                        | mask to valid range 1-127
-        BEQ.B   E_MPP_OPEN_RETRY                | zero invalid, try again ->
-| AARP probe: test if node address is in use (20 attempts)
-        MOVEQ.L #0x13,D4                        | 20 probe attempts (19+1 via DBF)
-        MOVE.B  D0,(A2)                         | tentative node ID -> ABusVars byte 0
-        CLR.B   0xAD(A2)                        | clear "probe complete" flag
-        MOVE.L  (SCCWr).w,A1                    | A1 = SCC write register base
-        MOVE.B  #0x6,(A1)                       | SCC WR6 register select (SDLC addr)
-        CLR.B   0xAF(A2)                        | clear collision-detected flag
-        MOVE.B  (A2),(A1)                       | set SCC SDLC address to our node ID
-E_MPP_OPEN_LOOP_2:
-        ST.B    0xB0(A2)                        | set ENQ/ACK probe mode flag
-        MOVE.B  (A2),D2                         | D2 = our tentative node ID
-        BSR     E_MPP_OPEN_CONT_4               | send ENQ probe (LAP control frame)
-E_MPP_OPEN_NO_3:
-        TST.B   0xB0(A2)                        | probe response received?
-        BNE.B   E_MPP_OPEN_NO_3                 | not yet, busy-wait ->
-        TST.B   0xAF(A2)                        | collision detected (node in use)?
-        BNE.B   E_MPP_OPEN_RETRY                | yes -> pick new random address
-        DBF     D4,E_MPP_OPEN_LOOP_2            | repeat probe for reliability
-| address acquired - save to PRAM
-        MOVE.B  (A2),(SPATalkB).w               | store node ID in PRAM
-        ST.B    0xAD(A2)                        | mark probe phase complete
-        LEA.L   (SysParam_SPValid).w,A0         | A0 = parameter RAM validation
-        MOVEQ.L #-0x1,D0                        | write all parameter RAM
-        _WriteParam                             | save PRAM to disk/NVRAM
-| install DDP receive handlers in socket handler table
-        LEA.L   E_MPP_CONTROL_CONT_12(PC),A3    | A3 = short DDP receive handler
-        LEA.L   0x36(A2),A0                     | A0 = after DDP handler table slot 1
-        MOVE.L  A3,-(A0)                        | install short DDP handler (type 1)
-        LEA.L   E_MPP_CONTROL_CONT_11(PC),A3    | A3 = extended DDP receive handler
-        MOVE.L  A3,-(A0)                        | install extended DDP handler (type 2)
-| register LAP types 1 and 2 for DDP short/extended frames
-        LEA.L   0x26(A2),A0                     | A0 = past LAP type slots
-        MOVE.B  #0x1,-(A0)                      | LAP type 1 = short DDP
-        MOVE.B  #0x2,-(A0)                      | LAP type 2 = extended DDP
-| install AARP handler and initialize NBP
-        LEA.L   E_MPP_CONTROL_CONT_13(PC),A0    | A0 = AARP receive handler
-        MOVE.L  A0,0x78(A2)                     | install as bridge protocol handler
-        MOVE.B  #0x1,0x43(A2)                   | set socket 1 = DDP/NIS socket active
-        BSR     E_MPP_OPEN_RETRY_2              | send AARP request for network number
-| install DDP close handler and NBP close/reopen hook
-        LEA.L   E_MPP_CONTROL_CONT_7(PC),A0     | A0 = DDP socket close procedure
-        MOVE.L  A0,0x96(A2)                     | install in ABusVars
-        LEA.L   E_MPP_OPEN_CONT_6(PC),A3        | A3 = NBP close/reopen hook
-        MOVE.L  A3,0x8E(A2)                     | install close/reopen handler
-| open .ATP driver
-        SUBA    #0x32,SP                        | allocate IOParam on stack
-        LEA.L   E_MPP_OPEN_CONT_3(PC),A0        | A0 = ".ATP" driver name string
-        MOVE.L  A0,0x12(SP)                     | ioNamePtr = ".ATP"
-        MOVE.L  A7,A0                           | A0 = IOParam pointer
-        CLR.B   0x1B(A0)                        | ioPermssn = 0 (default)
-        _Open                                   | open .ATP driver
-        ADDA    #0x32,SP                        | pop IOParam from stack
-        MOVEQ.L #0x7,D3                         | D3 = 7 (NBP dispatch entry point)
-        BSR     E_MPP_CONTROL_CONT_4            | install NBP handler, dispatch
-        TST     0x1A(A2)                        | network number acquired?
-        BNE.B   E_MPP_OPEN_OK                   | yes ->
-        BSR.B   E_MPP_OPEN_RETRY_2              | retry AARP network number request
-E_MPP_OPEN_OK:
-        MOVE.L  (ABusVars_dce).w,A1             | A1 = .MPP DCE pointer
-        MOVE.B  #0x13,0x7(A1)                   | set DCE flags (open, time, goodbye)
-        MOVEQ.L #0x0,D0                         | noErr: MPP open succeeded
-        RTS                                     | return to Device Manager
-
-| ----------------------------------------------------------
-|
-| E_MPP_OPEN_RETRY_2: send AARP request to learn our network number
-| Builds AARP packet on stack, transmits via LAP, waits for response
-|
-E_MPP_OPEN_RETRY_2:
-        CLR     -(SP)                           | push terminator (end of data list)
-        SUBQ.W  #0x4,SP                         | reserve space for data pointer
-        MOVE    #0x9,-(SP)                      | push AARP data length (9 bytes)
-        MOVE.L  A7,A1                           | A1 = start of data list on stack
-        MOVE    #0x501,-(SP)                    | AARP: protocol type + opcode
-        MOVE    #0x101,-(SP)                    | AARP: hw addr len + proto addr len
-        MOVE    #0x6,-(SP)                      | AARP: protocol type (6 = AARP)
-        MOVE    #0x1,-(SP)                      | AARP: hardware type (1 = LocalTalk)
-        ST.B    D2                              | D2 = $FF (broadcast destination)
-        MOVE    D2,-(SP)                        | push broadcast + padding
-        LEA.L   0x1(SP),A3                      | A3 = AARP packet data start
-        MOVE.L  A3,0xB(A3)                      | store data pointer in data list
-        BSR.B   E_MPP_OPEN_CONT_2               | transmit AARP request frame
-E_MPP_OPEN_NO_4:
-        TST.B   0xB0(A2)                        | response received yet?
-        BEQ.B   E_MPP_OPEN_NO_4                 | no, busy-wait ->
-        ADDA    #0x12,SP                        | pop AARP packet from stack
-        RTS                                     | return with network info in ABusVars
-
-| ----------------------------------------------------------
-|
-| E_MPP_OPEN_CONT_2: transmit and set completion flag
-|
-E_MPP_OPEN_CONT_2:
-        BSR     E_MPP_PRIME_CONT                | transmit LAP frame
-        ST.B    0xB0(A2)                        | set transmit-complete flag
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| E_MPP_OPEN_CONT_3
-|
-E_MPP_OPEN_CONT_3:
-  .byte  0x04,0x2E,0x41,0x54,0x50,0x20          | ".ATP " (4 chars + space padding)
-| E_MPP_OPEN_CONT_4: transmit ENQ probe and clear completion flag (async wait)
-E_MPP_OPEN_CONT_4:
-        BSR     E_MPP_PRIME_CONT_2              | set up transmit with backoff
-        CLR.B   0xB0(A2)                        | clear completion flag (wait for ACK)
-        RTS                                     | return (caller busy-waits on flag)
-
-| ----------------------------------------------------------
-|
-| E_MPP_OPEN_CONT_5: initialize SCC for SDLC/LocalTalk mode
-| Programs SCC with two register tables (E_MPP_OPEN_INIT_TBL + E_MPP_OPEN_INIT_TBL_2)
-|
-E_MPP_OPEN_CONT_5:
-        LEA.L   E_MPP_OPEN_INIT_TBL(PC),A0      | A0 = primary SCC init table
-        BSR     E_MPP_CLOSE_CONT                | program SCC registers
-        LEA.L   E_MPP_OPEN_INIT_TBL_2(PC),A0    | A0 = secondary SCC init table
-        BRA     E_MPP_CLOSE_CONT                | program remaining registers
-
-| ----------------------------------------------------------
-|
-| E_MPP_OPEN_INIT_TBL
-|
-E_MPP_OPEN_INIT_TBL:
-  .byte  0x40,0x09,0x20,0x04,0xE0,0x0A          | SCC: WR9 reset, WR4 SDLC, WR10 FM0
-  .byte 0x00,0x06,0x7E,0x07,0x06,0x0C           | WR6=0x00 sync, WR7=0x7E flag, WR12 baud lo
-  .byte 0x00,0x0D,0xC0,0x0E,0xDD,0x03           | WR13 baud hi, WR14 DPLL, WR3 Rx 8-bit
-  .byte 0x00,0x02,0x08,0x0F,0x09,0x01           | WR2 intvec, WR15 DCD IE, WR1 Rx int
-  .byte 0x0A,0x09,0x00,0x00                     | WR10 FM0, WR9 MIE, terminator
-| Serial driver SCC register initialization templates
-| Loaded via LEA and copied to SCC hardware registers
-E_MPP_OPEN_INIT_TBL_2:
-  .byte 0x70,0x0B,0x21,0x0E,0x60,0x05           | SCC: WR11 Rx/Tx clk, WR14 BRG en, WR5 Tx
-  .byte 0x00,0x00                               | terminator (end of E_MPP_OPEN_INIT_TBL_2)
-CONFIG_TBL:
-  .byte 0x05,0x60,0x0E,0x41,0x03,0xDD           | SCC: WR5 Tx enable, WR14 DPLL, WR3 Rx en
-  .byte 0x21,0x00,0x46,0x00                     | WR1 ext int, terminator pair
-  .ascii "COPYRIGHT (C) APPLE COMPUTER"         | embedded copyright notice
-E_MPP_OPEN_CONT_6:
-        BRA.B   E_MPP_OPEN_CONT_9               | -> NBP close/reopen handler
-
-| ----------------------------------------------------------
-|
-| E_MPP_OPEN_CONT_7: NBP KillNBP - cancel pending NBP operations
-|
-E_MPP_OPEN_CONT_7:
-        BRA.B   E_MPP_OPEN_CONT_10              | -> walk and cancel NBP queue
-
-| ----------------------------------------------------------
-|
-| E_MPP_OPEN_CONT_8: handle incoming AARP/ZIP packet on NIS socket
-| Checks if network number changed, sends WriteDDP to update router
-|
-E_MPP_OPEN_CONT_8:
-        MOVE.L  0x9E(A2),A3                     | A3 = NIS (Names Info Socket) buffer
-        TST     (A3)+                           | NIS packet pending?
-        BNE.B   E_MPP_OPEN_OK_2                 | yes, flush remaining data ->
-        MOVEQ.L #0x7C,D3                        | read 124 bytes of NIS data
-        JSR     0x2(A4)                         | receive data from SCC
-        BNE.B   E_MPP_OPEN_ERR                  | receive error ->
-        MOVE.L  0x9E(A2),A0                     | A0 = NIS buffer
-        MOVE.B  0x6(A0),D0                      | D0 = sender node ID from packet
-        CMP.B   (A2),D0                         | same as our node?
-        BNE.B   E_MPP_OPEN_NO_5                 | no -> network info changed
-        MOVE    0x4(A0),D0                      | D0 = network number from packet
-        CMP     0x1A(A2),D0                     | same as our network?
-        BEQ.B   E_MPP_OPEN_ERR                  | yes, nothing to do ->
-| network info changed - send update via WriteDDP control call
-E_MPP_OPEN_NO_5:
-        MOVE    #0xF2,(A0)                      | csCode for WriteDDP (242+16=258?)
-        SUBA    #0x1A,A0                        | back up to IOParam start
-        LEA.L   E_MPP_OPEN_CONT_15(PC),A1       | A1 = completion routine
-        MOVE.L  A1,0xC(A0)                      | ioCompletion = E_MPP_OPEN_CONT_15
-        MOVE.L  (ABusVars_dce).w,A1             | A1 = .MPP DCE
-        MOVE    0x18(A1),0x18(A0)               | copy ioRefNum from DCE
-        _ControlAsync                           | issue async control call
-E_MPP_OPEN_ERR:
-        RTS                                     | return to receive handler
-
-| ----------------------------------------------------------
-|
-| E_MPP_OPEN_OK_2: NIS packet already pending - flush SCC receive data
-|
-E_MPP_OPEN_OK_2:
-        CLR     D3                              | D3 = 0 (no bytes to store)
-        JMP     0x2(A4)                         | -> flush remaining SCC data
-
-| ----------------------------------------------------------
-|
-| E_MPP_OPEN_CONT_9: NBP close/reopen hook entry
-|
-E_MPP_OPEN_CONT_9:
-        BRA.B   E_MPP_OPEN_CONT_11              | -> process pending NBP operations
-
-| ----------------------------------------------------------
-|
-| E_MPP_OPEN_CONT_10: KillNBP - walk NBP name list, remove out-of-zone entries
-|
-E_MPP_OPEN_CONT_10:
-        LEA.L   0x9A(A2),A3                     | A3 = head of NBP name list
-        MOVE.L  (SysZone).w,A0                  | A0 = system zone header
-E_MPP_OPEN_NEXT:
-        MOVE.L  (A3),D1                         | D1 = next entry link
-        BEQ.B   E_MPP_OPEN_EMPTY                | null = end of list ->
-        AND.L   (Lo3Bytes).w,D1                 | mask to 24-bit address
-        MOVE.L  D1,A1                           | A1 = entry pointer
-        CMPA.L  (A0),A1                         | entry within system zone?
-        BCS     E_MPP_OPEN_OK_3                 | yes, keep it ->
-        MOVE.L  (A1),(A3)                       | unlink stale entry from list
-        BRA.B   E_MPP_OPEN_NEXT                 | -> check next
-
-| ----------------------------------------------------------
-|
-| E_MPP_OPEN_OK_3: valid entry - advance scan pointer
-|
-E_MPP_OPEN_OK_3:
-        MOVE.L  A1,A3                           | advance to this entry
-        BRA.B   E_MPP_OPEN_NEXT                 | -> check next
-
-| ----------------------------------------------------------
-|
-| E_MPP_OPEN_EMPTY: end of NBP name list walk
-|
-E_MPP_OPEN_EMPTY:
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| E_MPP_OPEN_CONT_11: NBP Lookup - search registered names for matches
-| Called from close/reopen hook when NBP requests are pending
-|
-E_MPP_OPEN_CONT_11:
-        MOVE.L  0x9A(A2),D2                     | D2 = first NBP name entry
-        BEQ     E_MPP_OPEN_DONE                 | no entries -> done
-        MOVE    SR,-(SP)                        | save SR
-        MOVE    0x1C(A2),SR                     | set IPL from ABusVars
-        MOVEM.L A2/A4-A5,-(SP)                  | save registers
-        MOVE.L  A0,A4                           | A4 = IOParam / lookup request
-        MOVE    E_MPP_OPEN_CONT_14(PC),D0       | D0 = _CmpString trap number ($A03C)
-        _GetTrapAddress                         | A0 = address of _CmpString
-        MOVE.L  A0,A2                           | A2 = _CmpString entry point
-        CLR     D3                              | D3 = match counter
-| E_MPP_OPEN_CONT_12: scan NBP name list for matches against lookup request
-E_MPP_OPEN_CONT_12:
-        MOVE.L  D2,A3                           | A3 = current NBP entry
-        ADDA    #0x9,A3                         | skip entry header (9 bytes)
-        LEA.L   0x23(A4),A5                     | A5 = lookup name in request
-        MOVE.L  A3,A1                           | A1 = registered name (for compare)
-        MOVE.L  A5,A0                           | A0 = lookup pattern (for compare)
-        CMPI.B  #0x3D,0x1(A5)                   | lookup object = '=' (wildcard)?
-        BEQ.B   E_MPP_OPEN_FOUND                | yes, matches any name ->
-        BSR     RETURNS_8                       | compare object names via _CmpString
-        BNE.B   E_MPP_OPEN_FOUND_3              | no match ->
-| E_MPP_OPEN_FOUND: object matches - compare type strings
-E_MPP_OPEN_FOUND:
-        CLR     D0                              | clear high byte
-        MOVE.B  (A5)+,D0                        | D0 = lookup object length
-        ADDA    D0,A5                           | skip past lookup object string
-        MOVE.L  A3,A1                           | A1 = registered name
-        MOVE.B  (A1)+,D0                        | D0 = registered object length
-        ADDA    D0,A1                           | skip past registered object string
-        MOVE.L  A5,A0                           | A0 = lookup type string
-        CMPI.B  #0x3D,0x1(A5)                   | lookup type = '=' (wildcard)?
-        BEQ.B   E_MPP_OPEN_FOUND_2              | yes, matches any type ->
-        BSR     RETURNS_8                       | compare type strings
-        BNE.B   E_MPP_OPEN_FOUND_3              | no match ->
-| E_MPP_OPEN_FOUND_2: both object and type match - record this entry
-E_MPP_OPEN_FOUND_2:
-        MOVE.L  A3,-(SP)                        | push matched entry pointer
-        ADDQ.W  #0x1,D3                         | increment match count
-| E_MPP_OPEN_FOUND_3: advance to next NBP entry in linked list
-E_MPP_OPEN_FOUND_3:
-        MOVE.L  -0x9(A3),D2                     | D2 = next entry link
-        BNE.B   E_MPP_OPEN_CONT_12              | more entries ->
-        TST     D3                              | any matches found?
-        BEQ     E_MPP_OPEN_FOUND_4              | no matches -> clean up
-| build NBP LkUp reply packet from request parameters
-        LEA.L   0x1F(A4),A1                     | A1 = reply packet header area
-        LEA.L   0x1E(A4),A5                     | A5 = request parameters
-        MOVE    (A5)+,0x7(A1)                   | copy dest network number
-        MOVE.B  (A5)+,0xB(A1)                   | copy dest node ID
-        MOVE.B  (A5)+,0xD(A1)                   | copy dest socket number
-        MOVE.B  #0x2,0xF(A1)                    | NBP function = 2 (LkUp-Reply)
-        MOVE.L  A1,0x32(A4)                     | store reply header pointer
-        MOVE.L  (ABusVars).w,A2                 | reload A2 = ABusVars
-| E_MPP_OPEN_NEXT_2: build data chunk list for NBP reply packet
-E_MPP_OPEN_NEXT_2:
-        MOVE.B  0x1E(A4),0x26(A4)               | copy NBP ID to reply
-        CLR     D2                              | D2 = accumulated data length
-        CLR     D1                              | D1 = tuples packed in this packet
-        LEA.L   0x36(A4),A3                     | A3 = data chunk list builder
-        LEA.L   0x1C(A4),A1                     | A1 = NBP header data area
-        MOVE    #0x2,(A3)+                      | first chunk = 2-byte NBP header
-        MOVE.L  A1,(A3)+                        | pointer to NBP header
-| E_MPP_OPEN_NEXT_3: pack matched NBP name tuples into reply data list
-E_MPP_OPEN_NEXT_3:
-        MOVE.L  (SP),A5                         | A5 = next matched entry (from stack)
-        CLR     D0                              | clear high byte
-        MOVE.B  (A5),D0                         | D0 = object name length
-        ADD.B   0x1(A5,D0.W),D0                 | add type name length
-        MOVE.B  #0x1,0x2(A5,D0.W)               | zone name length = 1 ('*')
-        MOVE.B  #0x2A,0x3(A5,D0.W)              | zone name = '*' (this zone)
-        ADDI    #0x9,D0                         | add 9-byte tuple header
-        ADD     D0,D2                           | accumulate total data size
-        CMPI    #0x248,D2                       | packet too full (> 584 bytes)?
-        BGE.B   E_MPP_OPEN_OK_4                 | yes, send what we have ->
-        ADDQ.W  #0x4,SP                         | pop this entry's pointer
-        MOVE    D0,(A3)+                        | store tuple chunk length
-        SUBQ.W  #0x5,A5                         | back up to tuple address header
-        MOVE.L  A5,(A3)+                        | store tuple data pointer
-        MOVE    0x1A(A2),(A5)                   | fill in our network number
-        ADDQ.W  #0x1,D1                         | count tuples in this packet
-        SUBQ.W  #0x1,D3                         | decrement remaining matches
-        BEQ.B   E_MPP_OPEN_OK_4                 | no more -> send packet
-        CMPI    #0xF,D1                         | max 15 tuples per NBP packet?
-        BNE.B   E_MPP_OPEN_NEXT_3               | room for more -> pack next
-| E_MPP_OPEN_OK_4: finalize and send NBP reply packet
-E_MPP_OPEN_OK_4:
-        CLR     (A3)+                           | terminate data chunk list
-        ORI     #0x30,D1                        | merge tuple count into NBP func byte
-        MOVE.B  D1,(A1)                         | store NBP function + count
-        MOVE    D3,A5                           | A5 = remaining match count
-        CLR.B   0x2F(A4)                        | clear transmit-done flag
-        BSR.B   E_MPP_OPEN_CONT_13              | send NBP reply via WriteDDP
-E_MPP_OPEN_NO_6:
-        TST.B   0x2F(A4)                        | transmit complete?
-        BEQ.B   E_MPP_OPEN_NO_6                 | not yet, busy-wait ->
-        MOVE    A5,D3                           | D3 = remaining matches
-        BNE.B   E_MPP_OPEN_NEXT_2               | more to send -> build next packet
-| E_MPP_OPEN_FOUND_4: all replies sent - restore registers
-E_MPP_OPEN_FOUND_4:
-        MOVEM.L (SP)+,A2/A4-A5                  | restore saved registers
-        MOVE    (SP)+,SR                        | restore interrupt state
-| E_MPP_OPEN_DONE: IODone - complete the control call
+        MOVE    #0x2600,SR                      | interrupts off (IPL 6)
+| SCC channel B vectors; the old ones go to SaveVects
+        LEA.L   (Lvl2DT_2).w,A3                 | A3 = Lvl2DT[2]
+        LEA.L   0xD2(A2),A1                     | A1 = SaveVects
+        LEA.L   LAP_RCVINT(PC),A0               | Rx character handler
+        MOVE.L  (A3),(A1)+                      | save the old Lvl2DT[2]
+        MOVE.L  A0,(A3)+                        | Lvl2DT[2] = LAP_RCVINT
+        LEA.L   LAP_SPECIALINT(PC),A0           | special receive condition handler
+        MOVE.L  (A3),(A1)+                      | save the old Lvl2DT[3]
+        MOVE.L  A0,(A3)+                        | Lvl2DT[3] = LAP_SPECIALINT
+        LEA.L   LAP_EXTINT(PC),A0               | external/status handler
+        MOVE.L  (ExtStsDT).w,(A1)               | save the old ExtStsDT[0]
+        MOVE.L  A0,(ExtStsDT).w                 | ExtStsDT[0] = LAP_EXTINT
+| VBL task
+        LEA.L   0x7C(A2),A0                     | A0 = VBL task (+$7C)
+        MOVE    #0x1,0x4(A0)                    | qType = vType (1)
+        LEA.L   MPP_VBLTASK(PC),A1              | A1 = MPP_VBLTASK
+        MOVE.L  A1,0x6(A0)                      | vblAddr
+        MOVE    #0x14,0xA(A0)                   | vblCount = 20 ticks
+        _VInstall                               | install it
+        BSR     MPP_SCCSETUP                    | SCC channel B for LocalTalk
+        MOVE    (Ticks_LoWord).w,0xAA(A2)       | RandomSeed = Ticks
+        MOVE    (SP)+,SR                        | restore SR
+| node ID: the hint in PRAM if 1..127, else random
+        MOVE.B  (SPATalkB).w,D0                 | D0 = SPATalkB (node ID hint)
+        BGT.B   E_MPP_OPEN_TRYNODE              | 1..127 -> try it
+E_MPP_OPEN_RANDOM:
+        BSR     MPP_RANDOM                      | D0 = random number
+E_MPP_OPEN_TRYNODE:
+        ANDI    #0x7F,D0                        | 0..127
+        BEQ.B   E_MPP_OPEN_RANDOM               | 0 -> another one
+| claim it: 20 rounds of lapENQ to that address must stay unanswered
+        MOVEQ.L #0x13,D4                        | 20 rounds
+        MOVE.B  D0,(A2)                         | sysLAPAddr = candidate
+        CLR.B   0xAD(A2)                        | fLAPAdrValid = 0
+        MOVE.L  (SCCWr).w,A1                    | A1 = SCC channel B control (write)
+        MOVE.B  #0x6,(A1)                       | WR0: select WR6
+        CLR.B   0xAF(A2)                        | fAdrInUse = 0
+        MOVE.B  (A2),(A1)                       | WR6 = node ID (SDLC address for the address search)
+E_MPP_OPEN_ENQLOOP:
+        ST.B    0xB0(A2)                        | fSendENQ
+        MOVE.B  (A2),D2                         | D2 = candidate address
+        BSR     MPP_SENDENQ                     | send lapENQs to it
+E_MPP_OPEN_ENQWAIT:
+        TST.B   0xB0(A2)                        | write finished (fSendENQ cleared)?
+        BNE.B   E_MPP_OPEN_ENQWAIT              | no -> wait
+        TST.B   0xAF(A2)                        | fAdrInUse (somebody answered)?
+        BNE.B   E_MPP_OPEN_RANDOM               | yes -> try another address
+        DBF     D4,E_MPP_OPEN_ENQLOOP           | next round
+| node ID is ours: keep it as the PRAM hint
+        MOVE.B  (A2),(SPATalkB).w               | SPATalkB = node ID
+        ST.B    0xAD(A2)                        | fLAPAdrValid
+        LEA.L   (SysParam_SPValid).w,A0         | A0 = SysParam
+        MOVEQ.L #-0x1,D0                        | all bytes (64K-ROM interface; ignored here)
+        _WriteParam                             | write SysParam to the clock chip PRAM
+| DDP protocol handlers: entries 3 (type 1) and 2 (type 2)
+        LEA.L   DDP_RCVSHORT(PC),A3             | A3 = shortDDP handler
+        LEA.L   0x36(A2),A0                     | A0 -> end of the handler table
+        MOVE.L  A3,-(A0)                        | handler entry 3
+        LEA.L   DDP_RCVLONG(PC),A3              | A3 = longDDP handler
+        MOVE.L  A3,-(A0)                        | handler entry 2
+| protocol types
+        LEA.L   0x26(A2),A0                     | A0 -> end of the type table
+        MOVE.B  #0x1,-(A0)                      | type entry 3 = 1 (shortDDP)
+        MOVE.B  #0x2,-(A0)                      | type entry 2 = 2 (longDDP)
+| RTMP socket 1 in socket table entry 13, then ask for a router
+        LEA.L   RTMP_LISTENER(PC),A0            | A0 = RTMP listener
+        MOVE.L  A0,0x78(A2)                     | listener of entry 13
+        MOVE.B  #0x1,0x43(A2)                   | entry 13 = socket 1 (RTMP)
+        BSR     MPP_RTMPREQUEST                 | broadcast an RTMP request
+| JDDPWrite and LookupPtr (bit 31 clear: NIS opened by the first RegisterName)
+        LEA.L   MPP_JDDPWRITE(PC),A0            | A0 = DDP jump table
+        MOVE.L  A0,0x96(A2)                     | JDDPWrite
+        LEA.L   LUCODE(PC),A3                   | A3 = lookup-reply code
+        MOVE.L  A3,0x8E(A2)                     | LookupPtr
+| open .ATP
+        SUBA    #0x32,SP                        | parameter block on the stack
+        LEA.L   MPP_ATPNAME(PC),A0              | A0 = ".ATP"
+        MOVE.L  A0,0x12(SP)                     | ioNamePtr
+        MOVE.L  A7,A0                           | A0 = parameter block
+        CLR.B   0x1B(A0)                        | ioPermssn = 0
+        _Open                                   | open .ATP
+        ADDA    #0x32,SP                        | drop the parameter block
+        MOVEQ.L #0x7,D3                         | NBP code entry 0 = NBP_INIT
+        BSR     MPP_INSTALLNBP                  | install and initialize NBP
+        TST     0x1A(A2)                        | sysNetNum known (router answered)?
+        BNE.B   E_MPP_OPEN_DONE                 | yes ->
+        BSR.B   MPP_RTMPREQUEST                 | no: ask once more
 E_MPP_OPEN_DONE:
-        MOVE.L  (JIODone).w,A0                  | A0 = JIODone vector
         MOVE.L  (ABusVars_dce).w,A1             | A1 = .MPP DCE
-        JMP     (A0)                            | -> IODone completion
+        MOVE.B  #0x13,0x7(A1)                   | dCtlQueue+1: driver version 19
+        MOVEQ.L #0x0,D0                         | noErr
+        RTS                                     | return from E_MPP_Open
 
 | ----------------------------------------------------------
 |
-| E_MPP_OPEN_CONT_13: send NBP reply packet via DDP socket close procedure
+| MPP_RTMPREQUEST: broadcast an RTMP request (DDP type 5, socket 1 to
+| socket 1) as a LAP frame built on the stack, and wait until it is sent.
+| Routers answer with RTMP data, handled by RTMP_LISTENER.
 |
-E_MPP_OPEN_CONT_13:
-        MOVEQ.L #0x2,D1                         | D1 = DDP type 2 (NBP)
-        LEA.L   0x30(A4),A1                     | A1 = reply data chunk list
-        MOVE.L  0x96(A2),A0                     | A0 = DDP close/send procedure
-        CLR.B   D3                              | D3 = 0 (no socket listener)
-        JSR     (A0)                            | send DDP packet
-        MOVE.L  0x9E(A2),A0                     | A0 = NIS buffer
-        ST.B    0x15(A0)                        | set NIS transmit-complete flag
-        RTS                                     | return to caller
+MPP_RTMPREQUEST:
+        CLR     -(SP)                           | WDS: terminator
+        SUBQ.W  #0x4,SP                         | WDS: pointer (set below)
+        MOVE    #0x9,-(SP)                      | WDS: length 9
+        MOVE.L  A7,A1                           | A1 = WDS
+        MOVE    #0x501,-(SP)                    | DDP type 5 (RTMP request), RTMP function 1
+        MOVE    #0x101,-(SP)                    | dest socket 1, source socket 1
+        MOVE    #0x6,-(SP)                      | ddpLength = 6
+        MOVE    #0x1,-(SP)                      | lapSrcAdr (set when sent), lapType 1 (shortDDP)
+        ST.B    D2                              | D2 = $FF (broadcast)
+        MOVE    D2,-(SP)                        | lapDstAdr = $FF (after a pad byte)
+        LEA.L   0x1(SP),A3                      | A3 = frame (9 bytes, odd address)
+        MOVE.L  A3,0xB(A3)                      | WDS pointer = frame
+        BSR.B   MPP_LAPSEND                     | send it, set +$B0 when done
+MPP_RTMPREQUEST_WAIT:
+        TST.B   0xB0(A2)                        | sent?
+        BEQ.B   MPP_RTMPREQUEST_WAIT            | no -> wait
+        ADDA    #0x12,SP                        | drop frame and WDS
+        RTS                                     | return from MPP_RTMPREQUEST
 
 | ----------------------------------------------------------
 |
-| E_MPP_OPEN_CONT_14 - _InitResources trap word ($A03C), used as inline constant
+| MPP_LAPSEND: LAPWRITE, then set +$B0 (fSendENQ, here a 'sent' flag) when
+| the write has finished (now or later from the deferred write)
 |
-E_MPP_OPEN_CONT_14:
-  .byte 0xA0,0x3C                               | _InitResources trap word ($A03C)
-| RETURNS_8: compare two Pascal strings using _CmpString
-| A0 = string 1 (length byte + chars), A1 = string 2
-| Returns: Z=1 if equal
-RETURNS_8:
-        MOVEQ.L #0x0,D0                         | clear D0
-        MOVE.B  (A0)+,D0                        | D0.low = string 1 length
-        SWAP    D0                              | move to high word
-        MOVE.B  (A1)+,D0                        | D0.low = string 2 length
-        JSR     (A2)                            | call _CmpString (address in A2)
-        TST     D0                              | set Z flag from result
-        RTS                                     | Z=1 if strings match
-
-| ----------------------------------------------------------
-|
-| E_MPP_OPEN_CONT_15: WriteDDP completion routine - clear ioResult
-|
-E_MPP_OPEN_CONT_15:
-        CLR     0x1A(A0)                        | ioResult = noErr
-        RTS                                     | return from completion
-
-| ----------------------------------------------------------
-|
-| E_MPP_OPEN_DISPATCH_TBL: NBP csCode dispatcher
-| D3 = csCode - 242 (from main dispatch). NBP ops are 7-13 (Register..KillNBP)
-|
-E_MPP_OPEN_DISPATCH_TBL:
-        SUBQ.W  #0x7,D3                         | adjust D3: 7->0, 8->1, etc.
-        BMI.B   E_MPP_OPEN_NO_7                 | < 7: not NBP -> call DDP handler
-        ADD     D3,D3                           | word offset into jump table
-        LEA.L   JUMP_TBL(PC),A3                 | A3 = NBP jump table
-        ADDA    D3,A3                           | index into table
-        MOVE    (A3),D3                         | D3 = relative offset from E_MPP_OPEN_DISPATCH_TBL
-        LEA.L   E_MPP_OPEN_DISPATCH_TBL(PC),A3  | A3 = base address
-        ADDA    D3,A3                           | A3 = absolute handler address
-        MOVE.L  A3,-(SP)                        | push handler address for RTS dispatch
-        MOVE.L  0x92(A2),A3                     | A3 = NBP state block
-        RTS                                     | dispatch to handler via RTS
-
-| Jump Table
-JUMP_TBL:
-  .byte  0x00,0x44,0x00,0x82,0x01,0x7C          | Register=+68, Lookup=+130, Remove=+380
-  .byte 0x01,0x20,0x00,0x8A,0x02,0x62           | Confirm=+288, KillNBP=+138, closehook=+610
-  .byte 0x00,0x2E                               | NBPcompletion=+46
-E_MPP_OPEN_NO_7:
-        MOVE.L  0x92(A2),A3                     | A3 = NBP state block
-E_MPP_OPEN_CONT_16:
-        BRA     E_1056_LOOP_DONE_2              | -> complete with noErr
-| Dead code - unreachable subroutine left from earlier ROM version.
-| Searches for D0 byte in 14-byte table at 0x36(A2), clears if found.
-        MOVEQ.L #0xD,D2                         | D2 = 13 (max socket index)
-E_1056_LOOP:
-        CMP.B   0x36(A2,D2.W),D0                | socket number match?
-        DBEQ    D2,E_1056_LOOP                  | loop until match or done
-        .short 0x6604                           | BNE.B *+6 (skip CLR+RTS)
-        CLR.B   0x36(A2,D2.W)                   | clear socket slot
-        RTS                                     | return
-| E_1056_LOOP_CONT: initialize NBP state block - allocate and configure
-E_1056_LOOP_CONT:
-        MOVEQ.L #0x47,D0                        | 71 bytes for NBP state block
-        BSR.B   E_1056_LOOP_CONT_2              | allocate in system heap
-        BNE.B   E_1056_LOOP_ERR                 | alloc failed ->
-        MOVE    #0x1,0x8(A0)                    | VBL vblType = 1
-        LEA.L   E_1056_LOOP_CONT_9(PC),A1       | A1 = NBP VBL task procedure
-        MOVE.L  A1,0xA(A0)                      | store VBL proc address
-        LEA.L   E_1056_LOOP_CONT_11(PC),A1      | A1 = NBP DDP receive handler
-        MOVE.L  0x96(A2),A3                     | A3 = DDP close/send procedure
-        CLR     D1                              | D1 = 0 (no specific socket)
-        JSR     PORTBITS(A3)                    | open DDP socket for NBP
-        TST     D0                              | socket opened successfully?
-        BNE.B   E_1056_LOOP_ERR_2               | no -> free memory and return error
-        MOVE.B  D1,(A0)                         | store assigned socket number
-        MOVE.L  A0,0x92(A2)                     | install NBP state block in ABusVars
-E_1056_LOOP_ERR:
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| E_1056_LOOP_ERR_2: NBP init failed - free state block, return error
-|
-E_1056_LOOP_ERR_2:
-        MOVE    D0,D1                           | save error code
-        _DisposePtr                             | free the allocated block
-        MOVE    D1,D0                           | restore error code
-        RTS                                     | return error to caller
-
-| ----------------------------------------------------------
-|
-| E_1056_LOOP_CONT_2: allocate D0 bytes of zeroed system heap memory
-|
-E_1056_LOOP_CONT_2:
-        _NewPtrSysClear                         | allocate zeroed pointer in sys heap
-        BRA.B   E_1056_LOOP_SKIP                | skip over inline trap word
-  .byte 0xA3,0x1E                               | _NewPtrSysClear (dead trap word)
-E_1056_LOOP_SKIP:
-        RTS                                     | return with A0=pointer, D0=error
-
-| ----------------------------------------------------------
-|
-| E_1056_LOOP_CONT_3: NBP Lookup - initiate name lookup request
-| csParam+0x22 = target address for lookup
-|
-E_1056_LOOP_CONT_3:
-        MOVE.L  0x22(A0),D2                     | D2 = target network:node for lookup
-        BRA     E_1056_LOOP_CONT_8              | -> build and send NBP LkUp packet
-
-| ----------------------------------------------------------
-|
-| E_1056_LOOP_CONT_4: NBP Register - register a name on the network
-| A0 = IOParam, A1+9 = name entity to register
-|
-E_1056_LOOP_CONT_4:
-        MOVE.L  A0,D3                           | D3 = save IOParam pointer
-        TST.L   0x8E(A2)                        | close/reopen handler installed?
-        BMI.B   E_1056_LOOP_OK_2                | yes, already initialized ->
-| first-time NBP registration: allocate NIS buffer and open socket
-        NOP                                     | alignment padding
-        MOVE.L  #0x98,D0                        | 152 bytes for NIS state buffer
-        BSET    #0x7,0x8E(A2)                   | mark handler as being set up
-        BSR.B   E_1056_LOOP_CONT_2              | allocate zeroed system memory
-        BNE.B   E_1056_LOOP_ERR_3               | alloc failed -> error
-        ADDA    #0x1A,A0                        | skip IOParam header area
-        MOVE.L  A0,0x9E(A2)                     | store NIS buffer pointer
-        MOVEM.L D1/A1/A3,-(SP)                  | save registers
-        MOVEQ.L #0x2,D1                         | D1 = DDP type 2 (NBP socket)
-        MOVE.L  0x8E(A2),A1                     | A1 = close/reopen handler block
-        ADDQ.W  #0x4,A1                         | point to socket data area
-        MOVE.L  0x96(A2),A3                     | A3 = DDP close/send procedure
-        JSR     PORTBITS(A3)                    | open NBP socket
-        MOVEM.L (SP)+,D1/A1/A3                  | restore registers
-        TST     D0                              | socket opened?
-        BEQ.B   E_1056_LOOP_OK                  | yes ->
-        MOVE    #-0x405,D0                      | nbpNISErr: NIS socket open failed
-        BRA.B   E_1056_LOOP_ERR_3               | -> error exit
-
-| ----------------------------------------------------------
-|
-| E_1056_LOOP_OK: NIS socket opened - proceed with name registration
-|
-E_1056_LOOP_OK:
-        BSet    #0x7,0x8E(A2)                   | mark close/reopen handler valid
-        MOVE.L  D3,A0                           | restore IOParam pointer
-| E_1056_LOOP_OK_2: check if name is already registered
-E_1056_LOOP_OK_2:
-        TST.B   0x22(A0)                        | async flag set?
-        BEQ.B   E_1056_LOOP_NO                  | no -> register as new name
-        ADDA    #0x9,A1                         | A1 points to name entity (skip header)
-        BSR.B   E_1056_LOOP_CONT_6              | search for existing registration
-        BEQ     E_1056_LOOP_FOUND               | found -> update existing entry
-        MOVE    #-0x403,D0                      | nbpNotFound: name not registered
-E_1056_LOOP_ERR_3:
-        BRA     E_1056_LOOP_ERR_4               | -> error/cleanup exit
-
-| ----------------------------------------------------------
-|
-| E_1056_LOOP_NO
-|
-E_1056_LOOP_NO:
-        CLR     D2                              | clear ID counter
-        MOVE.B  0x7(A1),D1                      | D1 = target socket number
-E_1056_LOOP_NEXT:
-        ADDQ.W  #0x1,D2                         | increment ID counter
-        LEA.L   0x9A(A2),A0                     | A0 = names table list head
-E_1056_LOOP_NEXT_2:
-        TST.L   (A0)                            | end of list?
-        BEQ.B   E_1056_LOOP_OK_3                | yes -> append it
-        MOVE.L  (A0),A0                         | A0 = next entry
-        CMP.B   0x7(A0),D1                      | socket match?
-        BNE.B   E_1056_LOOP_NEXT_2              | no -> check next
-        TST.B   D2                              | checking ID?
-        BEQ.B   E_1056_LOOP_NEXT_2              | no -> check next
-        CMP.B   0x8(A0),D2                      | ID match?
-        BEQ.B   E_1056_LOOP_NEXT                | yes -> collision, try next ID
-        BRA.B   E_1056_LOOP_NEXT_2              | no -> check next entry
-
-| ----------------------------------------------------------
-|
-| E_1056_LOOP_OK_3
-|
-E_1056_LOOP_OK_3:
-        MOVE.B  (A2),0x6(A1)                    | store node ID in entry
-        MOVE.B  D2,0x8(A1)                      | store assigned ID in entry
-        CLR.L   (A1)                            | clear next pointer
-        MOVE.L  A1,(A0)                         | append entry to list
-        BRA.B   E_1056_LOOP_DONE                | done
-
-| ----------------------------------------------------------
-|
-| E_1056_LOOP_CONT_5
-|
-E_1056_LOOP_CONT_5:
-        MOVE    #-0x404,D0                      | D0 = nbpNotFound
-        BSR.B   E_1056_LOOP_CONT_6              | find entry in list
-        BEQ.B   E_1056_LOOP_ERR_3               | not found -> error
-        MOVE    SR,-(SP)                        | save interrupt state
-        MOVE    #0x2600,SR                      | disable interrupts
-        LEA.L   0x9A(A2),A0                     | A0 = list head
-E_1056_LOOP_LOOP:
-        CMP.L   (A0),D3                         | is this the target entry?
-        BEQ.B   E_1056_LOOP_OK_4                | yes ->
-        MOVE.L  (A0),A0                         | next entry
-        BRA.B   E_1056_LOOP_LOOP                | loop
-
-| ----------------------------------------------------------
-|
-| E_1056_LOOP_OK_4
-|
-E_1056_LOOP_OK_4:
-        MOVE.L  D3,A1                           | A1 = entry to remove
-        MOVE.L  (A1),(A0)                       | bypass entry in linked list
-        MOVE    (SP)+,SR                        | restore interrupts
-E_1056_LOOP_DONE:
-        BRA     E_1056_LOOP_DONE_2              | complete with noErr
-
-| E_1056_LOOP_CONT_6 -- search for existing registration.
-| ----------------------------------------------------------
-|
-| E_1056_LOOP_CONT_6
-|
-E_1056_LOOP_CONT_6:
-        MOVEM.L D0-D1/A0-A3,-(SP)               | save registers
-        MOVE.L  A1,A3                           | A3 = target string
-        LEA.L   0x9A(A2),A2                     | A2 = list head
-        CLR.L   D3                              | D3 = 0 (not found flag)
-E_1056_LOOP_LOOP_2:
-        TST.L   (A2)                            | end of list?
-        BEQ.B   E_1056_LOOP_EXIT                | yes -> return
-        CLR     D0                              | clear D0
-        MOVE.B  (A3),D0                         | D0 = string 1 length
-        ADD.B   0x1(A3,D0.W),D0                 | add string 2 length
-        ADDQ.W  #0x2,D0                         | add length bytes
-        MOVE    D0,D1                           | copy length
-        SWAP    D0                              | length in high word for CmpString
-        MOVE    D1,D0                           | length in both halves
-        MOVE.L  (A2),A2                         | next entry
-        MOVE.L  A2,A1                           | A1 = entry
-        ADDA    #0x9,A1                         | A1 = string pointer in entry
-        MOVE.L  A3,A0                           | A0 = target string
-        _CmpString                              | compare entity name strings
-        TST     D0                              | match?
-        BNE.B   E_1056_LOOP_LOOP_2              | no -> loop
-        MOVE.L  A2,D3                           | D3 = found entry
-E_1056_LOOP_EXIT:
-        MOVEM.L (SP)+,D0-D1/A0-A3               | restore registers
+MPP_LAPSEND:
+        BSR     LAPWRITE                        | send the frame; resumes here when done
+        ST.B    0xB0(A2)                        | sent
         RTS                                     | return
 
 | ----------------------------------------------------------
 |
-| E_1056_LOOP_CONT_7
+| MPP_ATPNAME
 |
-E_1056_LOOP_CONT_7:
-        CLR     0x2A(A0)                        | clear matched names count
-        MOVE.L  0x22(A0),0x16(A3)               | set buffer pointer
-        MOVE    0x26(A0),0x1A(A3)               | set buffer size
-E_1056_LOOP_FOUND:
-        CLR.L   D2                              | D2 = 0
-E_1056_LOOP_CONT_8:
-        MOVEQ.L #0x21,D3                        | D3 = broadcast socket
-        LSR     #0x8,D2                         | shift ID
-        BNE.B   E_1056_LOOP_EMPTY               | not zero ->
-        ST.B    D2                              | D2 = 0xFF (broadcast)
-        MOVE.B  0x19(A2),D0                     | get bridge node
-        BEQ.B   E_1056_LOOP_EMPTY               | no bridge ->
-        MOVEQ.L #0x11,D3                        | send to bridge (socket 0x11)
-        MOVE.B  D0,D2                           | D2 = bridge node ID
-E_1056_LOOP_EMPTY:
-        MOVE.L  A0,0x12(A3)                     | store param block
-        SWAP    D2                              | prepare node ID
-        MOVE    D2,PORTBITS(A3)                 | set port bits
-        LEA.L   0x4(A3),A0                      | A0 = VBL task
-        LSL     #0x3,D1                         | convert to ticks
-        ANDI    #0x3FF,D1                       | mask max ticks
-        MOVE    D1,0xA(A0)                      | set vblCount
-        _VInstall                               | install NBP retry VBL task
-        MOVE.L  A1,D0                           | save string ptr
-        LEA.L   0x1E(A3),A1                     | A1 = write data header
-        LEA.L   0x37(A3),A0                     | A0 = DDP header
-        MOVE.L  A0,(A1)+                        | set header ptr
-        MOVE.B  #0x2,0xD(A0)                    | set DDP type (NBP)
-        MOVE    D2,0x7(A0)                      | set dest network
-        SWAP    D2                              | get node ID
-        MOVE.B  D2,0xB(A0)                      | set dest node
-        MOVE.B  #0x2,0xF(A0)                    | set dest socket (NBP)
-        MOVE    #0x7,(A1)+                      | set header length
-        LEA.L   PNLOC(A3),A0                    | A0 = NBP tuple
-        MOVE.L  A0,(A1)+                        | set tuple ptr
-        MOVE.B  D3,(A0)+                        | set tuple function/count
-        ADDQ.B  #0x1,0x1(A3)                    | increment NBP ID
-        MOVE.B  0x1(A3),(A0)+                   | set NBP ID
-        MOVE    0x1A(A2),(A0)+                  | set tuple network
-        MOVE.B  (A2),(A0)+                      | set tuple node
-        MOVE.B  (A3),D1                         | set tuple socket
-        MOVE.B  D1,(A0)                         | set tuple socket
-        MOVE.L  D0,A0                           | restore string ptr
-        CLR     D2                              | clear D2
-        MOVE.B  (A0),D2                         | get string 1 len
-        ADD.B   0x1(A0,D2.W),D2                 | add string 2 len
-        ADD.B   0x2(A0,D2.W),D2                 | add string 3 len
-        ADDQ.B  #0x3,D2                         | add length bytes
-        MOVE    D2,(A1)+                        | set tuple length
-        MOVE.L  A0,(A1)+                        | set string ptr
-        CLR     (A1)                            | clear next ptr
-E_1056_LOOP_RETRY:
-        LEA.L   CLIPRGN(A3),A1                  | A1 = MPP param block
-        MOVE.L  0x96(A2),A0                     | A0 = writeLAP entry
-        CLR.B   D3                              | D3 = 0
-        JSR     (A0)                            | call writeLAP
+| MPP_ATPNAME: driver name for the _Open of .ATP
+MPP_ATPNAME:
+  .byte  0x04,0x2E,0x41,0x54,0x50,0x20          | Pascal string ".ATP" and a pad byte
+| MPP_SENDENQ: LAPWRITE_ENQ (lapENQs to D2), then clear fSendENQ when the
+| write has finished
+MPP_SENDENQ:
+        BSR     LAPWRITE_ENQ                    | send lapENQ; resumes here when done
+        CLR.B   0xB0(A2)                        | fSendENQ = 0: finished
         RTS                                     | return
 
 | ----------------------------------------------------------
 |
-| E_1056_LOOP_CONT_9
+| MPP_SCCSETUP: program SCC channel B for LocalTalk (two tables)
 |
-E_1056_LOOP_CONT_9:
-        MOVE.L  (ABusVars).w,A2                 | get AppleTalk vars
-        MOVE.L  0x92(A2),A3                     | A3 = NBP state block
-        MOVE.L  0x12(A3),A1                     | A1 = MPP param block
-        SUBQ.B  #0x1,0x1D(A1)                   | decrement retry count
-        BEQ.B   E_1056_LOOP_CONT_10             | retries exhausted ->
-        CLR     D0                              | clear D0
-        MOVE.B  0x1C(A1),D0                     | D0 = retry interval
-        LSL     #0x3,D0                         | convert to ticks
-        MOVE    D0,0xA(A0)                      | reset VBL timer
-        MOVE    PORTBITS(A3),0x3E(A3)           | reset node ID
-        MOVE.B  (A3),D1                         | D1 = socket
-        BRA.B   E_1056_LOOP_RETRY               | -> send packet again
+MPP_SCCSETUP:
+        LEA.L   MPP_SCCLAP_TBL(PC),A0           | A0 = first table
+        BSR     MPP_SCCINIT                     | write it
+        LEA.L   MPP_SCCLAP_TBL2(PC),A0          | A0 = second table
+        BRA     MPP_SCCINIT                     | write it, return
 
 | ----------------------------------------------------------
 |
-| E_1056_LOOP_CONT_10
+| MPP_SCCLAP_TBL
 |
-E_1056_LOOP_CONT_10:
-        MOVE    0x1A(A1),D0                     | D0 = tuple function
-        MOVE.L  0x1E(A1),A1                     | A1 = string ptr
-        CMPI    #0xFD,D0                        | lookup?
-        BEQ     E_1056_LOOP_NO                  | yes ->
-        CMPI    #0xFA,D0                        | confirm?
-        BNE.B   E_1056_LOOP_DONE_2              | no -> return
-        MOVE    #-0x401,D0                      | D0 = nbpConfDiff
-        BRA.B   E_1056_LOOP_ERR_4               | -> finish
+| MPP_SCCLAP_TBL: words (value << 8) + register for MPP_SCCINIT
+MPP_SCCLAP_TBL:
+  .byte  0x40,0x09,0x20,0x04,0xE0,0x0A          | WR9 = $40 reset channel B, WR4 = $20 SDLC x1, WR10 = $E0 FM0, CRC preset
+  .byte 0x00,0x06,0x7E,0x07,0x06,0x0C           | WR6 = 0 (address), WR7 = $7E (flag), WR12 = 6 (BRG: ~230 kbit/s)
+  .byte 0x00,0x0D,0xC0,0x0E,0xDD,0x03           | WR13 = 0, WR14 = $C0 (DPLL FM mode), WR3 = $DD (Rx on, hunt, CRC, address search)
+  .byte 0x00,0x02,0x08,0x0F,0x09,0x01           | WR2 = 0, WR15 = $08 (DCD int.), WR1 = $09 (Rx int. first char/special, ext/status int.)
+  .byte 0x0A,0x09,0x00,0x00                     | WR9 = $0A (MIE, NV), end
+| MPP_SCCLAP_TBL2: clocks and transmitter
+MPP_SCCLAP_TBL2:
+  .byte 0x70,0x0B,0x21,0x0E,0x60,0x05           | WR11 = $70 (Rx clock DPLL, Tx clock BRG), WR14 = $21 (DPLL search, BRG on), WR5 = $60 (Tx off, RTS off)
+  .byte 0x00,0x00                               | end
+| MPP_CONFIG_TBL: copied by E_MPP_Open: VSTData (6), vSCCEnable,
+| abort-sequence delay
+MPP_CONFIG_TBL:
+  .byte 0x05,0x60,0x0E,0x41,0x03,0xDD           | VSTData: WR5 = $60, WR14 = $41, WR3 = $DD
+  .byte 0x21,0x00,0x46,0x00                     | vSCCEnable = $2100, delay $46, pad
+  .ascii "COPYRIGHT (C) APPLE COMPUTER"         | copyright string
+| LUCODE: lookup-reply code entry table (LookupPtr): +0 LookupReply,
+| +2 goodbye kiss, +4 NIS socket listener
+LUCODE:
+        BRA.B   LUCODE_REPLY                    | +0: LookupReply -> NBP_LKUPREPLY
 
 | ----------------------------------------------------------
 |
-| E_1056_LOOP_DONE_2
+| LUCODE_GOODBYE: +2 - drop names in the application heap
 |
-E_1056_LOOP_DONE_2:
-        CLR     D0                              | D0 = noErr
-E_1056_LOOP_ERR_4:
-        MOVE    D0,D1                           | save error code
-        LEA.L   0x4(A3),A0                      | A0 = VBL task
-        _VRemove                                | remove NBP retry VBL task
-        MOVE    D1,D0                           | restore error code
-        CLR.L   0x12(A3)                        | clear active request
-        MOVE.L  (ABusVars_dce).w,A1             | A1 = DCE
-        MOVE.L  (JIODone).w,A0                  | A0 = JIODone vector
+LUCODE_GOODBYE:
+        BRA.B   NBP_DROPAPPLNAMES               | -> NBP_DROPAPPLNAMES
+
+| ----------------------------------------------------------
+|
+| NIS_LISTENER: +4 - listener of socket 2 (names information socket).
+| Reads a received LkUp packet into the lookup-reply parameter block (at
+| csParam) and issues the LookupReply call (csCode 242) to this driver;
+| drops the packet while that block is busy or if the request is ours.
+|
+NIS_LISTENER:
+        MOVE.L  0x9E(A2),A3                     | A3 -> csCode of the block (LUQElPtr)
+        TST     (A3)+                           | busy (csCode set)?
+        BNE.B   NIS_LISTENER_BUSY               | yes -> drop the packet
+        MOVEQ.L #0x7C,D3                        | up to 124 bytes
+        JSR     0x2(A4)                         | ReadRest into csParam
+        BNE.B   NIS_LISTENER_EXIT               | error -> return
+        MOVE.L  0x9E(A2),A0                     | A0 -> csCode of the block
+        MOVE.B  0x6(A0),D0                      | D0 = node of the tuple (csParam+4)
+        CMP.B   (A2),D0                         | our node?
+        BNE.B   NIS_LISTENER_QUEUE              | no -> answer it
+        MOVE    0x4(A0),D0                      | D0 = network of the tuple (csParam+2)
+        CMP     0x1A(A2),D0                     | our network?
+        BEQ.B   NIS_LISTENER_EXIT               | yes: our own lookup -> ignore
+| queue the LookupReply call
+NIS_LISTENER_QUEUE:
+        MOVE    #0xF2,(A0)                      | csCode = 242 (LookupReply): block busy
+        SUBA    #0x1A,A0                        | A0 = parameter block
+        LEA.L   NIS_LUCOMPLETION(PC),A1         | A1 = completion routine
+        MOVE.L  A1,0xC(A0)                      | ioCompletion
+        MOVE.L  (ABusVars_dce).w,A1             | A1 = .MPP DCE
+        MOVE    0x18(A1),0x18(A0)               | ioRefNum = .MPP refNum (dCtlRefNum)
+        _ControlAsync                           | queue it
+NIS_LISTENER_EXIT:
+        RTS                                     | return to MPP
+
+| ----------------------------------------------------------
+|
+| NIS_LISTENER_BUSY: block in use - drop the packet
+|
+NIS_LISTENER_BUSY:
+        CLR     D3                              | buffer size 0
+        JMP     0x2(A4)                         | ReadRest: discard, return to MPP
+
+| ----------------------------------------------------------
+|
+| LUCODE_REPLY: -> NBP_LKUPREPLY
+|
+LUCODE_REPLY:
+        BRA.B   NBP_LKUPREPLY                   | -> NBP_LKUPREPLY
+
+| ----------------------------------------------------------
+|
+| NBP_DROPAPPLNAMES: goodbye kiss - unlink every names-table entry that
+| does not lie in the system heap (below the end of SysZone)
+|
+NBP_DROPAPPLNAMES:
+        LEA.L   0x9A(A2),A3                     | A3 -> NTQueueHd
+        MOVE.L  (SysZone).w,A0                  | A0 = system heap zone (bkLim first)
+NBP_DROPAPPLNAMES_LOOP:
+        MOVE.L  (A3),D1                         | D1 = next entry
+        BEQ.B   NBP_DROPAPPLNAMES_EXIT          | end ->
+        AND.L   (Lo3Bytes).w,D1                 | 24-bit address
+        MOVE.L  D1,A1                           | A1 = entry
+        CMPA.L  (A0),A1                         | below the end of the system heap?
+        BCS     NBP_DROPAPPLNAMES_KEEP          | yes -> keep it
+        MOVE.L  (A1),(A3)                       | no: unlink it
+        BRA.B   NBP_DROPAPPLNAMES_LOOP          | next
+
+| ----------------------------------------------------------
+|
+| NBP_DROPAPPLNAMES_KEEP
+|
+| keep the entry, go on from it
+NBP_DROPAPPLNAMES_KEEP:
+        MOVE.L  A1,A3                           | A3 = entry (its link field)
+        BRA.B   NBP_DROPAPPLNAMES_LOOP          | next
+
+| ----------------------------------------------------------
+|
+| NBP_DROPAPPLNAMES_EXIT
+|
+| end of the names table
+NBP_DROPAPPLNAMES_EXIT:
+        RTS                                     | return
+
+| ----------------------------------------------------------
+|
+| NBP_LKUPREPLY: LookupReply call, A0 = the lookup-reply block with the
+| LkUp packet at csParam (+$1C control, +$1D NBP ID, +$1E tuple of the
+| requester, +$23 entity name).  Collects the names-table entries whose
+| object and type match ('=' matches all; the zone is not checked) and
+| answers with LkUp-Reply packets (15 tuples / 584 bytes at most each)
+| from socket 2 to the requester's socket.
+|
+NBP_LKUPREPLY:
+        MOVE.L  0x9A(A2),D2                     | D2 = first names-table entry
+        BEQ     NBP_LKUPREPLY_IODONE            | none -> done
+        MOVE    SR,-(SP)                        | save SR
+        MOVE    0x1C(A2),SR                     | SR = vSCCEnable
+        MOVEM.L A2/A4-A5,-(SP)                  | save registers
+        MOVE.L  A0,A4                           | A4 = lookup-reply block
+        MOVE    NBP_CMPSTRINGTRAP(PC),D0        | D0 = _CmpString trap word ($A03C)
+        _GetTrapAddress                         | A0 = its routine
+        MOVE.L  A0,A2                           | A2 = CmpString routine (for NBP_CMPNAME)
+        CLR     D3                              | D3 = matches
+| scan the names table; matching entries are pushed on the stack
+NBP_LKUPREPLY_LOOP:
+        MOVE.L  D2,A3                           | A3 = entry
+        ADDA    #0x9,A3                         | A3 -> its entity name (ntEntity)
+        LEA.L   0x23(A4),A5                     | A5 -> requested entity name
+        MOVE.L  A3,A1                           | A1 = entry object
+        MOVE.L  A5,A0                           | A0 = requested object
+        CMPI.B  #0x3D,0x1(A5)                   | requested object starts with '='?
+        BEQ.B   NBP_LKUPREPLY_TYPE              | yes: matches all ->
+        BSR     NBP_CMPNAME                     | objects equal?
+        BNE.B   NBP_LKUPREPLY_NEXT              | no -> next entry
+| object matches: compare the types
+NBP_LKUPREPLY_TYPE:
+        CLR     D0                              | D0.W = 0
+        MOVE.B  (A5)+,D0                        | length of the requested object
+        ADDA    D0,A5                           | A5 -> requested type
+        MOVE.L  A3,A1                           | A1 -> entry object
+        MOVE.B  (A1)+,D0                        | its length
+        ADDA    D0,A1                           | A1 -> entry type
+        MOVE.L  A5,A0                           | A0 = requested type
+        CMPI.B  #0x3D,0x1(A5)                   | requested type starts with '='?
+        BEQ.B   NBP_LKUPREPLY_MATCH             | yes: matches all ->
+        BSR     NBP_CMPNAME                     | types equal?
+        BNE.B   NBP_LKUPREPLY_NEXT              | no -> next entry
+| match: remember the entity
+NBP_LKUPREPLY_MATCH:
+        MOVE.L  A3,-(SP)                        | push the entity pointer
+        ADDQ.W  #0x1,D3                         | count it
+| next entry
+NBP_LKUPREPLY_NEXT:
+        MOVE.L  -0x9(A3),D2                     | D2 = ntLink
+        BNE.B   NBP_LKUPREPLY_LOOP              | more ->
+        TST     D3                              | any match?
+        BEQ     NBP_LKUPREPLY_DONE              | no -> done
+| DDP header template at +$1F (odd) to the requester's socket, WDS at +$30
+        LEA.L   0x1F(A4),A1                     | A1 = header template
+        LEA.L   0x1E(A4),A5                     | A5 -> requester tuple address
+        MOVE    (A5)+,0x7(A1)                   | +7 dest network
+        MOVE.B  (A5)+,0xB(A1)                   | +11 dest node
+        MOVE.B  (A5)+,0xD(A1)                   | +13 dest socket
+        MOVE.B  #0x2,0xF(A1)                    | +15 DDP type 2 (NBP)
+        MOVE.L  A1,0x32(A4)                     | WDS entry 1 pointer
+        MOVE.L  (ABusVars).w,A2                 | A2 = MPP variables again
+| one LkUp-Reply packet
+NBP_LKUPREPLY_PACKET:
+        MOVE.B  0x1E(A4),0x26(A4)               | restore the dest network high byte (lost by a short header)
+        CLR     D2                              | D2 = bytes in this packet
+        CLR     D1                              | D1 = tuples in this packet
+        LEA.L   0x36(A4),A3                     | A3 -> WDS entry 2
+        LEA.L   0x1C(A4),A1                     | A1 = NBP header (+$1C control/count, +$1D NBP ID)
+        MOVE    #0x2,(A3)+                      | entry 2 length = 2
+        MOVE.L  A1,(A3)+                        | entry 2 pointer = NBP header
+| one WDS entry per tuple, straight from the names-table entry
+NBP_LKUPREPLY_TUPLE:
+        MOVE.L  (SP),A5                         | A5 = next matching entity
+        CLR     D0                              | D0.W = 0
+        MOVE.B  (A5),D0                         | object length
+        ADD.B   0x1(A5,D0.W),D0                 | + type length
+        MOVE.B  #0x1,0x2(A5,D0.W)               | zone length = 1 ...
+        MOVE.B  #0x2A,0x3(A5,D0.W)              | ... zone = "*"
+        ADDI    #0x9,D0                         | tuple size: + address, enumerator, 3 lengths, zone
+        ADD     D0,D2                           | add to the packet size
+        CMPI    #0x248,D2                       | 584 bytes or more?
+        BGE.B   NBP_LKUPREPLY_SEND              | yes -> send without it
+        ADDQ.W  #0x4,SP                         | pop the entity
+        MOVE    D0,(A3)+                        | WDS entry length = tuple size
+        SUBQ.W  #0x5,A5                         | A5 -> tuple (ntTuple)
+        MOVE.L  A5,(A3)+                        | WDS entry pointer
+        MOVE    0x1A(A2),(A5)                   | tuple network = sysNetNum
+        ADDQ.W  #0x1,D1                         | one more tuple
+        SUBQ.W  #0x1,D3                         | one match less
+        BEQ.B   NBP_LKUPREPLY_SEND              | none left -> send
+        CMPI    #0xF,D1                         | 15 tuples (tupleMax)?
+        BNE.B   NBP_LKUPREPLY_TUPLE             | no -> add the next
+| send the packet and wait for the write
+NBP_LKUPREPLY_SEND:
+        CLR     (A3)+                           | end of WDS
+        ORI     #0x30,D1                        | control 3 (LkUp-Reply), tuple count
+        MOVE.B  D1,(A1)                         | nbpControl/nbpTCount
+        MOVE    D3,A5                           | A5 = matches left
+        CLR.B   0x2F(A4)                        | write-done flag = 0
+        BSR.B   NBP_SENDREPLY                   | DDPWrite from socket 2
+NBP_LKUPREPLY_WAIT:
+        TST.B   0x2F(A4)                        | written?
+        BEQ.B   NBP_LKUPREPLY_WAIT              | no -> wait
+        MOVE    A5,D3                           | D3 = matches left
+        BNE.B   NBP_LKUPREPLY_PACKET            | more -> next packet
+| done
+NBP_LKUPREPLY_DONE:
+        MOVEM.L (SP)+,A2/A4-A5                  | restore registers
+        MOVE    (SP)+,SR                        | restore SR
+| NBP_LKUPREPLY_IODONE: complete the LookupReply call (its completion
+| routine frees the block)
+NBP_LKUPREPLY_IODONE:
+        MOVE.L  (JIODone).w,A0                  | IODone vector
+        MOVE.L  (ABusVars_dce).w,A1             | A1 = .MPP DCE
         JMP     (A0)                            | -> IODone
 
 | ----------------------------------------------------------
 |
-| E_1056_LOOP_NO_2
+| NBP_SENDREPLY: DDPWrite the WDS at +$30 of the lookup-reply block (A4)
+| from socket 2 (NIS), no checksum; sets the write-done flag (+$2F)
+| when the write has finished
 |
-E_1056_LOOP_NO_2:
-        CMPI    #0xFD,0x1A(A5)                  | is it a lookup?
-        BEQ.B   E_1056_LOOP_OK_5                | yes ->
-        MOVEQ.L #0x4,D3                         | D3 = read 4 bytes
-        JSR     0x2(A4)                         | call ReadRest
-        BNE.B   E_1056_LOOP_ERR_5               | error -> return
-        MOVE.B  -(A3),D2                        | get node ID from packet
-        MOVE.L  0x92(A2),A3                     | A3 = NBP state
-        MOVE.L  0x12(A3),A1                     | A1 = param block
-        MOVE.B  D2,0x26(A1)                     | save node ID
-        CMP.B   0x25(A1),D2                     | confirm match?
-        BEQ.B   E_1056_LOOP_DONE_2              | yes -> success
-        MOVE    #-0x402,D0                      | D0 = nbpConfDiff
-        BRA.B   E_1056_LOOP_ERR_4               | -> finish
-
-| ----------------------------------------------------------
-|
-| E_1056_LOOP_OK_5
-|
-E_1056_LOOP_OK_5:
-        JSR     0x2(A4)                         | call ReadRest
-        BNE.B   E_1056_LOOP_ERR_5               | error -> return
-        MOVE.L  0x92(A2),A3                     | A3 = NBP state
-        MOVE    #-0x403,D0                      | D0 = nbpDuplicate
-        BRA.B   E_1056_LOOP_ERR_4               | -> finish
-
-| ----------------------------------------------------------
-|
-| E_1056_LOOP_ERR_5
-|
-E_1056_LOOP_ERR_5:
+NBP_SENDREPLY:
+        MOVEQ.L #0x2,D1                         | D1 = source socket 2 (NIS)
+        LEA.L   0x30(A4),A1                     | A1 = WDS
+        MOVE.L  0x96(A2),A0                     | A0 = JDDPWrite
+        CLR.B   D3                              | no checksum
+        JSR     (A0)                            | DDPWRITE; resumes here when done
+        MOVE.L  0x9E(A2),A0                     | A0 -> csCode of the block
+        ST.B    0x15(A0)                        | write-done flag (+$2F)
         RTS                                     | return
 
 | ----------------------------------------------------------
 |
-| E_1056_LOOP_NO_3
+| NBP_CMPSTRINGTRAP - the _CmpString trap word ($A03C), for _GetTrapAddress
 |
-E_1056_LOOP_NO_3:
-        CLR     D3                              | flush remaining bytes
-        JMP     0x2(A4)                         | -> ReadRest
+NBP_CMPSTRINGTRAP:
+  .byte 0xA0,0x3C                               | _CmpString ($A03C)
+| NBP_CMPNAME: compare the Pascal strings at A0 and A1 with the CmpString
+| routine in A2 (A0/A1 -> text, D0 = lengths) -> EQ if equal
+| (case-insensitive)
+NBP_CMPNAME:
+        MOVEQ.L #0x0,D0                         | D0 = 0
+        MOVE.B  (A0)+,D0                        | length of string A0
+        SWAP    D0                              | to the high word
+        MOVE.B  (A1)+,D0                        | length of string A1
+        JSR     (A2)                            | CmpString: D0 = 0 if equal
+        TST     D0                              | EQ = equal
+        RTS                                     | return from NBP_CMPNAME
 
 | ----------------------------------------------------------
 |
-| E_1056_LOOP_CONT_11
+| NIS_LUCOMPLETION: ioCompletion of the LookupReply call - csCode = 0
+| (the lookup-reply block is free again)
 |
-E_1056_LOOP_CONT_11:
-        MOVEQ.L #0x2,D3                         | D3 = read 2 bytes
-        JSR     (A4)                            | call ReadPacket
-        BNE.B   E_1056_LOOP_ERR_5               | error -> return
-        MOVE.L  0x92(A2),A5                     | A5 = NBP state
-        MOVE.L  0x12(A5),D0                     | D0 = active request
-        BEQ.B   E_1056_LOOP_NO_3                | no request -> flush
-        MOVE.B  -(A3),D2                        | get NBP ID
-        CMP.B   0x1(A5),D2                      | match expected ID?
-        BNE.B   E_1056_LOOP_NO_3                | no -> flush
-        MOVE.B  -(A3),D2                        | get function/tuple count
-        EXG     D0,A5                           | A5 = param block, D0 = NBP state
-        CMPI    #0xFB,0x1A(A5)                  | is it a lookup reply?
-        BNE.B   E_1056_LOOP_NO_2                | no -> handle confirm/register
-        MOVE.L  D0,A5                           | A5 = NBP state
-        MOVE.L  0x16(A5),A3                     | A3 = reply buffer
-        MOVE    0x1A(A5),D3                     | D3 = buffer size
-        JSR     0x2(A4)                         | call ReadRest into buffer
-        BNE.B   E_1056_LOOP_ERR_5               | error -> return
-        SUBI.B  #0x30,D2                        | subtract NBP reply base
-        BLE.B   E_1056_LOOP_ERR_5               | <= 0 -> ignore
-        CMPI.B  #0xF,D2                         | > 15 tuples?
-        BGT.B   E_1056_LOOP_ERR_5               | yes -> ignore
-        MOVE.L  A3,D1                           | D1 = end of read data
-        MOVE.L  0x92(A2),A3                     | A3 = NBP state
-        CLR     D0                              | clear D0
-        TST     D3                              | buffer overflow?
-        BPL.B   E_1056_LOOP_NO_4                | no -> parse tuples
-        CLR     D2                              | D2 = tuple count
-        MOVE.L  0x16(A3),A0                     | A0 = buffer start
-E_1056_LOOP_NEXT_3:
-        ADDQ.W  #0x5,A0                         | skip tuple header
-        CMP.L   A0,D1                           | past end?
-        BLE.B   E_1056_LOOP_OK_6                | yes -> stop
-        MOVE.B  (A0)+,D0                        | string 1 len
-        ADDA    D0,A0                           | skip string 1
-        CMP.L   A0,D1                           | past end?
-        BLE.B   E_1056_LOOP_OK_6                | yes -> stop
-        MOVE.B  (A0)+,D0                        | string 2 len
-        ADDA    D0,A0                           | skip string 2
-        CMP.L   A0,D1                           | past end?
-        BLE.B   E_1056_LOOP_OK_6                | yes -> stop
-        MOVE.B  (A0)+,D0                        | string 3 len
-        ADDA    D0,A0                           | skip string 3
-        CMP.L   A0,D1                           | past end?
-        BLT.B   E_1056_LOOP_OK_6                | yes -> stop
-        ADDQ.W  #0x1,D2                         | valid tuple, count it
-        BRA.B   E_1056_LOOP_NEXT_3              | -> next tuple
+NIS_LUCOMPLETION:
+        CLR     0x1A(A0)                        | csCode = 0: block free
+        RTS                                     | return
 
 | ----------------------------------------------------------
 |
-| E_1056_LOOP_OK_6
+| NBP_DISPATCH: NBP code entry (NRPtr).  D3 = csCode - 242; entry D3 - 7
+| of NBP_DISPATCH_TBL is called with A3 = NRVars (A0 = parameter block,
+| A1 = entityPtr / ntQElPtr, D1.B = interval).  D3 < 7: the goodbye kiss.
 |
-E_1056_LOOP_OK_6:
-        TST     D2                              | any tuples?
-  .short 0x6780                                 | BEQ.B E_1056_LOOP_ERR_5
-E_1056_LOOP_NO_4:
-        MOVEM.L A4-A6,-(SP)                     | save registers
-        CLR     D1                              | D1 = unique count
-        MOVE.L  0x12(A3),A5                     | A5 = param block
-        MOVE.L  0x22(A5),D3                     | D3 = old buffer end
-        MOVE.L  0x16(A3),A5                     | A5 = new tuples
-        MOVE.L  A5,A6                           | A6 = dest for unique tuples
-E_1056_LOOP_NEXT_4:
-        MOVE.L  D3,A4                           | A4 = scan existing tuples
-E_1056_LOOP_LOOP_3:
-        CMPA.L  0x16(A3),A4                     | done scanning?
-        BEQ.B   E_1056_LOOP_OK_7                | yes -> add tuple
-        MOVE.L  A4,A0                           | A0 = existing tuple
+NBP_DISPATCH:
+        SUBQ.W  #0x7,D3                         | D3 = csCode - 249
+        BMI.B   NBP_DISPATCH_GOODBYE            | negative (goodbye kiss) ->
+        ADD     D3,D3                           | word index
+        LEA.L   NBP_DISPATCH_TBL(PC),A3         | A3 = table
+        ADDA    D3,A3                           | A3 -> entry
+        MOVE    (A3),D3                         | offset from NBP_DISPATCH
+        LEA.L   NBP_DISPATCH(PC),A3             | A3 = NBP_DISPATCH
+        ADDA    D3,A3                           | A3 = routine
+        MOVE.L  A3,-(SP)                        | push it
+        MOVE.L  0x92(A2),A3                     | A3 = NRVars
+        RTS                                     | -> routine
+
+| NBP_DISPATCH_TBL - offsets from NBP_DISPATCH; entry 0 (249, LoadNBP in
+| the RAM driver) is only reached from E_MPP_Open
+NBP_DISPATCH_TBL:
+  .byte  0x00,0x44,0x00,0x82,0x01,0x7C          | 0 NBP_INIT, 250 ConfirmName, 251 LookupName
+  .byte 0x01,0x20,0x00,0x8A,0x02,0x62           | 252 RemoveName, 253 RegisterName, 254 KillNBP
+  .byte 0x00,0x2E                               | 255 UnloadNBP
+| NBP_DISPATCH_GOODBYE: goodbye kiss - like UnloadNBP
+NBP_DISPATCH_GOODBYE:
+        MOVE.L  0x92(A2),A3                     | A3 = NRVars
+| UnloadNBP (csCode 255): nothing to unload - as KillNBP
+UNLOADNBP:
+        BRA     KILLNBP                         | stop the NBP request, IODone noErr
+| NBP_FREESKT: unreferenced - remove socket D0 from the socket table
+NBP_FREESKT:
+        MOVEQ.L #0xD,D2                         | 14 entries
+NBP_FREESKT_LOOP:
+        CMP.B   0x36(A2,D2.W),D0                | this socket?
+        DBEQ    D2,NBP_FREESKT_LOOP             | no -> next
+        .short 0x6604                           | BNE.B *+6 (to the RTS): not found
+        CLR.B   0x36(A2,D2.W)                   | free the entry
+        RTS                                     | return
+| NBP_INIT: allocate NRVars and open the NBP socket (dynamic number,
+| listener NBP_LISTENER), on which requests go out and replies come in.
+| NRVars ($47 bytes): +$00 NBP socket, +$01 NBP ID, +$02 dest network
+| (kept for retries), +$04 VBL task (NBP_VBLTASK), +$12 active call
+| (0 = none), +$16 LookupName: next free byte in retBuffPtr, +$1A bytes
+| left, +$1C WDS (header -> +$37, 7 bytes -> +$30, entity name, 0),
+| +$30 NBP header and tuple address, +$37 DDP header template
+NBP_INIT:
+        MOVEQ.L #0x47,D0                        | $47 bytes
+        BSR.B   NBP_NEWPTR                      | zeroed block in the system heap
+        BNE.B   NBP_INIT_EXIT                   | out of memory -> return
+        MOVE    #0x1,0x8(A0)                    | VBL task: qType = vType (1)
+        LEA.L   NBP_VBLTASK(PC),A1              | A1 = NBP_VBLTASK
+        MOVE.L  A1,0xA(A0)                      | vblAddr
+        LEA.L   NBP_LISTENER(PC),A1             | A1 = listener
+        MOVE.L  0x96(A2),A3                     | A3 = JDDPWrite
+        CLR     D1                              | socket 0: assign one
+        JSR     0x2(A3)                         | MPP_OPENSOCKET
+        TST     D0                              | opened?
+        BNE.B   NBP_INIT_FAIL                   | no ->
+        MOVE.B  D1,(A0)                         | +$00 = NBP socket
+        MOVE.L  A0,0x92(A2)                     | NRVars
+NBP_INIT_EXIT:
+        RTS                                     | return from NBP_INIT
+
+| ----------------------------------------------------------
+|
+| NBP_INIT_FAIL: free the block, return the error
+|
+NBP_INIT_FAIL:
+        MOVE    D0,D1                           | save the error
+        _DisposePtr                             | free the block
+        MOVE    D1,D0                           | D0 = error
+        RTS                                     | return from NBP_INIT
+
+| ----------------------------------------------------------
+|
+| NBP_NEWPTR: zeroed block of D0 bytes in the system heap -> A0, D0
+|
+NBP_NEWPTR:
+        _NewPtrSysClear                         | allocate it
+        BRA.B   NBP_NEWPTR_EXIT                 | skip the next word
+  .byte 0xA3,0x1E                               | never executed: trap word $A31E (_NewPtr,CLEAR: application heap)
+NBP_NEWPTR_EXIT:
+        RTS                                     | return from NBP_NEWPTR
+
+| ----------------------------------------------------------
+|
+| ConfirmName (csCode 250): send a LkUp for entityPtr directly to node
+| confirmAddr.  A reply sets newSocket: noErr if it is the socket of
+| confirmAddr, nbpConfDiff if not; nbpNoConfirm if none comes.
+|
+CONFIRMNAME:
+        MOVE.L  0x22(A0),D2                     | D2 = confirmAddr (net.W, node.B, socket.B)
+        BRA     NBP_SENDREQ                     | -> send the LkUp
+
+| ----------------------------------------------------------
+|
+| RegisterName (csCode 253): enter the names-table entry at ntQElPtr
+| (address, entity) in the names table; the first call opens the NIS
+| (socket 2) and allocates the lookup-reply block.  With verifyFlag the
+| name is first looked up (own table: nbpDuplicate; network: LkUp, a
+| reply means nbpDuplicate).  nbpNISErr, memFullErr.
+|
+REGISTERNAME:
+        MOVE.L  A0,D3                           | D3 = parameter block
+        TST.L   0x8E(A2)                        | LookupPtr bit 31: NIS open?
+        BMI.B   REGISTERNAME_VERIFY             | yes ->
+| first registration: lookup-reply block and the NIS
+        NOP                                     | (no operation)
+        MOVE.L  #0x98,D0                        | $98 bytes: lookup-reply block
+        BSET    #0x7,0x8E(A2)                   | LookupPtr bit 31 (stays set if a step below fails)
+        BSR.B   NBP_NEWPTR                      | allocate it
+        BNE.B   REGISTERNAME_FAIL               | out of memory -> IODone with the error
+        ADDA    #0x1A,A0                        | A0 -> its csCode field
+        MOVE.L  A0,0x9E(A2)                     | LUQElPtr
+        MOVEM.L D1/A1/A3,-(SP)                  | save registers
+        MOVEQ.L #0x2,D1                         | socket 2 (NIS)
+        MOVE.L  0x8E(A2),A1                     | A1 = LUCODE (bit 31 set) ...
+        ADDQ.W  #0x4,A1                         | ... +4 = NIS_LISTENER
+        MOVE.L  0x96(A2),A3                     | A3 = JDDPWrite
+        JSR     0x2(A3)                         | MPP_OPENSOCKET
+        MOVEM.L (SP)+,D1/A1/A3                  | restore registers
+        TST     D0                              | opened?
+        BEQ.B   REGISTERNAME_NISOK              | yes ->
+        MOVE    #-0x405,D0                      | nbpNISErr (-1029)
+        BRA.B   REGISTERNAME_FAIL               | -> IODone with it
+
+| ----------------------------------------------------------
+|
+| REGISTERNAME_NISOK
+|
+| NIS open
+REGISTERNAME_NISOK:
+        BSet    #0x7,0x8E(A2)                   | LookupPtr bit 31: NIS open
+        MOVE.L  D3,A0                           | A0 = parameter block
+| verify the name first?
+REGISTERNAME_VERIFY:
+        TST.B   0x22(A0)                        | verifyFlag?
+        BEQ.B   NBP_ENTERNAME                   | no -> enter it now
+        ADDA    #0x9,A1                         | A1 -> entity name (ntEntity)
+        BSR.B   NBP_FINDNAME                    | in our names table?
+        BEQ     NBP_BCASTREQ                    | no -> look it up on the network
+        MOVE    #-0x403,D0                      | yes: nbpDuplicate (-1027)
+| REGISTERNAME_FAIL - complete the NBP call with D0 (also RemoveName)
+REGISTERNAME_FAIL:
+        BRA     NBP_DONE                        | -> NBP_DONE
+
+| ----------------------------------------------------------
+|
+| NBP_ENTERNAME: enter names-table entry A1: tuple node = our node, a
+| tuple enumerator not yet used on its socket, linked in at the end;
+| then complete the call with noErr
+|
+NBP_ENTERNAME:
+        CLR     D2                              | D2 = enumerator candidate
+        MOVE.B  0x7(A1),D1                      | D1 = ntSocket
+NBP_ENTERNAME_ENUM:
+        ADDQ.W  #0x1,D2                         | next candidate
+        LEA.L   0x9A(A2),A0                     | A0 -> NTQueueHd
+NBP_ENTERNAME_LOOP:
+        TST.L   (A0)                            | end of the table?
+        BEQ.B   NBP_ENTERNAME_LINK              | yes: candidate is free ->
+        MOVE.L  (A0),A0                         | A0 = next entry
+        CMP.B   0x7(A0),D1                      | same socket?
+        BNE.B   NBP_ENTERNAME_LOOP              | no ->
+        TST.B   D2                              | candidate wrapped to 0?
+        BEQ.B   NBP_ENTERNAME_LOOP              | yes: take it anyway
+        CMP.B   0x8(A0),D2                      | enumerator in use?
+        BEQ.B   NBP_ENTERNAME_ENUM              | yes -> next candidate
+        BRA.B   NBP_ENTERNAME_LOOP              | no -> next entry
+
+| ----------------------------------------------------------
+|
+| NBP_ENTERNAME_LINK
+|
+| fill in the tuple, link the entry at the end (A0 = last entry)
+NBP_ENTERNAME_LINK:
+        MOVE.B  (A2),0x6(A1)                    | tuple node = sysLAPAddr
+        MOVE.B  D2,0x8(A1)                      | tuple enumerator
+        CLR.L   (A1)                            | ntLink = nil
+        MOVE.L  A1,(A0)                         | link it in
+        BRA.B   REMOVENAME_DONE                 | -> complete, noErr
+
+| ----------------------------------------------------------
+|
+| RemoveName (csCode 252): unlink the names-table entry with the name
+| at entityPtr.  nbpNotFound.
+|
+REMOVENAME:
+        MOVE    #-0x404,D0                      | nbpNotFound (-1028)
+        BSR.B   NBP_FINDNAME                    | D3 = entry
+        BEQ.B   REGISTERNAME_FAIL               | not found -> nbpNotFound
+        MOVE    SR,-(SP)                        | save SR
+        MOVE    #0x2600,SR                      | interrupts off (IPL 6)
+        LEA.L   0x9A(A2),A0                     | A0 -> NTQueueHd
+REMOVENAME_LOOP:
+        CMP.L   (A0),D3                         | next is the entry?
+        BEQ.B   REMOVENAME_UNLINK               | yes ->
+        MOVE.L  (A0),A0                         | A0 = next
+        BRA.B   REMOVENAME_LOOP                 | loop
+
+| ----------------------------------------------------------
+|
+| REMOVENAME_UNLINK
+|
+| unlink it
+REMOVENAME_UNLINK:
+        MOVE.L  D3,A1                           | A1 = entry
+        MOVE.L  (A1),(A0)                       | predecessor -> successor
+        MOVE    (SP)+,SR                        | restore SR
+REMOVENAME_DONE:
+        BRA     KILLNBP                         | -> complete, noErr
+
+
+| ----------------------------------------------------------
+|
+| NBP_FINDNAME
+|
+| NBP_FINDNAME: find the entry whose object and type equal those at A1
+| (_CmpString over both strings and their length bytes) -> D3 = entry,
+| NE; or D3 = 0, EQ.  Preserves the other registers.
+NBP_FINDNAME:
+        MOVEM.L D0-D1/A0-A3,-(SP)               | save registers
+        MOVE.L  A1,A3                           | A3 = name searched for
+        LEA.L   0x9A(A2),A2                     | A2 -> NTQueueHd
+        CLR.L   D3                              | D3 = 0 (not found)
+NBP_FINDNAME_LOOP:
+        TST.L   (A2)                            | end of the table?
+        BEQ.B   NBP_FINDNAME_EXIT               | yes -> EQ
+        CLR     D0                              | D0.W = 0
+        MOVE.B  (A3),D0                         | object length
+        ADD.B   0x1(A3,D0.W),D0                 | + type length
+        ADDQ.W  #0x2,D0                         | + 2 length bytes
+        MOVE    D0,D1                           | D1 = size
+        SWAP    D0                              | both lengths of the
+        MOVE    D1,D0                           | compare = size
+        MOVE.L  (A2),A2                         | A2 = next entry
+        MOVE.L  A2,A1                           | A1 = entry ...
+        ADDA    #0x9,A1                         | ... entity name (ntEntity)
+        MOVE.L  A3,A0                           | A0 = name searched for
+        _CmpString                              | equal? (D0 = 0)
+        TST     D0                              | equal?
+        BNE.B   NBP_FINDNAME_LOOP               | no -> next entry
+        MOVE.L  A2,D3                           | D3 = entry (NE)
+NBP_FINDNAME_EXIT:
+        MOVEM.L (SP)+,D0-D1/A0-A3               | restore registers
+        RTS                                     | return from NBP_FINDNAME
+
+| ----------------------------------------------------------
+|
+| LookupName (csCode 251): look up entityPtr in the whole network; the
+| replies (NBP_LISTENER) go into retBuffPtr/retBuffSize, numGotten
+| counts them.  Ends at maxToGet, a full buffer or after count retries.
+|
+LOOKUPNAME:
+        CLR     0x2A(A0)                        | numGotten = 0
+        MOVE.L  0x22(A0),0x16(A3)               | NRVars+$16 = retBuffPtr
+        MOVE    0x26(A0),0x1A(A3)               | NRVars+$1A = retBuffSize
+| NBP_BCASTREQ: request to the whole network (LookupName, verifying
+| RegisterName)
+NBP_BCASTREQ:
+        CLR.L   D2                              | no address given
+| NBP_SENDREQ: send the request for entity A1 and start the retry timer
+| (interval D1 * 8 ticks).  D2 = address: with a node, a LkUp goes to
+| that node; else to all ($FF) or, if a bridge is known, a BrRq to it.
+NBP_SENDREQ:
+        MOVEQ.L #0x21,D3                        | control LkUp (2), 1 tuple
+        LSR     #0x8,D2                         | D2.W = node of the address
+        BNE.B   NBP_SENDREQ_SETUP               | given -> to that node
+        ST.B    D2                              | else node $FF (broadcast)
+        MOVE.B  0x19(A2),D0                     | D0 = sysABridge
+        BEQ.B   NBP_SENDREQ_SETUP               | no bridge ->
+        MOVEQ.L #0x11,D3                        | bridge: control BrRq (1), 1 tuple
+        MOVE.B  D0,D2                           | to the bridge
+| active call, destination network, retry timer
+NBP_SENDREQ_SETUP:
+        MOVE.L  A0,0x12(A3)                     | +$12 active call
+        SWAP    D2                              | D2.W = network, high word = node
+        MOVE    D2,0x2(A3)                      | +$02 dest network (for retries)
+        LEA.L   0x4(A3),A0                      | A0 = VBL task (+$04)
+        LSL     #0x3,D1                         | interval * 8 ticks
+        ANDI    #0x3FF,D1                       | at most $3FF
+        MOVE    D1,0xA(A0)                      | vblCount
+        _VInstall                               | start the retry timer
+| WDS: header template, NBP header + tuple address, entity name
+        MOVE.L  A1,D0                           | D0 = entity name
+        LEA.L   0x1E(A3),A1                     | A1 -> WDS entry 1 pointer (+$1E)
+        LEA.L   0x37(A3),A0                     | A0 = header template (+$37, odd)
+        MOVE.L  A0,(A1)+                        | entry 1 pointer
+        MOVE.B  #0x2,0xD(A0)                    | +13 dest socket 2 (NIS)
+        MOVE    D2,0x7(A0)                      | +7 dest network
+        SWAP    D2                              | D2.B = node
+        MOVE.B  D2,0xB(A0)                      | +11 dest node
+        MOVE.B  #0x2,0xF(A0)                    | +15 DDP type 2 (NBP)
+        MOVE    #0x7,(A1)+                      | entry 2 length = 7
+        LEA.L   0x30(A3),A0                     | A0 = NBP header (+$30)
+        MOVE.L  A0,(A1)+                        | entry 2 pointer
+        MOVE.B  D3,(A0)+                        | nbpControl/nbpTCount
+        ADDQ.B  #0x1,0x1(A3)                    | next NBP ID
+        MOVE.B  0x1(A3),(A0)+                   | nbpID
+        MOVE    0x1A(A2),(A0)+                  | tuple network = sysNetNum
+        MOVE.B  (A2),(A0)+                      | tuple node = sysLAPAddr
+        MOVE.B  (A3),D1                         | D1 = NBP socket (replies come here)
+        MOVE.B  D1,(A0)                         | tuple socket
+        MOVE.L  D0,A0                           | A0 = entity name
+        CLR     D2                              | D2.W = 0
+        MOVE.B  (A0),D2                         | object length
+        ADD.B   0x1(A0,D2.W),D2                 | + type length
+        ADD.B   0x2(A0,D2.W),D2                 | + zone length
+        ADDQ.B  #0x3,D2                         | + 3 length bytes
+        MOVE    D2,(A1)+                        | entry 3 length
+        MOVE.L  A0,(A1)+                        | entry 3 pointer = entity name
+        CLR     (A1)                            | end of WDS
+| NBP_WRITE: DDPWrite the request from the NBP socket (D1), no checksum
+NBP_WRITE:
+        LEA.L   0x1C(A3),A1                     | A1 = WDS (+$1C)
+        MOVE.L  0x96(A2),A0                     | A0 = JDDPWrite
+        CLR.B   D3                              | no checksum
+        JSR     (A0)                            | DDPWRITE
+        RTS                                     | return (the call stays pending)
+
+| ----------------------------------------------------------
+|
+| NBP_VBLTASK: NBP retry timer (A0 = task): count - 1; at 0 NBP_TIMEOUT,
+| else send the request again after interval * 8 ticks
+|
+NBP_VBLTASK:
+        MOVE.L  (ABusVars).w,A2                 | A2 = MPP variables
+        MOVE.L  0x92(A2),A3                     | A3 = NRVars
+        MOVE.L  0x12(A3),A1                     | A1 = active call
+        SUBQ.B  #0x1,0x1D(A1)                   | count - 1
+        BEQ.B   NBP_TIMEOUT                     | 0 -> no more retries
+        CLR     D0                              | D0.W = 0
+        MOVE.B  0x1C(A1),D0                     | interval
+        LSL     #0x3,D0                         | * 8 ticks
+        MOVE    D0,0xA(A0)                      | vblCount
+        MOVE    0x2(A3),0x3E(A3)                | restore the dest network (+$3E) for a long header
+        MOVE.B  (A3),D1                         | D1 = NBP socket
+        BRA.B   NBP_WRITE                       | send again
+
+| ----------------------------------------------------------
+|
+| NBP_TIMEOUT: retries used up - RegisterName: nobody has the name, enter
+| it; ConfirmName: nbpNoConfirm; LookupName: done (noErr)
+|
+NBP_TIMEOUT:
+        MOVE    0x1A(A1),D0                     | D0 = csCode of the call
+        MOVE.L  0x1E(A1),A1                     | A1 = ntQElPtr / entityPtr
+        CMPI    #0xFD,D0                        | RegisterName (253)?
+        BEQ     NBP_ENTERNAME                   | yes -> enter the name
+        CMPI    #0xFA,D0                        | ConfirmName (250)?
+        BNE.B   KILLNBP                         | no (LookupName) -> noErr
+        MOVE    #-0x401,D0                      | nbpNoConfirm (-1025)
+        BRA.B   NBP_DONE                        | -> complete
+
+| ----------------------------------------------------------
+|
+| KillNBP (csCode 254), also the noErr completion of the NBP calls:
+| NBP_DONE stops the retry timer, forgets the active call and calls IODone
+| with D0 (completing the call at the head of the .MPP queue)
+|
+KILLNBP:
+        CLR     D0                              | noErr
+NBP_DONE:
+        MOVE    D0,D1                           | save D0
+        LEA.L   0x4(A3),A0                      | A0 = VBL task (NRVars+$04)
+        _VRemove                                | stop the retry timer
+        MOVE    D1,D0                           | D0 = result
+        CLR.L   0x12(A3)                        | no active call
+        MOVE.L  (ABusVars_dce).w,A1             | A1 = .MPP DCE
+        MOVE.L  (JIODone).w,A0                  | IODone vector
+        JMP     (A0)                            | -> IODone
+
+| ----------------------------------------------------------
+|
+| NBP_LISTENER_NOTLKUP: reply for a RegisterName (-> nbpDuplicate) or a
+| ConfirmName: newSocket = socket of the first tuple; noErr if it is the
+| socket of confirmAddr, else nbpConfDiff
+|
+NBP_LISTENER_NOTLKUP:
+        CMPI    #0xFD,0x1A(A5)                  | RegisterName (253)?
+        BEQ.B   NBP_LISTENER_DUPLICATE          | yes -> nbpDuplicate
+        MOVEQ.L #0x4,D3                         | 4 bytes: tuple net, node, socket
+        JSR     0x2(A4)                         | ReadRest
+        BNE.B   NBP_LISTENER_EXIT               | error -> return
+        MOVE.B  -(A3),D2                        | D2 = tuple socket
+        MOVE.L  0x92(A2),A3                     | A3 = NRVars
+        MOVE.L  0x12(A3),A1                     | A1 = ConfirmName call
+        MOVE.B  D2,0x26(A1)                     | newSocket
+        CMP.B   0x25(A1),D2                     | socket of confirmAddr?
+        BEQ.B   KILLNBP                         | yes -> noErr
+        MOVE    #-0x402,D0                      | nbpConfDiff (-1026)
+        BRA.B   NBP_DONE                        | -> complete
+
+| ----------------------------------------------------------
+|
+| NBP_LISTENER_DUPLICATE: someone answered the verifying LkUp of a
+| RegisterName - nbpDuplicate
+|
+NBP_LISTENER_DUPLICATE:
+        JSR     0x2(A4)                         | ReadRest (D3 = 0: discard)
+        BNE.B   NBP_LISTENER_EXIT               | error -> return
+        MOVE.L  0x92(A2),A3                     | A3 = NRVars
+        MOVE    #-0x403,D0                      | nbpDuplicate (-1027)
+        BRA.B   NBP_DONE                        | -> complete
+
+| ----------------------------------------------------------
+|
+| NBP_LISTENER_EXIT
+|
+| return to MPP
+NBP_LISTENER_EXIT:
+        RTS                                     | return from NBP_LISTENER
+
+| ----------------------------------------------------------
+|
+| NBP_LISTENER_DISCARD: drop the packet
+|
+NBP_LISTENER_DISCARD:
+        CLR     D3                              | buffer size 0
+        JMP     0x2(A4)                         | ReadRest: discard, return to MPP
+
+| ----------------------------------------------------------
+|
+| NBP_LISTENER: listener of the NBP socket - replies to our requests.
+| Reads the NBP header; drops it unless a call is active and the NBP ID
+| matches.  LookupName: the tuples go straight into the return buffer;
+| tuples already received (same address and enumerator) are removed,
+| numGotten counted; the call ends at maxToGet or a full buffer.
+|
+NBP_LISTENER:
+        MOVEQ.L #0x2,D3                         | 2 bytes: control/count, NBP ID
+        JSR     (A4)                            | ReadPacket
+        BNE.B   NBP_LISTENER_EXIT               | error -> return
+        MOVE.L  0x92(A2),A5                     | A5 = NRVars
+        MOVE.L  0x12(A5),D0                     | D0 = active call
+        BEQ.B   NBP_LISTENER_DISCARD            | none -> drop
+        MOVE.B  -(A3),D2                        | D2 = nbpID
+        CMP.B   0x1(A5),D2                      | ours?
+        BNE.B   NBP_LISTENER_DISCARD            | no -> drop
+        MOVE.B  -(A3),D2                        | D2 = nbpControl/nbpTCount
+        EXG     D0,A5                           | A5 = call, D0 = NRVars
+        CMPI    #0xFB,0x1A(A5)                  | LookupName (251)?
+        BNE.B   NBP_LISTENER_NOTLKUP            | no ->
+| LookupName: read the tuples into the return buffer
+        MOVE.L  D0,A5                           | A5 = NRVars
+        MOVE.L  0x16(A5),A3                     | A3 = next free byte of the buffer
+        MOVE    0x1A(A5),D3                     | D3 = bytes left
+        JSR     0x2(A4)                         | ReadRest
+        BNE.B   NBP_LISTENER_EXIT               | error -> return
+        SUBI.B  #0x30,D2                        | control must be 3 (LkUp-Reply)
+        BLE.B   NBP_LISTENER_EXIT               | no tuples / other packet -> ignore
+        CMPI.B  #0xF,D2                         | more than 15 tuples?
+        BGT.B   NBP_LISTENER_EXIT               | yes -> ignore
+        MOVE.L  A3,D1                           | D1 = end of the data read
+        MOVE.L  0x92(A2),A3                     | A3 = NRVars
+        CLR     D0                              | D0.W = 0
+        TST     D3                              | truncated (D3 < 0)?
+        BPL.B   NBP_LISTENER_DEDUP              | no: all D2 tuples complete
+| truncated: count the complete tuples
+        CLR     D2                              | D2 = complete tuples
+        MOVE.L  0x16(A3),A0                     | A0 = first new tuple
+NBP_LISTENER_COUNTLOOP:
+        ADDQ.W  #0x5,A0                         | skip address and enumerator
+        CMP.L   A0,D1                           | past the end?
+        BLE.B   NBP_LISTENER_COUNTED            | yes -> stop
+        MOVE.B  (A0)+,D0                        | object length
+        ADDA    D0,A0                           | skip the object
+        CMP.L   A0,D1                           | past the end?
+        BLE.B   NBP_LISTENER_COUNTED            | yes -> stop
+        MOVE.B  (A0)+,D0                        | type length
+        ADDA    D0,A0                           | skip the type
+        CMP.L   A0,D1                           | past the end?
+        BLE.B   NBP_LISTENER_COUNTED            | yes -> stop
+        MOVE.B  (A0)+,D0                        | zone length
+        ADDA    D0,A0                           | skip the zone
+        CMP.L   A0,D1                           | past the end?
+        BLT.B   NBP_LISTENER_COUNTED            | yes -> stop
+        ADDQ.W  #0x1,D2                         | one more complete tuple
+        BRA.B   NBP_LISTENER_COUNTLOOP          | next
+
+| ----------------------------------------------------------
+|
+| NBP_LISTENER_COUNTED
+|
+| none complete: ignore the packet
+NBP_LISTENER_COUNTED:
+        TST     D2                              | complete tuples?
+  .short 0x6780                                 | BEQ.B NBP_LISTENER_EXIT (displacement -128): none
+| remove tuples already in the buffer (same address and enumerator)
+NBP_LISTENER_DEDUP:
+        MOVEM.L A4-A6,-(SP)                     | save A4-A6
+        CLR     D1                              | D1 = new tuples kept
+        MOVE.L  0x12(A3),A5                     | A5 = LookupName call
+        MOVE.L  0x22(A5),D3                     | D3 = retBuffPtr (start of the buffer)
+        MOVE.L  0x16(A3),A5                     | A5 = first new tuple
+        MOVE.L  A5,A6                           | A6 = where kept tuples go
+NBP_LISTENER_DEDUPLOOP:
+        MOVE.L  D3,A4                           | A4 = first old tuple
+NBP_LISTENER_SCANLOOP:
+        CMPA.L  0x16(A3),A4                     | end of the old tuples?
+        BEQ.B   NBP_LISTENER_KEEP               | yes: new one is unique ->
+        MOVE.L  A4,A0                           | A0 = old tuple
         MOVE.L  A5,A1                           | A1 = new tuple
-        CMPM.B  (A0)+,(A1)+                     | compare net
-        BNE.B   E_1056_LOOP_NEXT_5              | diff -> next
-        CMPM.B  (A0)+,(A1)+                     | compare net
-        BNE.B   E_1056_LOOP_NEXT_5              | diff -> next
-        CMPM.B  (A0)+,(A1)+                     | compare node
-        BNE.B   E_1056_LOOP_NEXT_5              | diff -> next
-        CMPM.B  (A0)+,(A1)+                     | compare socket
-        BNE.B   E_1056_LOOP_NEXT_5              | diff -> next
-        CMPM.B  (A0)+,(A1)+                     | compare enumerator
-        BEQ.B   E_1056_LOOP_SKIP_3              | duplicate -> skip
-E_1056_LOOP_NEXT_5:
-        ADDQ.W  #0x5,A4                         | skip tuple header
-        MOVE.B  (A4),D0                         | string 1 len
-        ADD.B   0x1(A4,D0.W),D0                 | add string 2 len
-        ADD.B   0x2(A4,D0.W),D0                 | add string 3 len
-        ADDQ.W  #0x3,D0                         | add length bytes
-        ADDA    D0,A4                           | skip names
-        BRA.B   E_1056_LOOP_LOOP_3              | -> loop
+        CMPM.B  (A0)+,(A1)+                     | network high byte
+        BNE.B   NBP_LISTENER_SCANNEXT           | differs ->
+        CMPM.B  (A0)+,(A1)+                     | network low byte
+        BNE.B   NBP_LISTENER_SCANNEXT           | differs ->
+        CMPM.B  (A0)+,(A1)+                     | node
+        BNE.B   NBP_LISTENER_SCANNEXT           | differs ->
+        CMPM.B  (A0)+,(A1)+                     | socket
+        BNE.B   NBP_LISTENER_SCANNEXT           | differs ->
+        CMPM.B  (A0)+,(A1)+                     | enumerator
+        BEQ.B   NBP_LISTENER_DROP               | same: duplicate -> drop
+NBP_LISTENER_SCANNEXT:
+        ADDQ.W  #0x5,A4                         | skip address and enumerator
+        MOVE.B  (A4),D0                         | object length
+        ADD.B   0x1(A4,D0.W),D0                 | + type length
+        ADD.B   0x2(A4,D0.W),D0                 | + zone length
+        ADDQ.W  #0x3,D0                         | + 3 length bytes
+        ADDA    D0,A4                           | next old tuple
+        BRA.B   NBP_LISTENER_SCANLOOP           | loop
 
 | ----------------------------------------------------------
 |
-| E_1056_LOOP_OK_7
+| NBP_LISTENER_KEEP
 |
-E_1056_LOOP_OK_7:
-        MOVE.B  0x5(A5),D0                      | string 1 len
-        ADD.B   0x6(A5,D0.W),D0                 | add string 2 len
-        ADD.B   0x7(A5,D0.W),D0                 | add string 3 len
-        ADDQ.W  #0x8,D0                         | add header+len bytes
-        MOVE.L  A5,A0                           | source ptr
-        ADDA    D0,A5                           | advance A5 to next
-        CMPA.L  A0,A6                           | dest == source?
-        BEQ.B   E_1056_LOOP_SKIP_2              | yes -> skip move
-        MOVE.L  A6,A1                           | dest ptr
-        ADDA    D0,A6                           | advance dest
-        _BlockMove                              | copy NBP tuple to buffer
-        BRA.B   E_1056_LOOP_NEXT_6              | -> next
+| keep the new tuple: move it down to A6 if tuples were dropped
+NBP_LISTENER_KEEP:
+        MOVE.B  0x5(A5),D0                      | object length
+        ADD.B   0x6(A5,D0.W),D0                 | + type length
+        ADD.B   0x7(A5,D0.W),D0                 | + zone length
+        ADDQ.W  #0x8,D0                         | + 5 + 3 = tuple size
+        MOVE.L  A5,A0                           | A0 = source
+        ADDA    D0,A5                           | A5 = next new tuple
+        CMPA.L  A0,A6                           | already in place?
+        BEQ.B   NBP_LISTENER_INPLACE            | yes ->
+        MOVE.L  A6,A1                           | A1 = destination
+        ADDA    D0,A6                           | advance it
+        _BlockMove                              | move the tuple down
+        BRA.B   NBP_LISTENER_COUNTNEW           | ->
 
 | ----------------------------------------------------------
 |
-| E_1056_LOOP_SKIP_2
+| NBP_LISTENER_INPLACE
 |
-E_1056_LOOP_SKIP_2:
-        MOVE.L  A5,A6                           | dest = source
-E_1056_LOOP_NEXT_6:
-        ADDQ.W  #0x1,D1                         | count unique tuple
-E_1056_LOOP_NEXT_7:
-        SUBQ.B  #0x1,D2                         | loop all new tuples
-        BNE.B   E_1056_LOOP_NEXT_4              | -> next
-        MOVE.L  A6,0x16(A3)                     | update buffer end
-        MOVE.L  0x12(A3),A0                     | A0 = param block
-        SUBA.L  0x22(A0),A6                     | used buffer space
-        MOVE    0x26(A0),D0                     | total buffer size
-        SUB     A6,D0                           | remaining space
-        MOVEM.L (SP)+,A4-A6                     | restore registers
-        ADD     0x2A(A0),D1                     | add previous match count
-        MOVE    D1,0x2A(A0)                     | update total matches
-        CMP     0x28(A0),D1                     | reached max matches?
-        BPL     E_1056_LOOP_DONE_2              | yes -> complete
-        MOVE    D0,0x1A(A3)                     | update remaining space
-        BEQ     E_1056_LOOP_DONE_2              | buffer full -> complete
-        RTS                                     | return
+| in place
+NBP_LISTENER_INPLACE:
+        MOVE.L  A5,A6                           | A6 = next free place
+NBP_LISTENER_COUNTNEW:
+        ADDQ.W  #0x1,D1                         | one more kept
+NBP_LISTENER_NEXTTUPLE:
+        SUBQ.B  #0x1,D2                         | tuples left
+        BNE.B   NBP_LISTENER_DEDUPLOOP          | more ->
+        MOVE.L  A6,0x16(A3)                     | next free byte of the buffer
+        MOVE.L  0x12(A3),A0                     | A0 = LookupName call
+        SUBA.L  0x22(A0),A6                     | A6 = bytes used
+        MOVE    0x26(A0),D0                     | retBuffSize
+        SUB     A6,D0                           | - used = bytes left
+        MOVEM.L (SP)+,A4-A6                     | restore A4-A6
+        ADD     0x2A(A0),D1                     | + numGotten
+        MOVE    D1,0x2A(A0)                     | numGotten
+        CMP     0x28(A0),D1                     | >= maxToGet?
+        BPL     KILLNBP                         | yes -> complete, noErr
+        MOVE    D0,0x1A(A3)                     | bytes left
+        BEQ     KILLNBP                         | buffer full -> complete, noErr
+        RTS                                     | return to MPP (call still pending)
 
 | ----------------------------------------------------------
 |
-| E_1056_LOOP_SKIP_3
+| NBP_LISTENER_DROP: duplicate - skip the new tuple (it is overwritten by
+| the next kept one)
 |
-E_1056_LOOP_SKIP_3:
-        ADDQ.W  #0x5,A5                         | skip tuple header
-        MOVE.B  (A5),D0                         | string 1 len
-        ADD.B   0x1(A5,D0.W),D0                 | add string 2 len
-        ADD.B   0x2(A5,D0.W),D0                 | add string 3 len
-        ADDQ.W  #0x3,D0                         | add length bytes
-        ADDA    D0,A5                           | advance past duplicate
-        BRA.B   E_1056_LOOP_NEXT_7              | -> next tuple
+NBP_LISTENER_DROP:
+        ADDQ.W  #0x5,A5                         | skip address and enumerator
+        MOVE.B  (A5),D0                         | object length
+        ADD.B   0x1(A5,D0.W),D0                 | + type length
+        ADD.B   0x2(A5,D0.W),D0                 | + zone length
+        ADDQ.W  #0x3,D0                         | + 3 length bytes
+        ADDA    D0,A5                           | A5 = next new tuple
+        BRA.B   NBP_LISTENER_NEXTTUPLE          | ->
 
 | end of resource : 'DRVR' 9 '.MPP'
-
-| resource header
-  .long 0xC0000870                              | Length
-  .long 0x00000068                              | ?
 

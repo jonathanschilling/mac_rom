@@ -1,39 +1,15 @@
-| Toolbox Event Manager (ROM $B6C0-$B8CF)
+| Toolbox Event Manager
 |
-| Implements the classic 1984 Event Manager traps:
-| _GetKeys $B690-$B6B7 -- copy the 128-bit KeyMap + journaling.
-| _Button $B6A8-$B6BA -- read MBState, return Bool + journaling.
-| _TickCount $B6BC-$B6C6 -- read Ticks + journaling.
-| JOURNAL_DISPATCH $B6C8 -- dispatcher for record/playback mode;
-| shared by all journaled traps.
-| _StillDown / _WaitMouseUp internals -- poll MBState, coalesce with
-| queued mouseUp events.
-| _GetNextEvent / _EventAvail -- TGEVT_POLL_OS walks the OS event
-| queue via _GetOSEvent / _OSEventAvail,
-| then filters through SYNTH_ACTIVATE
-| (synthesize activate events from
-| window-list state changes), CheckUpDate
-| (synthesize updateEvt for windows with
-| non-empty updateRgn), and _SystemEvent
-| (filter out DA events).
+| Apple source: ToolboxEventMgr.a (MacSEROM.lst module MISCMGR):
+| _GetKeys, _Button, _TickCount (with the journaling dispatcher
+| JOURNAL_DISPATCH, shared by all journaled traps), _GetMouse,
+| _StillDown, _WaitMouseUp, _EventAvail and _GetNextEvent: TGEVT_POLL_OS
+| walks the OS event queue via _GetOSEvent / _OSEventAvail, then filters
+| through SYNTH_ACTIVATE (synthesized activate events from window-list
+| changes), CheckUpdate (update events for windows with a non-empty
+| updateRgn) and _SystemEvent (desk accessory events).
 |
-| The file also carries a few small Toolbox Utilities / Window Manager
-| helpers that physically sit in this ROM region:
-| NewString / SetString / GET_STR_PTR_LEN - Pascal-string handle helpers.
-| FIND_PREV_WINDOW, INSERT_WINDOW - small internal Window
-| Manager primitives. The main Window Manager body (NewWindow,
-| ShowWindow, SelectWindow, DragWindow, ...) lives in window_mgr.s.
-|
-| Key data structures:
-| EventRecord: what(2), message(4), when(4), where(4), modifiers(2)
-| WindowRecord: port(GrafPort), windowKind, visible, hilited,
-| goAwayFlag, spareFlag, strucRgn, contRgn, updateRgn,
-| windowDefProc, dataHandle, titleHandle, titleWidth,
-| controlList, nextWindow, windowPic, refCon
-|
-| References:
-| Inside Macintosh Vol I, Ch 8: Toolbox Event Manager
-| Inside Macintosh Vol I, Ch 9: The Window Manager
+| References: Inside Macintosh Vol I, Ch 8: The Toolbox Event Manager
 
 | ----------------------------------------------------------
 |
@@ -54,7 +30,7 @@ GetKeys:
         MOVEQ.L #0x3,D1                         | D1 = jcGetKeys (journal code 3)
         BSR.B   JOURNAL_DISPATCH                | invoke journaling if JournalFlag != 0
         MOVE.L  (SP)+,(SP)                      | strip parameter, keep return address
-        RTS                                     | return to caller
+        RTS                                     | return from GetKeys
 
 | ----------------------------------------------------------
 |
@@ -136,7 +112,7 @@ GetMouse:
         MOVE.L  0x4(SP),-(SP)                   | push ptr to Point for GlobalToLocal
         _GlobalToLocal                          | convert global coords to local
         MOVE.L  (SP)+,(SP)                      | strip parameter, keep return address
-        RTS                                     | return to caller
+        RTS                                     | return from GetMouse
 
 | ----------------------------------------------------------
 |
@@ -164,7 +140,7 @@ StillDown:
         ADDQ.B  #0x1,0x8(A6)                    | no pending mouseUp: set result TRUE
 STILLDN_DONE:
         UNLK    A6                              | deallocate local EventRecord
-        RTS                                     | return to caller
+        RTS                                     | return from STILLDN_DONE
 
 | ----------------------------------------------------------
 |
@@ -186,7 +162,7 @@ WaitMouseUp:
         _GetNextEvent                           | consume the mouseUp event from queue
 WAITMUP_DONE:
         UNLK    A6                              | deallocate local EventRecord
-        RTS                                     | return to caller
+        RTS                                     | return from WAITMUP_DONE
 
 | ----------------------------------------------------------
 |
@@ -218,7 +194,7 @@ GetNextEvent:
 | Flow:
 | 1. Check for pending activate/deactivate events (SYNTH_ACTIVATE).
 | 2. Poll OS Event Manager (GetOSEvent or OSEventAvail).
-| 3. If no event and updateEvt bit set in mask, call CheckUpDate.
+| 3. If no event and updateEvt bit set in mask, call CheckUpdate.
 | 4. For GetNextEvent only: filter through SystemEvent for desk
 | accessory dispatch.
 TBOX_GET_EVENT:
@@ -259,7 +235,7 @@ TGEVT_CHK_UPDATE:
         MOVE    0xC(A6),D0                      | reload event mask
         BTST    #0x6,D0                         | bit 6 = updateEvt in mask?
         BEQ.B   TGEVT_SYSEVT                    | update events not requested: skip
-        CLR     -(SP)                           | space for CheckUpDate result
+        CLR     -(SP)                           | space for CheckUpdate result
         MOVE.L  A3,-(SP)                        | push EventRecord ptr
         _CheckUpDate                            | synthesize updateEvt if window needs redraw
         MOVE    (SP)+,0xE(A6)                   | store result (TRUE if update found)
@@ -340,12 +316,12 @@ SACT_SET_MODS:
         BSET    #0x7,(CurActivate).w            | mark activate as consumed (set lock bit)
 SACT_HAS_EVENT:
         MOVEQ.L #-0x1,D1                        | return -1: event synthesized (NE condition)
-        RTS                                     | return to caller
+        RTS                                     | return from SACT_HAS_EVENT
 
 | No pending activate/deactivate events
 SACT_NO_EVENT:
         MOVEQ.L #0x0,D1                         | return 0: no event (EQ condition)
-        RTS                                     | return to caller
+        RTS                                     | return from SACT_NO_EVENT
 
 | Mark deactivate as consumed
 SACT_MARK_DEACT:

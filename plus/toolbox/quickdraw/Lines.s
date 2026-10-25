@@ -98,7 +98,7 @@ STDLINE_NOTPIC:
         MOVEM.L (SP)+,D5-D7/A3-A4               | RESTORE REGS
         UNLK    A6                              | UNLINK PARAMSIZE
         MOVE.L  (SP)+,(SP)                      | STRIP PARAM
-        RTS                                     | RETURN
+        RTS                                     | return from STDLINE_NOTPIC
 
 | .PROC LineTo,2
 | .REF StdLine

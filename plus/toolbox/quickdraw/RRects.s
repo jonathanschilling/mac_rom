@@ -121,7 +121,7 @@ EraseRoundRect:
 | PROCEDURE InvertRoundRect(* r: Rect; ovWd,ovHt: INTEGER *);
 |
 | Called during boot.
-InvertRoundRect:
+InverRoundRect:
         MOVEQ.L #0x3,D0                         | VERB = INVERT
         BRA.B   CallRRect                       | SHARE COMMON CODE
 

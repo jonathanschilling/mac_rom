@@ -5,6 +5,11 @@
 | actual printer driver (loaded from PRER resource in System file).
 | Each entry point loads the PRER resource and jumps to the
 | corresponding offset within it. If PRER not found, returns noErr.
+
+| resource header
+        .long   0xC0000174                      | ROM resource header: tag $C0, physical size $174 (8 + $16C)
+        .long   0x00000054                      | relative handle: master pointer at ROM zone + $54
+_DRVR_2_.Print:
   .short 0x4F00                                 | drvrFlags
   .short 0x0000                                 | drvrDelay
   .short 0x0000                                 | drvrEMask
@@ -55,10 +60,10 @@ PRINT_LOAD_PRER:
         MOVE    D1,-(SP)                        | save PRER offset
         MOVE    (CurMap).w,-(SP)                | save current resource map
         MOVE.L  A1,-(SP)                        | save DCE
-| switch to System resource map to find printer driver name
+| make the top map current: search all open resource files
         MOVE.L  (TopMapHndl).w,A0               | top of resource chain
         MOVE.L  (A0),A0                         | dereference
-        MOVE    0x14(A0),(CurMap).w             | set CurMap to System file
+        MOVE    0x14(A0),(CurMap).w             | CurMap := top map's refNum (mRefNum, +$14)
 | get printer driver filename from STR# -8192 resource
         SUBQ.W  #0x4,SP                         | space for handle result
         MOVE    #-0x2000,-(SP)                  | resource ID -8192 ($E000)
@@ -101,7 +106,7 @@ PRINT_LOAD_PRER:
         BRA.B   PRINT_ERR_EXIT                  | -> error exit
 | install PRER as the printer driver in the DCE
 PRINT_INSTALL_PRER:
-        MOVE.L  A2,PORTBOUNDS(A3)               | save PRER handle in DCE data area
+        MOVE.L  A2,0x8(A3)                      | RHndl (+8) of DRVR 2's System-map entry := PRER handle
         MOVE.L  (SP)+,A0                        | A0 = DCE pointer
         MOVE.L  (A2),A1                         | A1 = dereferenced PRER code
         MOVE.B  (A1),0x4(A0)                    | copy driver flags from PRER header
@@ -125,13 +130,13 @@ PRINT_OPEN_FAILED:
 | common error exit: store error and return to caller
 PRINT_ERR_EXIT:
         MOVE    D0,(PrintErr).w                 | save print error code
-        MOVE.L  (SP)+,A0                        | pop saved port
+        MOVE.L  (SP)+,A0                        | pop saved DCE (discarded)
         MOVE    (SP)+,(CurMap).w                | restore resource map
         MOVE    (SP)+,D1                        | pop PRER offset
         MOVEM.L (SP)+,A0-A1                     | restore IOParam and DCE
-        ADDQ.W  #0x4,SP                         | pop PRER handle
-| check if this was an async call
-        BTST    #0x9,0x6(A0)                    | async flag in ioTrap?
+        ADDQ.W  #0x4,SP                         | pop the 4-byte slot reserved at entry (SUBQ #4,SP)
+| immediate call: plain RTS, otherwise return through IODone
+        BTST    #0x9,0x6(A0)                    | immediate? (noQueueBit 9 of ioTrap)
         BNE.B   PRINT_RTS                       | yes ->
         MOVE.L  (JIODone).w,-(SP)               | push JIODone to return via IO completion
 PRINT_RTS:
@@ -187,8 +192,4 @@ PRINT_CHK_NOTFOUND:
         RTS                                     | return (Z set if not found)
 
 | end of resource : 'DRVR' 2 '.Print'
-
-| resource header
-  .long 0xC0000370                              | Length
-  .long 0x00000058                              | ?
 

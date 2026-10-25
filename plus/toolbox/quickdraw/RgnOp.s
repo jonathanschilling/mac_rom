@@ -429,7 +429,7 @@ SKIP2:
 | Called during boot (63,457 times in 30s trace).
 SKIP2_EXIT:
         MOVE    #32767,(A2)+                    | DONE: PUT END MARKER INTO DST
-        RTS                                     | return to caller
+        RTS                                     | return from SKIP2_EXIT
 
 | ------------------------------------------------------------------------
 |
@@ -516,7 +516,7 @@ OUTOK2_LOOP:
         BNE.B   OUTLOOP                         | AND LOOP ENTIRE SCAN
 OUTOK2_EXIT:
         MOVE    #32767,(A2)+                    | DONE: PUT TERMINATOR
-        RTS                                     | return to caller
+        RTS                                     | return from OUTOK2_EXIT
 
 | ----------------------------------------------------------
 |

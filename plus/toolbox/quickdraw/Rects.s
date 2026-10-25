@@ -1,4 +1,4 @@
-|-----------------------------------------------------------
+| -----------------------------------------------------------
 |
 |
 |     ****   *****   ***   *****   ***
@@ -203,7 +203,7 @@ EraseRect:
 | _InverRect ($A8A4)
 |
 | Called during boot.
-InvertRect:
+InverRect:
         MOVEQ.L #0x3,D0                         | verb = invert
         NOP                                     | alignment padding
 
@@ -389,7 +389,7 @@ DORECT:
         MOVE.L  VISRGN(A1),-(SP)                | PUSH VISRGN
         MOVE.L  WIDEOPEN(A0),-(SP)              | PUSH WIDE OPEN
         JSR     RgnBlt(PC)                      | CALL RGNBLT
-        RTS                                     | return to caller
+        RTS                                     | return from DORECT
 
 | ----------------------------------------------------------
 |
@@ -401,7 +401,7 @@ FILLED:
 FILLED_SKIP:
         UNLK    A6                              | destroy stack frame
         MOVE.L  (SP)+,(SP)                      | strip param and replace ret addr
-        RTS                                     | return to caller
+        RTS                                     | return from FILLED_SKIP
 
 | .PROC SetRect
 | ----------------------------------------------------------
@@ -445,7 +445,7 @@ FALSE:
         CLR.B   (SP)                            | RETURN FALSE
 EQUALRECT_DONE:
         MOVE.L  D0,-(SP)                        | DONE: PUSH RETURN ADDR
-        RTS                                     | return to caller
+        RTS                                     | return from EQUALRECT_DONE
 
 | .PROC EmptyRect
 | ----------------------------------------------------------

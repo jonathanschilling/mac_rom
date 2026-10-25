@@ -1,4 +1,4 @@
-|-----------------------------------------------------------
+| -----------------------------------------------------------
 |
 |
 |     ****   ***   ***   *****  *   *  ****   *****   ***
@@ -101,7 +101,7 @@ NXTBYTE:
         MOVE.B  (A0)+,(A1)+                     | COPY ONE BYTE
 STDGETPIC_START:
         DBF     D1,NXTBYTE                      | LOOP FOR ALL BYTES
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from STDGETPIC_START
 
 | .PROC StdPutPic,1
 | .REF SetSize
@@ -328,7 +328,7 @@ OPENPICTURE_DONE:
         MOVEM.L (SP)+,A3-A4                     | DONE: RESTORE REGS
         UNLK    A6                              | RESTORE STACK FRAME
         MOVE.L  (SP)+,(SP)                      | STRIP PARAMETERS BUT KEEP RETURN ADDRESS
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from OPENPICTURE_DONE
 
 | .PROC ClosePicture,0
 | .REF PutPicByte,ShowPen,SetSize
@@ -349,7 +349,7 @@ ClosePicture:
         MOVE.L  PICCLIPRGN(A0),D6               | GET picClipRgn
         MOVE.L  PICINDEX(A0),D0                 | DID PICTURE OVERFLOW ?
         BEQ.B   OVERFLO                         | YES, CONTINUE
-        MOVE.L  (A0),A0                         | DEREFERENCE HANDLE
+        MOVE.L  (A0),A0                         | NO, GET THEPIC HANDLE (PICSAVE RECORD +0)
         _SetHandleSize                          | AND TRIM TO FINAL SIZE
 OVERFLO:
         MOVE.L  D6,A0                           | GET PICCLIPRGN
@@ -362,7 +362,7 @@ OVERFLO:
         JSR     ShowPen(PC)                     | RESTORE DRAWING
 CLOSEPICTURE_GOHOME:
         MOVEM.L (SP)+,D6-D7/A3                  | GOHOME: RESTORE REGS
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from CLOSEPICTURE_GOHOME
 
 | RTS ;AND RETURN
 | .PROC KillPicture
@@ -470,9 +470,9 @@ DrawPicture:
 |
         MOVE.L  A3,A0                           | SRC = THEPORT
         LEA.L   -0xA0(A6),A1                    | DST = SAVEPORT
-        MOVEQ.L #0x35,D0                        | PUT OPCODE IN D0
+        MOVEQ.L #0x35,D0                        | INIT DBRA COUNT (PORTREC/2-1)
 DRAWPICTURE_LOOP:
-        MOVE    (A0)+,(A1)+                     | INIT DBRA COUNT
+        MOVE    (A0)+,(A1)+                     | COPY A WORD
         DBF     D0,DRAWPICTURE_LOOP             | LOOP ENTIRE PORT
 
 | ----------------------------------------
@@ -521,7 +521,7 @@ DRAWPICTURE_LOOP:
         MOVE.L  D0,(A0)+                        | fillPat := BLACK
         MOVE.L  D0,(A0)+                        | COPY DATA
         CLR.L   (A0)+                           | PNLOC := (0,0)
-        MOVE.L  #0x10001,D1                     | SET REGION SIZE TO 10 BYTES
+        MOVE.L  #0x10001,D1                     | D1 := (1,1) FOR PNSIZE
         MOVE.L  D1,(A0)+                        | pnSize := (1,1)
         MOVE    #8,(A0)+                        | pnMode := patCopy
         MOVE.L  D0,(A0)+                        | pnPat := black
@@ -563,9 +563,9 @@ MORE:
         MOVE.L  CLIPRGN(A3),A0                  | GET TEMPCLIP
         _DisposeHandle                          | DISCARD TEMPCLIP
         LEA.L   -0xA0(A6),A0                    | SRC = SAVEPORT
-        MOVEQ.L #0x35,D0                        | PUT OPCODE IN D0
+        MOVEQ.L #0x35,D0                        | INIT DBRA COUNT (PORTREC/2-1)
 MORE_LOOP:
-        MOVE    (A0)+,(A3)+                     | INIT DBRA COUNT
+        MOVE    (A0)+,(A3)+                     | COPY A WORD INTO THEPORT
 
 | _DisposHandle ;DISCARD IT
         DBF     D0,MORE_LOOP                    | LOOP ENTIRE PORT
@@ -845,10 +845,10 @@ GET2_CONT_10:
         JSR     GETWORD_NO(PC)                  | GET TEXT NUMER
         MOVE.L  D0,0x24(A3)                     | INSTALL INTO PLAYSTATE
         JSR     GETWORD_NO(PC)                  | GET TEXT DENOM
-        MOVE.L  D0,FILLPAT(A3)                  | INSTALL INTO PLAYSTATE
-        PEA.L   0x24(A3)                        | PUSH PORT RECT
-        PEA.L   0x14(A3)                        | PUSH PORT BOUNDS
-        PEA.L   CLIPRGN(A3)                     | PUSH CLIP REGION
+        MOVE.L  D0,DENOM(A3)                    | INSTALL INTO PLAYSTATE
+        PEA.L   0x24(A3)                        | PUSH PLAYSTATE NUMER (+$24)
+        PEA.L   0x14(A3)                        | PUSH PLAYSTATE FROMRECT (+$14)
+        PEA.L   TORECT(A3)                      | PUSH PLAYSTATE TORECT
         JSR     ScalePt(PC)                     | SCALE NUMER
         BRA     KILL1_EXIT                      | GO TO COMMON SCALING
 
@@ -907,7 +907,7 @@ GET2_CONT_16:
         JSR     GETWORD_NO(PC)                  | GET DH,DV
         MOVE.L  0x8(A6),A2                      | POINT TO PLAYSTATE RECORD
         ADD     D0,0x14(A2)                     | ADD DV TO FROMRECT
-        ADD     D0,0x18(A2)                     | ADJUST RECT LEFT
+        ADD     D0,0x18(A2)                     | ADD DV TO FROMRECT.BOTTOM
         ADD     D0,-0xA8(A4)                    | AND TO PATALIGN
         SWAP    D0                              | GET DH IN LO WORD
         ADD     D0,0x16(A2)                     | ADD DH TO FROMRECT
@@ -1042,7 +1042,7 @@ TEXTOP2:
         MOVE.L  GRAFPROCS(A3),D0                | IS GRAFPROCS NIL ?
         BEQ.B   TEXTOP2_OK                      | YES, USE STD PROC
         MOVE.L  D0,A0                           | COPY POINTER
-        MOVE.L  (A0),A0                         | DEREFERENCE HANDLE
+        MOVE.L  (A0),A0                         | NO, GET TEXTPROC (GRAFPROCS +0)
 TEXTOP2_OK:
         BRA     CALL0                           | CALL NO-ARGUMENT ROUTINE
 
@@ -1455,7 +1455,7 @@ GETUBYTE:
         JSR     GetPicData(PC)                  | GET DATA FROM THEPIC
         CLR     D0                              | GET READY FOR BYTE
         MOVE.B  (SP)+,D0                        | POP RESULT INTO LO BYTE
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from GETUBYTE
 
 
 | ------------------------------------------------------
@@ -1469,7 +1469,7 @@ GETSBYTE:
         JSR     GetPicData(PC)                  | GET DATA FROM THEPIC
         MOVE.B  (SP)+,D0                        | POP RESULT
         EXT     D0                              | SIGN EXTEND TO WORD
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from GETSBYTE
 
 
 | ------------------------------------------------------
@@ -1483,7 +1483,7 @@ GETWORD:
         MOVE    #2,-(SP)                        | PUSH BYTECOUNT
         JSR     GetPicData(PC)                  | GET DATA FROM THEPIC
         MOVE    (SP)+,D0                        | RETURN ANSWER IN D0
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from GETWORD
 
 | GETWORD_NO -- gET PNSIZE.
 | ----------------------------------------------------------
@@ -1502,7 +1502,7 @@ GETLONG:
         MOVE    #4,-(SP)                        | PUSH BYTECOUNT
         JSR     GetPicData(PC)                  | GET DATA FROM THEPIC
         MOVE.L  (SP)+,D0                        | RETURN ANSWER IN D0
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from GETLONG
 
 | GETRECT -- gET AND PUSH DSTRECT.
 | ----------------------------------------------------------
@@ -1624,7 +1624,7 @@ KILL1_EXIT:
         MOVEM.L (SP)+,D3-D7/A2-A4               | DONE: RESTORE REGISTERS
         UNLK    A6                              | RESTORE STACK FRAME
         MOVE.L  (SP)+,(SP)                      | STRIP PARAMETERS BUT KEEP RETURN ADDRESS
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from KILL1_EXIT
 
 | .FUNC GetPicData,2
 | .REF StdGetPic
@@ -1728,7 +1728,7 @@ PutPicLong:
         MOVE    #4,-(SP)                        | PUSH BYTECOUNT = 4
         JSR     PutPicData(PC)                  | CALL PutPicData
         MOVE.L  (SP)+,(SP)                      | STRIP PARAM
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from PutPicLong
 
 | PutPicPat -- pUT PATTERN DATA.
 | ----------------------------------------------------------
@@ -1774,7 +1774,7 @@ PutPicRect:
         MOVE.L  (A0),A0                         | DE-REFERENCE PICSAVE
         CMP.L   PICTHERECT(A0),D2               | IS TOPLEFT THE SAME ?
         BNE.B   NOTSAME                         | NO, CONTINUE
-        CMP.L   0x4E(A0),D1                     | IS BOTRIGHT THE SAME ?
+        CMP.L   PICTHERECT+4(A0),D1             | IS BOTRIGHT THE SAME ?
         BNE.B   NOTSAME                         | NO, CONTINUE
         ADDQ.W  #0x8,D0                         | ADD HEADER SIZE
         JMP     DPutPicByte(PC)                 | PUT MODIFIED OPCODE AND RETURN
@@ -1785,7 +1785,7 @@ PutPicRect:
 |
 NOTSAME:
         MOVE.L  D2,PICTHERECT(A0)               | UPDATE PICTHERECT
-        MOVE.L  D1,0x4E(A0)                     | SAVE IN GLOBALS
+        MOVE.L  D1,PICTHERECT+4(A0)             | UPDATE PICTHERECT.BOTRIGHT
         MOVE.L  A1,-(SP)                        | PUSH ADDR OF RECT FOR BELOW
         MOVE    #8,-(SP)                        | PUSH BYTECOUNT FOR BELOW
         JSR     DPutPicByte(PC)                 | PUT OPCODE (IN D0)
@@ -1811,7 +1811,7 @@ PutPicRgn:
         MOVE.L  0x4(SP),A0                      | GET RGNHANDLE
         _HUnlock                                | UNLOCK IT
         MOVE.L  (SP)+,(SP)                      | STRIP PARAM
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from PutPicRgn
 
 | PutPicVerb -- pUT ADDIONAL PARAMS TO THEPIC.
 | ----------------------------------------------------------
@@ -1890,7 +1890,7 @@ FRAME1:
         MOVE.L  PNSIZE(A3),D6                   | GET PNSIZE
         CMP.L   PICPNSIZE(A4),D6                | HAS IT CHANGED ?
         BEQ.B   PAINT1                          | NO, CONTINUE
-        MOVEQ.L #0x7,D0                         | SET OPCODE FOR PATERNN
+        MOVEQ.L #0x7,D0                         | PNSIZE OPCODE ($07)
         JSR     DPutPicByte(PC)                 | YES, PUT PNSIZE OPCODE
         MOVE.L  D6,-(SP)                        | PUSH ARGUMENT
         JSR     PutPicLong(PC)                  | PUT NEW PNSIZE
@@ -2003,9 +2003,9 @@ CHECKPIC_NO_2:
         MOVE    PORTRECT(A3),D7                 | GET PORTRECT TOP
         SUB     0x56(A4),D7                     | CALC DV
         ADD     D7,0x56(A4)                     | UPDATE STATE VARIABLE
-        MOVEQ.L #0xC,D0                         | SET OPCODE FOR TXCOLOR
+        MOVEQ.L #0xC,D0                         | ORIGIN OPCODE ($0C)
         JSR     DPutPicByte(PC)                 | PUT ORIGIN OPCODE TO THEPIC
-        MOVE.L  D7,-(SP)                        | PUSH COLOR
+        MOVE.L  D7,-(SP)                        | PUSH DH,DV
         JSR     PutPicLong(PC)                  | PUT DH,DV TO THEPIC
         MOVE.L  PICSAVE(A3),A4                  | GET PICSAVE HANDLE
         MOVE.L  (A4),A4                         | DE-REFERENCE PICSAVE
@@ -2032,7 +2032,7 @@ CLIPOK:
         MOVEQ   #1,D0                           | CLEAR ZERO FLAG
 ORIGNOK_EXIT_2:
         MOVEM.L (SP)+,D7                        | DONE: MOVEM FOR CC, RESTORE REGS
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from ORIGNOK_EXIT_2
 
 | .PROC ScalePt
 | -------------------------------------------------------------
@@ -2119,7 +2119,7 @@ MINSIZE:
 MINSIZE_EMPTY:
         MOVE    D0,(A0)                         | SIZEOK: UPDATE RESULT
 SCDONE:
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from SCDONE
 
 | .PROC MapPt
 | -------------------------------------------------------------
@@ -2199,7 +2199,7 @@ NOTNEG:
 NOSCALE:
         ADD     D4,D0                           | ADD TORECT TOP
         MOVE    D0,(A0)                         | UPDATE RESULT
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from NOSCALE
 
 | .PROC MapRect,3
 | .REF MapPt

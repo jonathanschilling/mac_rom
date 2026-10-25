@@ -1,30 +1,164 @@
-| System Error -- DS Alert Rendering and Mouse-Button Tracking
+| System Error Handler -- _SysBeep, _SysError, the system error alert
 |
-| Called from the DS error handler (classic: in boot/sad_mac.s tail;
-| Plus: in debugger/debugger.s) after the alert's shape and contents
-| have been determined. This file renders the alert frame, draws the
-| text, lays out buttons, and tracks mouse-button clicks to dismiss
-| or accept the alert.
+| The 64K ROM's SysErr code (Mac Plus: os/sys_error.s, same structure):
+| INSTALL_DSERR_TRAMP - give the alert's GrafPort fake visRgn/clipRgn
+|                       handles (SysErrTrampoline: a wide-open region)
+| SysBeep ($A9C8)     - beep through BootBeep
+| SysError ($A9C9)    - save the registers, look the error up in the alert
+|                       table (DSAlertTab: from the System file's DSAT
+|                       resource, LOOKUP_ALERT_ID), draw the alert box,
+|                       icon and text (DRAW_ALERT_TEXT, DRAW_ALERT_FRAME),
+|                       draw and track the buttons (SHOW_ALERT_BTNS,
+|                       TRACK_BTN_*, BTN_PT_IN_RECT, BTN_INVERT).
+| The 64K ROM has no ROM debugger (the Mac Plus has MicroBug); a
+| "Resume" button returns through the procedure the alert table names.
 |
-| Classic 1984 context: this IS the entire "built-in debugger" -- just
-| a simple DS alert renderer. The full MacsBug-style debugger seen in
-| Plus (MicroBug, hex-command expression parser) does not exist in
-| classic.
-|
-| Routines:
-| DRAW_ALERT_TEXT - parse '/'-separated text and draw each line.
-| DRAWTEXT_SCAN / DRAWTEXT_SEGMENT / DRAWTEXT_DONE - text rendering.
-| DRAW_ALERT_FRAME / DT_ALERT_RECT - alert frame rectangle
-| (Plus has equivalent DRAW_ALERT_FRAME but inlines
-| the rect in SET_DEFAULT_RECT).
-| SHOW_ALERT_BTNS / DRAW_BTN_LOOP - draw OK/Cancel-style buttons.
-| WAIT_MOUSE_DOWN - block until a click.
-| HITTEST_BTN_LOOP / TRACK_BTN_* - track mouse-down across buttons.
-| BTN_PT_IN_RECT / BTN_INVERT - point-in-rect + button-highlight helpers.
-|
-| References: Inside Macintosh Vol II, Ch 12 (System Error Handler);
-| Technical Note TN1136 (built-in debugger overview).
+| References: Inside Macintosh Vol II, Ch 12 (The System Error Handler).
 
+| ----------------------------------------------------------
+| INSTALL_DSERR_TRAMP -- give the system error alert's GrafPort fake
+| visRgn/clipRgn handles. Called by SysError just before _InitPort.
+| Entry: A6 = the GrafPort (108 bytes; the two longs after it, A6+$6C
+|        and A6+$70, serve as master pointers)
+| visRgn := A6+$6C and clipRgn := A6+$70; both master pointers point
+| to the static wide-open region at $091E (SysErrTrampoline).
+| Apple source name: AllocFakeRgns (MacSEROM.lst: ALLOCFAKERGNS)
+INSTALL_DSERR_TRAMP:
+        LEA     0x18(A6),A1                     | A1 = &port.visRgn
+        LEA     0x6C(A6),A0                     | A0 = A6+$6C: first fake master pointer
+        MOVE.L  A0,(A1)+                        | visRgn := A6+$6C
+        ADDQ.W  #0x4,A0                         | A0 = A6+$70: second fake master pointer
+        MOVE.L  A0,(A1)+                        | clipRgn := A6+$70
+        LEA     SysErrTrampoline(PC),A1         | A1 = static region @ $091E
+        MOVE.L  A1,(A0)                         | clipRgn master pointer -> region
+        SUBQ.W  #0x4,A0                         | A0 = A6+$6C
+        MOVE.L  A1,(A0)                         | visRgn master pointer -> region
+        RTS                                     | return to SysError
+
+| ----------------------------------------------------------
+| SysErrTrampoline ($091E) -- not code: a 10-byte rectangular region
+| (rgnSize 10, rgnBBox -30000,-30000,30000,30000) that serves as the
+| visRgn and clipRgn of the system error alert's port.
+SysErrTrampoline:
+        .short  0x000A                          | rgnSize = 10 (rectangular region)
+        .short  0x8AD0                          | rgnBBox.top = -30000
+        .short  0x8AD0                          | rgnBBox.left = -30000
+        .short  0x7530, 0x7530                  | rgnBBox.bottom = rgnBBox.right = 30000
+| ----------------------------------------------------------
+| _SysBeep ($A9C8): sound the system beep
+| Pascal: PROCEDURE SysBeep(duration: INTEGER);
+| Entry: duration (word, in ticks) on the stack above the return address
+| Saves D0-D7/A1-A6 and runs the boot-beep generator BootBeep with
+| D3 = duration and A3 = 0 (RAM base); BootBeep returns via A6 to
+| SYSBEEP_EPILOG, which restores the registers and pops the parameter.
+| (No speaker-volume check or menu-bar flash, unlike the Plus ROM.)
+SysBeep:
+        .short  0x48E7, 0xFF7E                  | MOVEM.L D0-D7/A1-A6,-(SP)
+        MOVE    0x3C(SP),D3                     | D3 = duration (past 56 bytes of regs + ret)
+        SUBA.L  A3,A3                           | A3 = 0: RAM base for the sound buffer
+        LEA.L     SYSBEEP_EPILOG(PC),A6         | A6 = epilogue (pop regs + RTS)
+        BRA.W   BootBeep                        | play the tone; returns via JMP (A6)
+
+| ----------------------------------------------------------
+| SYSBEEP_EPILOG - SysBeep epilogue, pops duration param and returns
+SYSBEEP_EPILOG:
+        MOVEM.L (SP)+,D0-D7/A1-A6               | restore caller-saved regs
+        MOVE.L  (SP)+,A0                        | pop return address
+        ADDQ.W  #0x2,SP                         | discard duration parameter word
+        JMP     (A0)                            | return to SysBeep caller
+| ----------------------------------------------------------
+| SysError -- fatal-error system-reset entry point
+| Reached when an unrecoverable error has been signalled (D0 = err
+| code). Saves ALL registers and PC to SERegs ($7FC80), clears the
+| framebuffer, opens a grafport on the screen, then draws the sad-Mac
+| alert dialog. Also the target of `BRA.W SysError` in
+| PLOTDISK_AFTER_ICON_CONT (vectors.s $0594).
+SysError:                                       | SysError entry (fatal)
+        MOVEM.L D0-D7/A0-A7,(0x0007FC80).l      | save all registers to SERegs ($7FC80)
+SysErr2:
+        MOVE.L  (SP),(0x0007FCC0).l             | save PC (ret addr from caller) to SERegs+0x40
+        MOVEM.L D0-A6,-(SP)                     | save current working registers
+        MOVE    D0,(DSErrCode).w                | DSErrCode = system error code
+        TST.L   (DSAlertTab).w                  | custom DS alert table installed?
+        BEQ.B   DSERR_SKIP_PROC_CONT            | no: fall to CritErr (blinking screen)
+        LEA.L     -4(SP),A5                     | A5 = frame anchor
+        SUBA.W  #0x15A,SP                       | reserve 346 bytes for GrafPort + strings
+        MOVE.L  SP,A6                           | A6 = work-area base
+        MOVE    D0,-(SP)                        | save DS err code on stack
+        PEA.L     -4(A5)                        | push &thePort
+        _InitGraf                               | InitGraf(&thePort)
+        BSR.B   INSTALL_DSERR_TRAMP             | fake visRgn/clipRgn for the port at A6
+        MOVE.L  A6,-(SP)                        | push work-area base (the new GrafPort)
+        _InitPort                               | InitPort(port)
+        TST     (SP)                            | test low word of D0-pushed-earlier
+        BMI.B   SysErrAfterFrame                | negative: skip dialog frame
+        BSR.W   DRAW_ALERT_FRAME                | draw dialog frame (rect + border)
+SysErrAfterFrame:
+        MOVE    (SP)+,D0                        | pop saved error code
+        BSR.B   LOOKUP_ALERT_ID                 | look up err in alert table
+        BNE.B   DSERR_DRAW_ALERT                | found: use the alert definition
+        MOVE.L  (DSAlertTab).w,A0               | not found: use default alert (entry 0)
+        ADDQ.W  #0x6,A0                         | skip alert-table header (6 bytes)
+DSERR_DRAW_ALERT:                               | draw alert using A0's fields
+        MOVE.L  A0,A3                           | A3 = ptr to alert definition fields
+        BSR.B   DRAW_ALERT_TEXT                 | draw first text field
+        BSR.B   DRAW_ALERT_TEXT                 | draw second text field
+        MOVE    (A3)+,D0                        | D0 = icon resource ID
+        BEQ.B   DSERR_SKIP_ICON                 | 0 = no icon, skip
+        BSR.B   LOOKUP_ALERT_ID                 | look up icon ID in table
+        BEQ.B   DSERR_SKIP_ICON                 | not found - skip icon draw
+        PEA.L     8(A0)                         | push icon rect ptr (past 8-byte header)
+        MOVE.L  A0,-(SP)                        | push icon data ptr
+        PEA.L     4(SP)                         | push dest rect on stack (reuse rect)
+        _PlotIcon                               | draw the alert icon
+        ADDQ.W  #0x4,SP                         | pop extra rect ptr
+DSERR_SKIP_ICON:
+        MOVE    (A3)+,D0                        | D0 = custom procedure resource ID
+        BEQ.B   DSERR_SKIP_PROC                 | 0 = no custom procedure
+        BSR.B   LOOKUP_ALERT_ID                 | look up procedure in table
+        BEQ.B   DSERR_SKIP_PROC                 | not found - skip custom call
+        JSR     (A0)                            | run custom alert procedure
+DSERR_SKIP_PROC:
+        MOVE    (A3)+,D0                        | D0 = button definition ID
+        BEQ.B   DSERR_SKIP_PROC_NO              | 0 = no buttons (auto-resume)
+        TST.L   (ResumeProc).w                  | resume procedure installed?
+        BEQ.B   DSERR_SKIP_PROC_OK              | no: use button count as-is
+        ADDQ.W  #0x1,D0                         | yes: add Resume button option
+DSERR_SKIP_PROC_OK:
+        BSR.W   SHOW_ALERT_BTNS                 | draw buttons and wait for click
+        BNE.B   DSERR_SKIP_PROC_NO_2            | got a button click: exit via ResumeProc
+DSERR_SKIP_PROC_NO:
+        ADDA.W  #0x15A,SP                       | free GrafPort work area
+        MOVEM.L (SP)+,D0-A6                     | restore regs
+        RTS                                     | return to caller (auto-resume)
+DSERR_SKIP_PROC_NO_2:
+        JMP     (A0)                            | tail-call ResumeProc
+DSERR_SKIP_PROC_CONT:                           | no DSAlertTab: CritErr fallback
+        MOVE    D0,D1                           | D1 = err code (for CritErr display)
+        MOVE    #0xF,A4                         | A4 = 15 (critical-err glyph row count)
+        SUBA.L  A3,A3                           | A3 = nil (no alert text, RAM-base = 0)
+        BRA.W   CritErr                         | -> sad-Mac blinking-screen handler
+| Called by: SysErrAfterFrame, DSERR_DRAW_ALERT, DSERR_SKIP_ICON, DRAW_ALERT_TEXT, SHOW_ALERT_BTNS (and 2 more)
+LOOKUP_ALERT_ID:                                | DSAlertTab lookup helper
+        MOVE.L  (DSAlertTab).w,A0               | A0 = alert table base
+        MOVE    (A0)+,D1                        | D1 = entry count (post-increment)
+        BRA.B   LOOKUP_NEXT                     | drop into scan loop
+
+| ----------------------------------------------------------
+| LOOKUP_LOOP - alert table search loop
+LOOKUP_LOOP:
+        CMP     (A0)+,D0                        | compare ID with table entry
+        BEQ.B   LOOKUP_FOUND                    | match - return this entry
+        ADDA    (A0)+,A0                        | skip entry data (offset to next)
+LOOKUP_NEXT:
+        DBF     D1,LOOKUP_LOOP                  | loop through all entries
+        MOVEQ.L #0x0,D0                         | not found: D0=0, Z=1
+        SUBA.L  A0,A0                           | A0 = nil
+        RTS                                     | return with Z flag set (not found)
+LOOKUP_FOUND:
+        MOVEQ.L #-0x1,D0                        | found: D0=-1, Z=0
+        ADDQ.W  #0x2,A0                         | skip past offset word to entry data
+        RTS                                     | return with Z flag clear (found)
 | ----------------------------------------------------------
 |
 | DRAW_ALERT_TEXT - draw text string from alert table entry

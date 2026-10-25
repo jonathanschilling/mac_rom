@@ -35,7 +35,7 @@ CONTINUE:
 DONE:
         MOVE.L  (SP)+,(SP)                      | STRIP PARAM
         MOVE    D0,0x4(SP)                      | RETURN ANGLE IN RESULT
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from DONE
 
 | ----------------------------------------------------------------
 |

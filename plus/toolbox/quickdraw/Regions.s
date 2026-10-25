@@ -1,4 +1,4 @@
-|-----------------------------------------------------------
+| -----------------------------------------------------------
 |
 |
 |     ****   *****   ***   ***   ***   *   *   ***
@@ -104,7 +104,7 @@ EraseRgn:
 |
 | PROCEDURE InvertRgn(* rgn: RgnHandle *);
 |
-InvertRgn:
+InverRgn:
         MOVEQ.L #0x3,D0                         | VERB = INVERT
         BRA.B   CallRgn                         | SHARE COMMON CODE
 
@@ -280,7 +280,7 @@ NewRgn:
         MOVE    #10,(A0)+                       | INSTALL RGNSIZE=10
         CLR.L   (A0)+                           | INSTALL RGNBBOX=(0,0,0,0)
         CLR.L   (A0)+                           | CLEAR RGNBBOX BOTTOM,RIGHT
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from NewRgn
 
 | RTS ;RETURN TO CALLER
 | .PROC DisposeRgn
@@ -289,7 +289,7 @@ NewRgn:
 | PROCEDURE DisposeRgn(rgn: RgnHandle);
 |
 | Called during boot (4,137 times in 30s trace).
-DisposeRgn:
+DisposRgn:
         MOVE.L  (SP)+,A1                        | pop return addr
         MOVE.L  (SP)+,A0                        | pop handle
         _DisposeHandle                          | DISCARD IT
@@ -371,7 +371,7 @@ CLOSERGN_DONE:
         MOVEM.L (SP)+,D3/A2-A4                  | DONE: RESTORE REGS
         UNLK    A6                              | RELEASE STACK FRAME
         MOVE.L  (SP)+,(SP)                      | STRIP PARAMETERS
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from CLOSERGN_DONE
 
 | .PROC CopyRgn,1
 | .REF SetSize
@@ -440,7 +440,7 @@ SetEmptyRgn:
         CLR.L   -(SP)                           | PUSH LEFT, TOP
         CLR.L   -(SP)                           | PUSH RIGHT,BOTTOM
         MOVE.L  A0,-(SP)                        | RESTORE RETURN ADDR
-        JMP     SetRectRgn(PC)                  | DOUBLE UP ON CODE
+        JMP     SetRecRgn(PC)                   | DOUBLE UP ON CODE
 
 | .PROC SetRectRgn,5
 | .REF SetSize
@@ -450,7 +450,7 @@ SetEmptyRgn:
 | make a rectangular region from 4 integers.
 |
 | Called during boot (66,914 times in 30s trace).
-SetRectRgn:
+SetRecRgn:
         LINK    A6,#0                           | ESTABLISH STACK FRAME
         MOVEM.L D3/A2,-(SP)                     | SAVE REGS
         MOVE.L  0x10(A6),A0                     | GET RGN HANDLE
@@ -497,7 +497,7 @@ RectRgn:
         MOVE.L  (A1)+,-(SP)                     | PUSH LEFT,TOP
         MOVE.L  (A1)+,-(SP)                     | PUSH RIGHT,BOTTOM
         MOVE.L  A0,-(SP)                        | RESTORE RETURN ADDR
-        JMP     SetRectRgn(PC)                  | DOUBLE UP ON CODE
+        JMP     SetRecRgn(PC)                   | DOUBLE UP ON CODE
 
 | .PROC OffsetRgn
 | ---------------------------------------------------------
@@ -505,7 +505,7 @@ RectRgn:
 | PROCEDURE OffsetRgn(rgn: RgnHandle; dh,dv: INTEGER);
 |
 | Called during boot.
-OffsetRgn:
+OfsetRgn:
         MOVE.L  (SP)+,A1                        | POP RETURN ADDR
         MOVE    (SP)+,D1                        | POP DV
         MOVE    (SP)+,D0                        | POP DH

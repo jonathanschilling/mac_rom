@@ -1,13 +1,10 @@
 | Window Manager
 |
-| Manages overlapping windows on the Mac Plus desktop.
-| Handles window creation, movement, sizing, visibility, update regions,
-| and desktop painting. Also includes Desk Manager (desk accessories)
-| and the portion of Menu Manager that lives in this ROM section.
-|
-| Hardware interaction:
-| Screen buffer access for DragGrayRgn rubber-banding
-| VBL task for window update scheduling
+| Apple source: WindowMgr.a (MacSEROM.lst module WMGR). It starts with
+| NewString/SetString ($A906/$A907, string handles, used for window
+| titles) and the window-list primitives FIND_PREV_WINDOW, INSERT_WINDOW
+| and DeleteWindow, followed by the window traps from CalcVis to
+| DrawGrowIcon (ZoomWindow and TrackBox are Mac Plus additions).
 |
 | WindowRecord (MPW 1.0 Windows.h):
 | GrafPort port (108 bytes: portBits, portRect, visRgn, clipRgn, pnLoc, etc.)
@@ -41,6 +38,124 @@
 
 | ----------------------------------------------------------
 |
+| _NewString ($A906)
+| Pascal: FUNCTION NewString(theString: Str255): StringHandle
+| Allocates a new handle and copies the Pascal string into it.
+|
+| Called during boot.
+NewString:
+        BSR.B   GET_STR_PTR_LEN                 | A0 = string ptr, D0 = length+1
+        _PtrToHand                              | copy D0 bytes from (A0) into new handle
+        MOVE.L  A0,0x8(SP)                      | store returned handle as result
+        MOVE.L  (SP)+,(SP)                      | strip one param, keep return address
+        RTS                                     | return from NewString
+
+| ----------------------------------------------------------
+|
+| GET_STR_PTR_LEN - Get Pascal string pointer and byte count
+| Returns A0 = ptr to string, D0 = length byte + 1 (total size).
+|
+| Called during boot.
+GET_STR_PTR_LEN:
+        MOVE.L  0x8(SP),A0                      | A0 = ptr to Pascal string (caller's param)
+        MOVEQ.L #0x0,D0                         | clear D0
+        MOVE.B  (A0),D0                         | D0 = length byte of Pascal string
+        ADDQ.W  #0x1,D0                         | +1 for length byte itself = total size
+        RTS                                     | return from GET_STR_PTR_LEN
+
+| ----------------------------------------------------------
+|
+| _SetString ($A907)
+| Pascal: PROCEDURE SetString(h: StringHandle; theString: Str255)
+| Replaces the contents of an existing string handle.
+|
+SetString:
+        MOVE.L  0x8(SP),A1                      | A1 = destination StringHandle
+        BSR.B   GET_STR_PTR_LEN                 | A0 = string ptr, D0 = byte count
+        _PtrToXHand                             | replace handle contents with string data
+        BRA.B   STRIP_2PARAMS_RTS               | clean up stack and return
+
+| ----------------------------------------------------------
+|
+| FIND_PREV_WINDOW - Find predecessor of a window in the window list
+| Walks WindowList (linked via nextWindow at offset 0x90) to find
+| the window whose nextWindow field points to D0.
+| Returns A0 = predecessor window (or 0 if D0 is the first window),
+| A1 = the window matching D0. D0 is preserved.
+|
+| Called during boot.
+FIND_PREV_WINDOW:
+        MOVE.L  D0,-(SP)                        | save target window ptr
+        MOVE.L  (WindowList).w,A1               | A1 = first window in z-order list
+        SUBA.L  A0,A0                           | A0 = nil (no predecessor yet)
+FPWIN_LOOP:
+        CMPA.L  (SP),A1                         | found the target window?
+        BEQ.B   FPWIN_FOUND                     | yes: A0 = predecessor, A1 = target
+        MOVE.L  A1,A0                           | A0 = current (becomes predecessor)
+        MOVE.L  nextWindow(A0),A1               | A1 = next window in list
+        MOVE.L  A1,D0                           | test for end of list
+        BNE.B   FPWIN_LOOP                      | more windows: keep searching
+FPWIN_FOUND:
+        MOVE.L  (SP)+,D0                        | restore D0
+        RTS                                     | return with window pointers
+
+| ----------------------------------------------------------
+|
+| INSERT_WINDOW - Insert window into the window list
+| Stack: 0x8(SP) = window to insert, 0x4(SP) = behind window (or 0).
+| If behind = 0, inserts at end of list (behind all windows).
+| If WindowList is empty, the new window becomes the sole entry.
+|
+INSERT_WINDOW:
+        MOVE.L  0x8(SP),D1                      | D1 = new window ptr
+        MOVE.L  D1,A1                           | A1 = new window
+        CLR.L   nextWindow(A1)                  | clear nextWindow link (end of chain)
+        TST.L   (WindowList).w                  | any windows in list?
+        BNE.B   INSWIN_HAS_LIST                 | yes: insert at proper position
+        MOVE.L  D1,(WindowList).w               | no: new window is first and only
+        BRA.B   STRIP_2PARAMS_RTS               | clean up and return
+
+| Insert window behind a specified window
+INSWIN_HAS_LIST:
+        MOVE.L  0x4(SP),D0                      | D0 = "behind" window ptr
+        BEQ.B   INSWIN_AT_END                   | 0 = insert at end of list
+        MOVE.L  D0,A0                           | A0 = behind window
+        MOVE.L  nextWindow(A0),nextWindow(A1)   | new->next = behind->next
+        MOVE.L  A1,nextWindow(A0)               | behind->next = new window
+        BRA.B   STRIP_2PARAMS_RTS               | clean up and return
+
+| Insert at end of window list
+INSWIN_AT_END:
+        MOVEQ.L #0x0,D0                         | search for window 0 (end of list)
+        BSR.B   FIND_PREV_WINDOW                | A0 = last window in list
+        MOVE.L  D1,nextWindow(A0)               | append new window after last
+| Called by: SetString, INSERT_WINDOW, INSWIN_HAS_LIST, CALCVBEHIND_EMPTY, PAINTONE_EXIT (and 4 more)
+STRIP_2PARAMS_RTS:
+        MOVE.L  (SP)+,A0                        | pop return address
+        ADDQ.W  #0x8,SP                         | strip two 4-byte parameters
+        JMP     (A0)                            | return to caller
+
+| ----------------------------------------------------------
+|
+| DeleteWindow - Remove a window from the window list
+| Unlinks the window at 0x4(SP) from the WindowList chain.
+| If the target is the first window (no predecessor), patches
+| WindowList itself via ChooserBits (which aliases WindowList offset).
+|
+| Called during boot.
+DeleteWindow:
+        MOVE.L  0x4(SP),D0                      | D0 = window to remove
+        BSR.B   FIND_PREV_WINDOW                | find predecessor: A0 = prev window
+        MOVE.L  A0,D1                           | test if predecessor exists
+        BNE.B   DELWIN_UNLINK                   | has predecessor: unlink normally
+        LEA.L   (ChooserBits).w,A0              | no predecessor: window is first in list
+DELWIN_UNLINK:
+        MOVE.L  D0,A1                           | A1 = window to remove
+        MOVE.L  nextWindow(A1),nextWindow(A0)   | prev->next = target->next (bypass)
+        BRA.B   CALCVIS_EXIT_2                  | branch to parameter stripping return
+
+| ----------------------------------------------------------
+|
 | _CalcVis ($A909)
 |
 | _CalcVis ($A909): recalculate a window's visRgn
@@ -62,7 +177,7 @@ CALCVIS_EXIT:
 CALCVIS_EXIT_2:
         MOVE.L  (SP)+,(SP)                      | strip Pascal param
 CALCVIS_DONE:
-        RTS                                     | return to caller
+        RTS                                     | return from CALCVIS_DONE
 
 | ----------------------------------------------------------
 |
@@ -164,7 +279,7 @@ ClipAbove:
         BSR.B   CALCVIS_CONT                    | subtract all windows above A2
         MOVEM.L (SP)+,D4/A2-A3                  | restore regs
         MOVE.L  (SP)+,(SP)                      | strip param
-        RTS                                     | return to caller
+        RTS                                     | return from ClipAbove
 
 | ----------------------------------------------------------
 |
@@ -237,7 +352,7 @@ PAINTONE_CONT:
         BSR     GetSetWPort                     | save current port, set WMgr port
         MOVE.L  (WMgrPort).w,A3                 | A3 = WMgrPort
         MOVE.L  CLIPRGN(A3),D3                  | D3 = WMgr clipRgn handle
-        RTS                                     | return to caller
+        RTS                                     | return from PAINTONE_CONT
 
 | ----------------------------------------------------------
 |
@@ -288,7 +403,7 @@ PAINTONE_NO_4:
         PEA.L   PORTRECT(A3)                    | push WMgr port rectangle
         PEA.L   (DeskPattern).w                 | push desktop pattern (from PRAM)
         _FillRect                               | fill desktop with pattern
-        RTS                                     | return to caller
+        RTS                                     | return from PAINTONE_NO_4
 
 | ----------------------------------------------------------
 |
@@ -387,7 +502,7 @@ SaveOld:
         MOVEM.L D3-D4,(OldStructure).w          | save both handles to globals
         MOVEM.L (SP)+,D3-D4/A2                  | restore regs
         MOVE.L  (SP)+,(SP)                      | strip param
-        RTS                                     | return to caller
+        RTS                                     | return from SaveOld
 
 | ----------------------------------------------------------
 |
@@ -479,7 +594,7 @@ GetSetWPort:
         MOVE.L  (A5),A0                         | A0 = ptr to thePort global
         MOVE.L  (A0),D4                         | D4 = save current port
         MOVE.L  (WMgrPort).w,(A0)               | thePort = WMgrPort
-        RTS                                     | return to caller
+        RTS                                     | return from GetSetWPort
 
 | ----------------------------------------------------------
 |
@@ -489,7 +604,7 @@ GetSetWPort:
 RestorePort:
         MOVE.L  D4,-(SP)                        | push saved port from D4
         _SetPort                                | restore it as current port
-        RTS                                     | return to caller
+        RTS                                     | return from RestorePort
 
 | ----------------------------------------------------------
 |
@@ -511,7 +626,7 @@ GetWMgrPort:
 | _CheckUpdate ($A911): find window needing update (for GetNextEvent)
 | Scans window list front-to-back for first window with non-empty updateRgn
 | Returns: true + event filled if update needed, false otherwise
-CheckUpDate:
+CheckUpdate:
         LINK    A6,#-0x8                        | local vars
         MOVE.L  A3,-(SP)                        | save A3
         CLR     0xC(A6)                         | result = false initially
@@ -564,7 +679,7 @@ CHECKUPDATE_EXIT:
         MOVE.L  (SP)+,A3                        | restore A3
         UNLK    A6                              | tear down stack frame
         MOVE.L  (SP)+,(SP)                      | strip param
-        RTS                                     | return to caller
+        RTS                                     | return from CHECKUPDATE_EXIT
 
 | ----------------------------------------------------------
 |
@@ -597,7 +712,7 @@ CHECKUPDATE_CONT_3:
         MOVE.L  A0,A3                           | A3 = port pointer
         MOVE.L  A0,-(SP)                        | push port for OpenPort
         _OpenPort                               | initialize as GrafPort
-        RTS                                     | return to caller
+        RTS                                     | return from CHECKUPDATE_CONT_3
 
 | ----------------------------------------------------------
 |
@@ -674,7 +789,7 @@ InitWindows:
         CLR.L   (A0)+                           | CurActivate = nil
         CLR.L   (A0)+                           | CurDeactive = nil
         MOVEM.L (SP)+,D3-D5/A3-A4               | restore regs
-        RTS                                     | return to caller
+        RTS                                     | return from InitWindows
 
 | ----------------------------------------------------------
 |
@@ -709,7 +824,7 @@ NewWindow:
         BSR     CHECKUPDATE_EMPTY               | allocate and zero
 NEWWINDOW_CONT:
         MOVE.L  A3,0x22(A6)                     | store WindowPtr as return value
-        MOVE    #0x1,TXFONT(A3)                 | set font to system font (1)
+        MOVE    #0x1,TXFONT(A3)                 | set font to application font (applFont = 1)
         MOVE.L  0x1A(A6),A2                     | A2 = boundsRect parameter
         MOVE.L  (A2),-(SP)                      | push boundsRect.topLeft
         _MovePortTo                             | position port origin
@@ -840,7 +955,7 @@ NEWWINDOW_CONT_3:
         BNE.B   NEWWINDOW_SKIP_2                | different window -> skip
         BSET    #0x7,(A0)                       | same window: invalidate entry
 NEWWINDOW_SKIP_2:
-        RTS                                     | return to caller
+        RTS                                     | return from NEWWINDOW_SKIP_2
 
 | ----------------------------------------------------------
 |
@@ -896,7 +1011,7 @@ CLOSEWINDOW_NO:
 CLOSEWINDOW_SKIP_2:
         MOVEM.L (SP)+,D3-D4/A3                  | restore regs
         MOVE.L  (SP)+,(SP)                      | strip param
-        RTS                                     | return to caller
+        RTS                                     | return from CLOSEWINDOW_SKIP_2
 
 | ----------------------------------------------------------
 |
@@ -916,7 +1031,7 @@ CLOSEWINDOW_CONT:
         MOVE    windowKind(A0),(CurDeKind).w    | save kind for deactivate event
         MOVE.L  D0,(CurDeactive).w              | schedule deactivate event
 CLOSEWINDOW_SKIP_3:
-        RTS                                     | return to caller
+        RTS                                     | return from CLOSEWINDOW_SKIP_3
 
 | ----------------------------------------------------------
 |
@@ -927,7 +1042,7 @@ CLOSEWINDOW_SKIP_3:
 | Pascal: procedure DisposeWindow(theWindow: WindowPtr);
 | Calls CloseWindow then deallocates the WindowRecord memory
 | Called during boot.
-DisposeWindow:
+DisposWindow:
         MOVE.L  0x4(SP),-(SP)                   | push window for CloseWindow
         _CloseWindow                            | close and free internal structures
         MOVE.L  (SP)+,A1                        | A1 = return address
@@ -990,7 +1105,7 @@ HideWindow:
         _SelectWindow                           | select the new front window
 HIDEWINDOW_DONE:
         MOVE.L  (SP)+,(SP)                      | strip param
-        RTS                                     | return to caller
+        RTS                                     | return from HIDEWINDOW_DONE
 
 | ----------------------------------------------------------
 |
@@ -1135,7 +1250,7 @@ SETWTITLE_CONT:
         MOVE.L  contRgn(A3),-(SP)               | push content region
         MOVE.L  D3,-(SP)                        | push dest
         _DiffRgn                                | D3 = D3 minus contRgn (frame only)
-        RTS                                     | return to caller
+        RTS                                     | return from SETWTITLE_CONT
 
 | ----------------------------------------------------------
 |
@@ -1162,7 +1277,7 @@ DeltaPoint:
 | then offsets strucRgn, contRgn, updateRgn, and portBounds by delta.
 | D0 = new origin as packed point. D3 = computed offset on exit.
 DELTAPOINT_CONT:
-        MOVE.L  A4,-(SP)                        | push strucRgn handle for OffsetRgn
+        MOVE.L  A4,-(SP)                        | push strucRgn handle for OfsetRgn
         SUBQ.W  #0x4,SP                         | space for DeltaPoint result
         MOVE.L  D0,-(SP)                        | push new position
         SUBQ.W  #0x4,SP                         | space for DeltaPoint result
@@ -1182,7 +1297,7 @@ DELTAPOINT_CONT:
         MOVE.L  D3,-(SP)                        | push offset (negated by BRINGTOFRONT_CONT_2)
         BSR     BRINGTOFRONT_CONT_2             | negate offset for bounds
         _OffsetRect                             | offset portBounds (reversed)
-        RTS                                     | return to caller
+        RTS                                     | return from DELTAPOINT_CONT
 
 | ----------------------------------------------------------
 |
@@ -1268,7 +1383,7 @@ MOVEWINDOW_SKIP_2:
         _DisposeRgn                             | free it
         BSR     RestorePort                     | restore original port
         MOVEM.L (SP)+,D3-D6/A3-A4               | restore regs
-        BRA     QDEXTENSIONS_EXIT               | -> strip params and return
+        BRA     SIZEWINDOW_EXIT                 | -> strip params and return
 
 | ----------------------------------------------------------
 |
@@ -1304,7 +1419,7 @@ MOVEWINDOW_CONT:
         MOVE.L  (SP)+,D0                        | D0 = WDEF result
         MOVE.L  windowDef(A3),A0                | A0 = WDEF handle
         BCLR    #0x7,(A0)                       | unlock WDEF handle
-        RTS                                     | return to caller
+        RTS                                     | return from MOVEWINDOW_CONT
 
 | ----------------------------------------------------------
 |
@@ -1318,7 +1433,7 @@ MOVEWINDOW_CONT_2:
         MOVEQ.L #0x0,D0                         | message = wDraw
         BSR.B   MOVEWINDOW_OK                   | call WDEF(wDraw, 0)
         MOVE.L  (SP)+,D3                        | restore D3
-        RTS                                     | return to caller
+        RTS                                     | return from MOVEWINDOW_CONT_2
 
 | ----------------------------------------------------------
 |
@@ -1338,7 +1453,7 @@ MOVEWINDOW_EMPTY:
         _SetEmptyRgn                            | set empty
         MOVE.L  VISRGN(A3),-(SP)                | push visRgn
         _SetEmptyRgn                            | set empty
-        RTS                                     | return to caller
+        RTS                                     | return from MOVEWINDOW_EMPTY
 
 | ----------------------------------------------------------
 |
@@ -1377,7 +1492,7 @@ HILITEWINDOW_CONT_2:
         _SetClip                                | set WMgr clip to region
         MOVE.L  A3,-(SP)                        | push window
         _ClipAbove                              | subtract all windows above A3
-        RTS                                     | return to caller
+        RTS                                     | return from HILITEWINDOW_CONT_2
 
 | ----------------------------------------------------------
 |
@@ -1389,44 +1504,51 @@ HILITEWINDOW_CONT_3:
 
 | ----------------------------------------------------------
 |
-| _SizeWindow ($A91D): resize a window
-| Pascal: procedure SizeWindow(theWindow: WindowPtr; w, h: INTEGER;
-| fUpdate: BOOLEAN);
-| Computes new portRect.botRight from size, then redraws if visible
+| _SizeWindow ($A91D): set the width and height of a window's portRect
+| Pascal: PROCEDURE SizeWindow(theWindow: WindowPtr; w, h: INTEGER;
+|                              fUpdate: BOOLEAN);
+| Entry: 0x4(SP) = fUpdate, 0x6(SP) = h, 0x8(SP) = w, 0xA(SP) = theWindow
+| Does nothing if w and h are both 0. Otherwise portRect.bottom = top + h and
+| portRect.right = left + w (the window keeps its position). If the window is
+| visible: SaveOld, then SIZEWINDOW_CONT (wCalcRgns, wDraw, DrawNew(fUpdate)).
+| Exits through SIZEWINDOW_EXIT, which strips the 10 parameter bytes.
 |
-QDExtensions:
+SizeWindow:
         MOVEM.L D3-D4/A3-A4,-(SP)               | save regs
-        MOVE.L  0x16(SP),D3                     | D3 = new height (h param)
-        BEQ.B   QDEXTENSIONS_DONE               | zero size -> skip
+        MOVE.L  0x16(SP),D3                     | D3 = h:w (long); low word = w
+        BEQ.B   SIZEWINDOW_DONE                 | w = h = 0 -> do nothing
         MOVE.L  0x1A(SP),A3                     | A3 = window
-        MOVE    0x16(SP),D4                     | D4 = new width (w param, low word)
+        MOVE    0x16(SP),D4                     | D4 = h
         LEA.L   PORTRECT(A3),A4                 | A4 = portRect
-        ADD     (A4)+,D4                        | D4 = portRect.top + width = new bottom
-        ADD     (A4)+,D3                        | D3 = portRect.left + height = new right
+        ADD     (A4)+,D4                        | D4 = top + h = new bottom
+        ADD     (A4)+,D3                        | D3.W = left + w = new right
         MOVE    D4,(A4)+                        | store new portRect.bottom
         MOVE    D3,(A4)+                        | store new portRect.right
         TST.B   wVisible(A3)                    | window visible?
-        BEQ.B   QDEXTENSIONS_DONE               | no -> done
+        BEQ.B   SIZEWINDOW_DONE                 | no -> done
         BSR     GetSetWPort                     | save port, switch to WMgr
         MOVE.L  A3,-(SP)                        | push window
         _SaveOld                                | snapshot old regions
         MOVE.B  0x14(SP),D3                     | D3 = fUpdate parameter
-        BSR.B   QDEXTENSIONS_CONT               | recalc, redraw, DrawNew
-QDEXTENSIONS_DONE:
+        BSR.B   SIZEWINDOW_CONT                 | recalc, redraw, DrawNew
+SIZEWINDOW_DONE:
         MOVEM.L (SP)+,D3-D4/A3-A4               | restore regs
-| QDEXTENSIONS_EXIT - strip 10 bytes of params and return
-QDEXTENSIONS_EXIT:
+| SIZEWINDOW_EXIT - strip 10 bytes of params and return (Apple: TenBytExit;
+| also the exit of MoveWindow and TrackBox/TrackGoAway)
+SIZEWINDOW_EXIT:
         MOVE.L  (SP)+,A0                        | pop return address
         ADDA    #0xA,SP                         | strip params
         JMP     (A0)                            | return
 
 | ----------------------------------------------------------
 |
-| QDEXTENSIONS_CONT - recalculate regions, redraw frame, call DrawNew
+| SIZEWINDOW_CONT - recalculate regions, redraw frame, call DrawNew
+| Apple source name: SizeGuts (System 7.1 WindowMgr.a)
 |
-| Used after SizeWindow/ZoomWindow when window is visible.
-| D3 = fUpdate parameter for DrawNew.
-QDEXTENSIONS_CONT:
+| Shared by SizeWindow (visible windows only) and ZoomWindow, after SaveOld.
+| A3 = window, D3.B = fUpdate for DrawNew, D4 = port saved by GetSetWPort
+| (restored before returning).
+SIZEWINDOW_CONT:
         BSR     MOVEWINDOW_EMPTY                | recalculate strucRgn/contRgn
         BSR.B   HILITEWINDOW_CONT               | clip to strucRgn above window
         BSR     MOVEWINDOW_CONT_2               | send wDraw to WDEF (redraw frame)
@@ -1434,33 +1556,39 @@ QDEXTENSIONS_CONT:
         MOVE.B  D3,-(SP)                        | push fUpdate flag
         _DrawNew                                | repaint changed areas
         BSR     RestorePort                     | restore original port
-        RTS                                     | return to caller
+        RTS                                     | return from SIZEWINDOW_CONT
 
 | ----------------------------------------------------------
 |
-| _ZoomWindow ($A95C): zoom window between standard and user state
+| _ZoomWindow ($A83A): zoom a window to its user state or its standard state
+| Pascal: PROCEDURE ZoomWindow(theWindow: WindowPtr; partCode: INTEGER;
+|                              front: BOOLEAN);
+| Entry: 0x4(SP) = front, 0x6(SP) = partCode, 0x8(SP) = theWindow
+| wDataHandle^ = WStateData: userState rect at +0, stdState rect at +8 (both
+| global); partCode inZoomIn (7) selects userState, any other value stdState.
+| wDataHandle is used unchecked (only for windows with a zoom box). Moves
+| portRect.topLeft to the rect's topLeft (DELTAPOINT_CONT), sets the size,
+| redraws via SIZEWINDOW_CONT (fUpdate = TRUE), brings the window to the front
+| if front is TRUE, then InvalRect(portRect) in the caller's port.
 |
-| partCode 7 = inZoomIn (restore to user state)
-| partCode 8 = inZoomOut (zoom to standard state)
-| wDataHandle contains two rects: user state (0..7), standard state (8..15)
-AddSearch:
+ZoomWindow:
         MOVEM.L D3-D6/A2-A4,-(SP)               | save regs
         BSR     GetSetWPort                     | save port, switch to WMgr
         MOVE.L  0x24(SP),A3                     | A3 = window
-        BSR     MOVEWINDOW_EMPTY                | recalculate current regions
+        BSR     MOVEWINDOW_EMPTY                | WDEF wCalcRgns (std WDEF updates userState)
         MOVE.L  A3,-(SP)                        | push window
         _SaveOld                                | snapshot current regions
 | get zoom state rect from wDataHandle
         MOVE.L  wDataHandle(A3),A2              | A2 = WDEF data handle
-        MOVE.L  (A2),A2                         | dereference to zoom state data
+        MOVE.L  (A2),A2                         | A2 -> WStateData (userState, stdState)
         CMPI    #0x7,0x22(SP)                   | partCode = inZoomIn (7)?
-        BEQ.B   ADDSEARCH_OK                    | yes -> use user state (offset 0)
+        BEQ.B   ZOOMWINDOW_OK                   | yes -> use user state (offset 0)
         ADDQ.W  #0x8,A2                         | no -> use standard state (offset 8)
-ADDSEARCH_OK:
+ZOOMWINDOW_OK:
 | move window origin to zoom state's topLeft
         MOVE.L  structRgn(A3),A4                | A4 = strucRgn handle
         MOVE.L  (A2)+,D0                        | D0 = zoom rect topLeft
-        BSR     DELTAPOINT_CONT                 | offset all regions to new position
+        BSR     DELTAPOINT_CONT                 | offset regions + portBits.bounds to D0
 | compute new portRect size from zoom state rect
         MOVE    (A2)+,D0                        | D0 = zoom rect.bottom
         MOVE    (A2)+,D1                        | D1 = zoom rect.right
@@ -1474,89 +1602,98 @@ ADDSEARCH_OK:
         MOVE    D1,(A0)+                        | set portRect.right
 | redraw at new size
         MOVEQ.L #0x1,D3                         | fUpdate = true
-        BSR.B   QDEXTENSIONS_CONT               | recalc, redraw, DrawNew
+        BSR.B   SIZEWINDOW_CONT                 | recalc, redraw, DrawNew
 | optionally bring to front
         TST.B   0x20(SP)                        | front parameter?
-        BEQ.B   ADDSEARCH_SKIP                  | no -> skip
+        BEQ.B   ZOOMWINDOW_SKIP                 | no -> skip
         MOVE.L  A3,-(SP)                        | push window
-        ST.B    (DragFlag).w                    | suppress repaint during select
-        BSR     SELECTWINDOW_CONT               | select window
-ADDSEARCH_SKIP:
+        ST.B    (DragFlag).w                    | DragFlag set: BringToFront skips PaintOne
+        BSR     SELECTWINDOW_CONT               | SelectWindow without its DragFlag clear
+ZOOMWINDOW_SKIP:
         PEA.L   PORTRECT(A3)                    | push portRect
-        _InvalRect                              | invalidate entire content for redraw
+        _InvalRect                              | inval portRect (caller's port again)
         MOVEM.L (SP)+,D3-D6/A2-A4               | restore regs
         BRA     STRIP_2PARAMS_RTS               | -> strip params and return
 
 | ----------------------------------------------------------
 |
-| _TrackGoAway ($A91E)
-|
-| _TrackGoAway ($A91E): track mouse in go-away box
-| Pascal: function TrackGoAway(theWindow: WindowPtr; thePt: Point): BOOLEAN;
-| Returns true if mouse released inside go-away box.
-| Falls through to AddComp (generic part-tracking loop).
+| _TrackGoAway ($A91E): track the mouse in a window's go-away box
+| Pascal: FUNCTION TrackGoAway(theWindow: WindowPtr; thePt: Point): BOOLEAN;
+| Inserts partCode = inGoAway (6) below the return address and falls into
+| TrackBox: TrackGoAway(w, pt) = TrackBox(w, pt, inGoAway). Returns TRUE if
+| the mouse button is released inside the go-away box.
 | Called during boot.
 TrackGoAway:
         MOVE.L  (SP)+,A0                        | pop return address
         MOVE    #0x6,-(SP)                      | push partCode 6 (inGoAway)
         MOVE.L  A0,-(SP)                        | restore return address
-| AddComp - generic WDEF part tracking loop (go-away, zoom buttons)
-| Shared by TrackGoAway and TrackBox. Tracks mouse, toggling
-| the part highlight while mouse is inside, returns result.
-AddComp:
+| (falls through)
+|
+| _TrackBox ($A83B): track the mouse in a window's zoom box (or go-away box)
+| Pascal: FUNCTION TrackBox(theWindow: WindowPtr; thePt: Point;
+|                           partCode: INTEGER): BOOLEAN;
+| Entry (after LINK): 0x8(A6) = partCode, 0xA(A6) = thePt (global),
+|        0xE(A6) = theWindow, 0x12(A6) = result
+| Also the body of TrackGoAway (TrackBox is an entry inside TrackGoAway in
+| System 7.1 WindowMgr.a). D6 = partCode - 2 = WDEF hit code (inGoAway 6 -> 4,
+| inZoomIn/inZoomOut 7/8 -> 5/6). Until the button is released: wHit at the
+| mouse; whenever 'inside' changes, wDraw(D6) toggles the part's highlight;
+| GetMouse, DragHook, WaitMouseUp. TRUE if released inside (part unhilited).
+TrackBox:
         LINK    A6,#-0x4                        | local var: mouse point
         MOVEM.L D3-D6/A3,-(SP)                  | save regs
         BSR     GetSetWPort                     | save port, switch to WMgr
         LEA.L   0x8(A6),A0                      | A0 = stack params
         MOVE    (A0)+,D6                        | D6 = partCode
-        SUBQ.W  #0x2,D6                         | adjust for WDEF hit result offset
-        MOVE.L  (A0)+,-0x4(A6)                  | save startPt in local var
+        SUBQ.W  #0x2,D6                         | D6 = WDEF hit code (partCode - 2)
+        MOVE.L  (A0)+,-0x4(A6)                  | local mouse point = thePt
         MOVE.L  (A0)+,A3                        | A3 = window
         CLR     (A0)                            | result = false initially
         MOVEQ.L #0x0,D5                         | D5 = current highlight state (off)
         BSR     HILITEWINDOW_CONT               | clip to strucRgn above window
 | tracking loop: send wHit to WDEF, toggle highlight as needed
-ADDCOMP_OK:
+TRACKBOX_OK:
         MOVEQ.L #0x1,D0                         | message = wHit
         MOVE.L  -0x4(A6),D3                     | D3 = current mouse point
         BSR     MOVEWINDOW_OK                   | call WDEF(wHit, mousePt)
         CMP     D6,D0                           | hit result matches target part?
-        BEQ.B   ADDCOMP_OK_2                    | yes -> mouse is in part
+        BEQ.B   TRACKBOX_OK_2                   | yes -> mouse is in part
         MOVEQ.L #0x0,D0                         | no -> mouse outside part
-ADDCOMP_OK_2:
+TRACKBOX_OK_2:
         CMP     D0,D5                           | highlight state changed?
-        BEQ.B   ADDCOMP_SKIP                    | no -> skip redraw
+        BEQ.B   TRACKBOX_SKIP                   | no -> skip redraw
         MOVE    D0,D5                           | update highlight state
-        BSR.B   ADDCOMP_CONT                    | toggle part highlight via wDraw
-ADDCOMP_SKIP:
+        BSR.B   TRACKBOX_CONT                   | toggle part highlight via wDraw
+TRACKBOX_SKIP:
         PEA.L   -0x4(A6)                        | push local mouse point addr
         _GetMouse                               | read current mouse position
         BSR     DRAGTHERGN_CONT_3               | call DragHook if installed
         CLR     -(SP)                           | space for WaitMouseUp result
-        _WaitMouseUp                            | wait for next mouse event
+        _WaitMouseUp                            | TRUE while the button is still down
         TST.B   (SP)+                           | mouse still down?
-        BNE.B   ADDCOMP_OK                      | yes -> continue tracking
+        BNE.B   TRACKBOX_OK                     | yes -> continue tracking
 | mouse released
         TST     D5                              | was highlight on at release?
-        BEQ.B   ADDCOMP_NO                      | no -> result stays false
+        BEQ.B   TRACKBOX_NO                     | no -> result stays false
         ADDQ.B  #0x1,0x12(A6)                   | result = true (released in part)
-        BSR.B   ADDCOMP_CONT                    | toggle highlight off
-ADDCOMP_NO:
+        BSR.B   TRACKBOX_CONT                   | toggle highlight off
+TRACKBOX_NO:
         BSR     RestorePort                     | restore original port
         MOVEM.L (SP)+,D3-D6/A3                  | restore regs
         UNLK    A6                              | tear down frame
-        BRA     QDEXTENSIONS_EXIT               | -> strip params and return
+        BRA     SIZEWINDOW_EXIT                 | -> strip params and return
 
 | ----------------------------------------------------------
 |
-| ADDCOMP_CONT - toggle WDEF part highlight (send wDraw with partCode)
+| TRACKBOX_CONT - toggle the tracked part's highlight: wDraw, param = D6
+| (WDEF hit code). Apple source name: EORSymbol (System 7.1 WindowMgr.a)
 |
 | Called during boot.
-ADDCOMP_CONT:
+TRACKBOX_CONT:
         MOVEQ.L #0x0,D0                         | message = wDraw
-        MOVE    D6,D3                           | param = partCode (for highlight)
-        BSR     MOVEWINDOW_OK                   | call WDEF(wDraw, partCode)
-        RTS                                     | return to caller
+        MOVE    D6,D3                           | param = WDEF hit code of the part
+        BSR     MOVEWINDOW_OK                   | call WDEF(wDraw, hit code)
+        RTS                                     | return from TRACKBOX_CONT
 
 | ----------------------------------------------------------
 |
@@ -1589,7 +1726,7 @@ SELECTWINDOW_OK:
         _HiliteWindow                           | highlight the window
 SELECTWINDOW_EMPTY:
         MOVE.L  (SP)+,(SP)                      | strip param
-        RTS                                     | return to caller
+        RTS                                     | return from SELECTWINDOW_EMPTY
 
 | ----------------------------------------------------------
 |
@@ -1667,7 +1804,7 @@ BRINGTOFRONT_OK:
         BSR     RestorePort                     | restore original port
         MOVEM.L (SP)+,D3-D6/A2-A4               | restore regs
         MOVE.L  (SP)+,(SP)                      | strip param
-        RTS                                     | return to caller
+        RTS                                     | return from BRINGTOFRONT_OK
 
 | ----------------------------------------------------------
 |
@@ -1678,7 +1815,7 @@ BRINGTOFRONT_OK:
 BRINGTOFRONT_CONT_2:
         NEG     0x4(SP)                         | negate v component
         NEG     0x6(SP)                         | negate h component
-        RTS                                     | return to caller
+        RTS                                     | return from BRINGTOFRONT_CONT_2
 
 | ----------------------------------------------------------
 |
@@ -1733,7 +1870,7 @@ SENDBEHIND_NO_2:
 | _BeginUpdate ($A922): set up for redrawing a window's update region
 | Saves current visRgn, replaces it with intersection of visRgn and updateRgn
 | Clears updateRgn so future calls know the update is handled
-BeginUpDate:
+BeginUpdate:
         MOVEM.L D3-D4/A3,-(SP)                  | save regs
         MOVE.L  0x10(SP),A3                     | A3 = window
         MOVE.L  PORTBOUNDS(A3),D3               | D3 = port origin (for offset)
@@ -1771,11 +1908,11 @@ BeginUpDate:
 | Converts SaveVisRgn back to local coords, restores it as visRgn,
 | then empties SaveVisRgn for next use
 | Called during boot.
-EndUpDate:
+EndUpdate:
         MOVE.L  A3,-(SP)                        | save A3
         MOVE.L  0x8(SP),A3                      | A3 = window
         MOVE.L  (SaveVisRgn).w,-(SP)            | push SaveVisRgn handle
-        MOVE.L  (SP),-(SP)                      | dup for OffsetRgn
+        MOVE.L  (SP),-(SP)                      | dup for OfsetRgn
         MOVE.L  (SP),-(SP)                      | dup again for CopyRgn source
         MOVE.L  PORTBOUNDS(A3),-(SP)            | push portBounds offset
         _OffsetRgn                              | convert SaveVisRgn to local coords
@@ -1784,7 +1921,7 @@ EndUpDate:
         _SetEmptyRgn                            | empty SaveVisRgn for next use
         MOVE.L  (SP)+,A3                        | restore A3
         MOVE.L  (SP)+,(SP)                      | strip param
-        RTS                                     | return to caller
+        RTS                                     | return from EndUpdate
 
 | ----------------------------------------------------------
 |
@@ -1819,7 +1956,7 @@ FRONTWINDOW_SKIP:
 FRONTWINDOW_EXIT:
         MOVE.L  A0,0x4(SP)                      | store result on stack
 FRONTWINDOW_EXIT_2:
-        RTS                                     | return to caller
+        RTS                                     | return from FRONTWINDOW_EXIT_2
 
 | ----------------------------------------------------------
 |
@@ -1883,15 +2020,15 @@ DRAGWINDOW_SKIP:
         BEQ.B   DRAGWINDOW_SKIP_2               | yes -> cleanup
 | compute new window position from drag offset
         MOVE.L  A3,-(SP)                        | push window for MoveWindow
-        MOVE.L  PORTRECT(A3),D0                 | D0 = portRect.top (high word used)
-        SUB     0xA(A3),D0                      | subtract portBounds.top (global y)
-        ADD     D5,D0                           | add vertical drag offset
-        MOVE    D0,-(SP)                        | push new vGlobal
-        SWAP    D0                              | get horizontal component
-        SWAP    D5                              | get horizontal drag offset
-        SUB     PORTBOUNDS(A3),D0               | subtract portBounds.left (global x)
+        MOVE.L  PORTRECT(A3),D0                 | D0 = portRect.topLeft (low word = left)
+        SUB     0xA(A3),D0                      | subtract portBounds.left (global x)
         ADD     D5,D0                           | add horizontal drag offset
         MOVE    D0,-(SP)                        | push new hGlobal
+        SWAP    D0                              | D0.W = portRect.top
+        SWAP    D5                              | D5.W = vertical drag offset
+        SUB     PORTBOUNDS(A3),D0               | subtract portBounds.top (global y)
+        ADD     D5,D0                           | add vertical drag offset
+        MOVE    D0,-(SP)                        | push new vGlobal
         TST.B   D6                              | Command key held?
         SPL.B   -(SP)                           | front = true unless Cmd held
         _MoveWindow                             | move to new position
@@ -2004,7 +2141,7 @@ DRAGTHERGN_CONT_2:
         ADD     D1,0x1E(A6)                     | result.h += horizontal delta
         ADD     D4,0x20(A6)                     | result.v += vertical delta
 | erase old outline and draw new one at offset position
-        MOVE.L  A3,-(SP)                        | push region for OffsetRgn
+        MOVE.L  A3,-(SP)                        | push region for OfsetRgn
         MOVE    D4,-(SP)                        | push vertical offset
         MOVE    D1,-(SP)                        | push horizontal offset
         TST     D5                              | outline currently drawn?
@@ -2069,7 +2206,7 @@ DRAGTHERGN_EMPTY:
         MOVE.L  D0,A0                           | A0 = proc address
         JSR     (A0)                            | call it
 DRAGTHERGN_SKIP_4:
-        RTS                                     | return to caller
+        RTS                                     | return from DRAGTHERGN_SKIP_4
 
 | ----------------------------------------------------------
 |
@@ -2158,7 +2295,7 @@ INVALRGN_CONT_2:
 INVALRGN_EXIT:
         MOVEM.L (SP)+,D3-D5/A3                  | restore regs
         MOVE.L  (SP)+,(SP)                      | strip param
-        RTS                                     | return to caller
+        RTS                                     | return from INVALRGN_EXIT
 
 | ----------------------------------------------------------
 |
@@ -2296,7 +2433,7 @@ GROWWINDOW_CONT:
         MOVE.L  A4,D3                           | param = ptr to grow rect
         BSR     MOVEWINDOW_OK                   | call WDEF(wGrow, rectPtr)
         MOVE.L  (SP)+,D3                        | restore D3
-        RTS                                     | return to caller
+        RTS                                     | return from GROWWINDOW_CONT
 
 | ----------------------------------------------------------
 |
@@ -2328,7 +2465,7 @@ GROWWINDOW_CONT_2:
         MOVE    0x2(A4),D3                      | D3.w = grow rect.left
         ADD     (SP)+,D3                        | add pinned width
         ADD     D5,D3                           | add horizontal anchor offset
-        RTS                                     | return to caller
+        RTS                                     | return from GROWWINDOW_CONT_2
 
 | ----------------------------------------------------------
 |
@@ -2340,7 +2477,7 @@ GROWWINDOW_CONT_3:
         MOVE.L  (A4),-(SP)                      | push topLeft
         BSR     DeltaPoint                      | compute size = botRight - topLeft
         MOVE.L  (SP)+,D0                        | D0 = packed size (height:width)
-        RTS                                     | return to caller
+        RTS                                     | return from GROWWINDOW_CONT_3
 
 | ----------------------------------------------------------
 |
@@ -2478,991 +2615,5 @@ DrawGrowIcon:
         BSR     RestorePort                     | restore original port
         MOVEM.L (SP)+,D4/A3                     | restore regs
         MOVE.L  (SP)+,(SP)                      | strip param
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| _InitMenus ($A930)
-| -> (initializes Menu Manager)
-|
-| _InitMenus ($A930): initialize the Menu Manager
-| Allocates MenuList, sets flash count from PRAM, draws empty menu bar
-InitMenus:
-        BSR.B   CALCMBHEIGHT_EMPTY              | allocate empty MenuList handle
-        MOVE.L  A0,(MenuList).w                 | save MenuList handle
-        MOVEQ.L #0xC,D0                         | mask for PRAM flash bits
-        AND.B   (SPMisc2).w,D0                  | get flash count from PRAM
-        LSR     #0x2,D0                         | shift to 0-3 range
-        MOVE    D0,(MenuFlash).w                | set menu flash count
-        CLR     (MBarEnable).w                  | disable menu bar initially
-        CLR.L   (MBarHook).w                    | no menu bar hook
-        CLR.L   (MenuHook).w                    | no menu hook
-        BSR.B   CalcMBHeight                    | calculate menu bar height
-        _ClearMenuBar                           | clear menu bar content
-        _DrawMenuBar                            | draw empty menu bar
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| Calc MB Height
-|
-| Called during boot.
-CalcMBHeight:
-        BSR.B   CALCMBHEIGHT_CONT               | get font metrics -> D0 (ascent:descent)
-        MOVEQ.L #0x5,D1                         | D1 = 5 (baseline padding)
-        ADD     D0,D1                           | add descent (low word of D0)
-        SWAP    D0                              | D0.w = ascent
-        ADD     D0,D1                           | D1 = ascent + descent + 5
-        MOVE    D1,(MBarHeight).w               | store as menu bar height
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| CALCMBHEIGHT_CONT
-|
-| Called during boot.
-CALCMBHEIGHT_CONT:
-        MOVE.L  D4,-(SP)                        | save D4 (used by GetSetWPort)
-        JSR     GetSetWPort(PC)                 | save port, switch to WMgr
-        SUBQ.W  #0x8,SP                         | space for FMOutput (ascent,descent,widMax,leading)
-        MOVE.L  A7,-(SP)                        | push ptr to FMOutput buffer
-        _GetFontInfo                            | fill font metrics for system font
-        JSR     RestorePort(PC)                 | restore original port
-        MOVE.L  (SP)+,D0                        | D0 = ascent:descent (packed words)
-        ADDQ.W  #0x4,SP                         | discard widMax:leading
-        MOVE.L  (SP)+,D4                        | restore D4
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| CALCMBHEIGHT_EMPTY
-|
-| Called during boot.
-CALCMBHEIGHT_EMPTY:
-        MOVEQ.L #0x66,D0                        | 102 bytes = MenuList header + 16 menu entries
-        _NewHandle                              | allocate MenuList handle -> A0
-| CALCMBHEIGHT_EMPTY_2 -- reinitialize to empty list.
-CALCMBHEIGHT_EMPTY_2:
-        MOVE.L  (A0),A1                         | A1 = dereferenced MenuList ptr
-        CLR     (A1)+                           | lastMenu = 0 (no menus yet)
-        MOVE    #0xA,(A1)+                      | lastRight = 10 (initial left margin)
-        CLR     (A1)+                           | first menuLeft = 0
-        MOVEQ.L #0x17,D0                        | 23+1 = 24 longwords to clear
-CALCMBHEIGHT_LOOP:
-        CLR.L   (A1)+                           | zero out menu entry slots
-        DBF     D0,CALCMBHEIGHT_LOOP            | loop 24 times (96 bytes)
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| _ClearMenuBar ($A934)
-|
-| Called during boot.
-ClearMenuBar:
-        BSR     DISABLEITEM_CONT                | dereference MenuList (validate handle)
-        MOVE.L  (MenuList).w,A0                 | A0 = MenuList handle
-        BSR.B   CALCMBHEIGHT_EMPTY_2            | reinitialize to empty list
-        CLR     (TheMenu).w                     | no highlighted menu
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| _InsertMenu ($A935)
-|
-| _InsertMenu ($A935): add a menu to the menu bar
-| Pascal: procedure InsertMenu(theMenu: MenuHandle; beforeID: INTEGER);
-| beforeID = 0 means append at end; negative = hierarchical submenu
-InsertMenu:
-        MOVEM.L D3-D4/A2-A4,-(SP)               | save regs
-        BSR     DISABLEITEM_CONT                | get MenuList handle -> A0
-        MOVE.L  A0,A3                           | A3 = dereferenced MenuList
-        CMPI    #0x60,(A3)                      | MenuList full? (max 96 entries)
-        BGE.B   INSERTMENU_SKIP                 | yes, can't add more ->
-| check if menu already in bar (by menuID)
-        MOVE.L  0x1A(SP),A4                     | A4 = MenuHandle to insert
-        MOVE.L  (A4),A2                         | A2 = dereferenced MenuInfo
-        MOVE    (A2),D1                         | D1 = menuID
-        BSR.B   INSERTMENU_CONT_2               | search MenuList for this ID
-        BNE.B   INSERTMENU_SKIP                 | already there, skip ->
-| calculate title width for menu bar layout
-        JSR     GetSetWPort(PC)                 | switch to WMgr port
-        CLR.L   -(SP)                           | system font
-        _TextFont                               | set system font (Chicago)
-        _TextFace                               | plain style
-        CLR     -(SP)                           | space for StringWidth result
-        PEA.L   0xE(A2)                         | push menu title string
-        _StringWidth                            | measure title width
-        MOVEQ.L #0xD,D3                         | 13 pixels padding
-        ADD     (SP)+,D3                        | D3 = title width + padding
-        MOVE    0x18(SP),D1                     | D1 = beforeID
-        BSR.B   INSERTMENU_CONT_2               | search for beforeID in MenuList
-        BNE.B   INSERTMENU_FOUND                | found -> insert before it
-        MOVE    (A3),D0                         | D0 = lastMenu (current byte count)
-        ADDQ.W  #0x6,D0                         | D0 = offset for new entry at end
-        MOVE    PORTBITS(A3),D1                 | D1 = lastRight (next x position)
-        BRA.B   INSERTMENU_CONT                 | -> store new entry at end
-
-| ----------------------------------------------------------
-|
-| INSERTMENU_FOUND
-|
-INSERTMENU_FOUND:
-        MOVE    0x4(A3,D0.W),D1                 | D1 = menuLeft of insertion point
-        MOVE    (A3),D2                         | D2 = lastMenu (last entry offset)
-INSERTMENU_NO:
-        MOVE.L  0x0(A3,D2.W),0x6(A3,D2.W)       | shift menu handle down one slot
-        MOVE    0x4(A3,D2.W),0xA(A3,D2.W)       | shift menuLeft down one slot
-        ADD     D3,0xA(A3,D2.W)                 | adjust left edge by new title width
-        SUBQ.W  #0x6,D2                         | move to previous entry
-        CMP     D0,D2                           | reached insertion point?
-        BGE.B   INSERTMENU_NO                   | no -> continue shifting
-INSERTMENU_CONT:
-        ADD     D3,PORTBITS(A3)                 | advance lastRight by title width
-        MOVE.L  A4,0x0(A3,D0.W)                 | store MenuHandle at insertion slot
-        MOVE    D1,0x4(A3,D0.W)                 | store menuLeft at insertion slot
-        ADDQ.W  #0x6,(A3)                       | increment lastMenu (add 6 bytes)
-        JSR     RestorePort(PC)                 | restore original port
-INSERTMENU_SKIP:
-        MOVEM.L (SP)+,D3-D4/A2-A4               | restore regs
-INSERTMENU_EXIT:
-        MOVE.L  (SP)+,A0                        | pop return address
-        ADDQ.W  #0x6,SP                         | strip 6 bytes of params
-        JMP     (A0)                            | return to caller
-
-| ----------------------------------------------------------
-|
-| INSERTMENU_CONT_2
-|
-| Called during boot.
-INSERTMENU_CONT_2:
-        TST     D1                              | menuID = 0?
-        BEQ.B   INSERTMENU_EMPTY                | yes -> not found
-        BSR     DISABLEITEM_CONT_3              | A1 = dereferenced MenuList
-        MOVE    (A1),D2                         | D2 = lastMenu (byte count)
-        BEQ.B   INSERTMENU_EMPTY                | empty list -> not found
-INSERTMENU_CONT_3:
-        MOVE.L  0x0(A1,D2.W),D0                 | D0 = MenuHandle at offset D2
-        BEQ.B   INSERTMENU_SKIP_2               | nil handle -> skip
-        MOVE.L  D0,A0                           | A0 = MenuHandle
-        MOVE.L  (A0),A0                         | dereference to MenuInfo
-        CMP     (A0),D1                         | menuID matches target?
-        BEQ.B   INSERTMENU_FOUND_2              | yes -> found
-INSERTMENU_SKIP_2:
-        SUBQ.W  #0x6,D2                         | back up one entry (6 bytes each)
-        BNE.B   INSERTMENU_CONT_3               | more entries -> continue scan
-INSERTMENU_EMPTY:
-        MOVEQ.L #0x0,D2                         | not found: D2 = 0
-INSERTMENU_FOUND_2:
-        MOVE    D2,D0                           | D0 = offset (0=not found)
-        RTS                                     | return to caller
-
-| DeleteMenu -- _DeleteMenu ($A936): PROCEDURE DeleteMenu (menuID: Integer);
-| ----------------------------------------------------------
-|
-| _DeleteMenu ($A936)
-|
-DeleteMenu:
-        MOVE    0x4(SP),D1                      | D1 = menuID to delete
-        BSR.B   INSERTMENU_CONT_2               | search MenuList for this ID
-        BEQ.B   DELETEMENU_EXIT                 | not found -> return
-        BSR     DISABLEITEM_CONT_3              | A1 = dereferenced MenuList
-        CMP     (A1),D0                         | deleting last entry?
-        BNE.B   DELETEMENU_NO                   | no -> shift entries up
-        MOVE    0x4(A1,D0.W),0x2(A1)            | lastRight = deleted menu's menuLeft
-        BRA.B   DELETEMENU_CONT                 | -> decrement count
-
-| ----------------------------------------------------------
-|
-| DELETEMENU_NO
-|
-DELETEMENU_NO:
-        MOVE    0xA(A1,D0.W),D2                 | D2 = next menu's menuLeft
-        SUB     0x4(A1,D0.W),D2                 | D2 = width of deleted menu title
-        SUB     D2,0x2(A1)                      | lastRight -= deleted title width
-DELETEMENU_NO_2:
-        MOVE.L  0x6(A1,D0.W),0x0(A1,D0.W)       | shift next MenuHandle into current slot
-        MOVE    0xA(A1,D0.W),0x4(A1,D0.W)       | shift next menuLeft into current slot
-        SUB     D2,0x4(A1,D0.W)                 | adjust menuLeft by deleted width
-        ADDQ.W  #0x6,D0                         | advance to next entry
-        CMP     (A1),D0                         | past last entry?
-        BLE.B   DELETEMENU_NO_2                 | no -> continue shifting
-DELETEMENU_CONT:
-        SUBQ.W  #0x6,(A1)                       | decrement lastMenu by one entry
-DELETEMENU_EXIT:
-        MOVE.L  (SP)+,A0                        | pop return address
-        ADDQ.W  #0x2,SP                         | strip menuID param (2 bytes)
-        JMP     (A0)                            | return to caller
-
-| ----------------------------------------------------------
-|
-| DELETEMENU_CONT_2
-|
-| Called during boot.
-DELETEMENU_CONT_2:
-        LEA.L   (scratch8).w,A0                 | A0 = scratch rect (8 bytes)
-        MOVE    #0x1,(A0)+                      | rect.top = 1 (below top pixel)
-        MOVE    0x4(A1,D0.W),(A0)               | rect.left = this menu's menuLeft
-        SUBQ.W  #0x1,(A0)+                      | adjust left by -1 pixel
-        MOVE    (MBarHeight).w,(A0)             | rect.bottom = menu bar height
-        SUBQ.W  #0x1,(A0)+                      | adjust bottom by -1 (above line)
-        CMP     (A1),D0                         | is this the last menu?
-        BEQ.B   DELETEMENU_OK                   | yes -> use lastRight
-        ADDQ.W  #0x6,D0                         | advance to next entry
-        MOVE    0x4(A1,D0.W),(A0)               | rect.right = next menu's menuLeft
-        BRA.B   DELETEMENU_CONT_3               | -> adjust right edge
-
-| ----------------------------------------------------------
-|
-| DELETEMENU_OK
-|
-| Called during boot.
-DELETEMENU_OK:
-        MOVE    0x2(A1),(A0)                    | rect.right = lastRight
-DELETEMENU_CONT_3:
-        ADDQ.W  #0x4,(A0)                       | add 4 pixel padding to right edge
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| DELETEMENU_CONT_4
-|
-| Called during boot.
-DELETEMENU_CONT_4:
-        MOVE.L  (WMgrPort).w,A3                 | A3 = WMgr port
-        MOVE.L  CLIPRGN(A3),-(SP)               | push clipRgn handle for SetRectRgn
-        CLR.L   -(SP)                           | top=0, left=0
-        MOVE    0x16(A3),-(SP)                  | push portRect.right (screen width)
-        MOVE    (MBarHeight).w,-(SP)            | push menu bar height as bottom
-        _SetRectRgn                             | clip to menu bar area
-        PEA.L   PORTRECT(A3)                    | push portRect (full screen)
-        MOVE.L  #0x100010,-(SP)                 | corner radius 16x16
-        _EraseRoundRect                         | erase menu bar with rounded corners
-        MOVE    0x16(A3),-(SP)                  | push screen width (line end x)
-        MOVEQ.L #0x0,D0                         | clear D0
-        MOVE    (MBarHeight).w,D0               | D0.w = menu bar height
-        SUBQ.W  #0x1,D0                         | y = mbarHeight - 1 (bottom line)
-        MOVE    D0,-(SP)                        | push y for MoveTo
-        SWAP    D0                              | D0 = (0, mbarHeight-1) packed point
-        MOVE.L  D0,-(SP)                        | push (0, 0) as start x,y for MoveTo
-        _MoveTo                                 | move to (0, mbarHeight-1)
-        _LineTo                                 | draw line to (screenWidth, mbarHeight-1)
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| _DrawMenuBar ($A937)
-| -> (redraws menu bar)
-|
-| Called during boot.
-DrawMenuBar:
-        MOVEM.L D3-D6/A3-A4,-(SP)               | save regs
-        BSET    #0x7,(AlarmState).w             | enable alarm state
-        JSR     GetSetWPort(PC)                 | save port, switch to WMgr
-        BSR.B   DELETEMENU_CONT_4               | erase and draw menu bar line
-        JSR     FullClip(PC)                    | set clip to full port rect
-        MOVEQ.L #0x6,D3                         | D3 = offset to first menu entry
-        BSR     DISABLEITEM_CONT                | A0 = dereferenced MenuList
-        MOVE.L  A0,A3                           | A3 = MenuList data ptr
-        TST     (A3)                            | any menus in list?
-        BEQ.B   DRAWMENUBAR_DONE                | no -> done
-        BSR     CALCMBHEIGHT_CONT               | get font metrics -> D0 (ascent:descent)
-        SWAP    D0                              | D0.w = ascent
-        MOVE    D0,D6                           | D6 = ascent
-        ADDQ.W  #0x2,D6                         | D6 = baseline y (ascent + 2)
-DRAWMENUBAR_NEXT:
-        MOVE    0x4(A3,D3.W),-(SP)              | push this menu's menuLeft
-        ADDQ.W  #0x8,(SP)                       | add 8 pixels left padding for title
-        MOVE    D6,-(SP)                        | push baseline y
-        _MoveTo                                 | position pen for title drawing
-        MOVE    D3,D5                           | D5 = current menu entry offset
-        BSR     DISABLEITEM_NEXT                | A0 = dereferenced MenuInfo, A1 = handle
-        MOVE.L  A0,A4                           | A4 = MenuInfo data ptr
-        PEA.L   0xE(A4)                         | push menu title string (menuData)
-        _DrawString                             | draw the menu title
-        BTST    #0x0,0xD(A4)                    | menu enabled? (bit 0 of style byte)
-        BEQ.B   DRAWMENUBAR_CONT                | disabled -> dim it
-        MOVE    (TheMenu).w,D0                  | D0 = currently highlighted menuID
-        CMP     (A4),D0                         | this menu highlighted?
-        BNE.B   DRAWMENUBAR_NEXT_2              | no -> next menu
-        MOVE    D3,D0                           | D0 = offset for InvertRect
-        BSR     DISABLEITEM_CONT_5              | invert menu title (highlight it)
-        BRA.B   DRAWMENUBAR_NEXT_2              | -> next menu
-
-| ----------------------------------------------------------
-|
-| DRAWMENUBAR_CONT - dim disabled menu title with gray pattern
-|
-DRAWMENUBAR_CONT:
-        MOVE    D3,D0                           | D0 = current entry offset
-        MOVE.L  A3,A1                           | A1 = MenuList for DELETEMENU_CONT_2
-        BSR     DELETEMENU_CONT_2               | build title rect in scratch8
-        BSR.B   DRAWMENUBAR_CONT_2              | paint gray over title (dim effect)
-DRAWMENUBAR_NEXT_2:
-        ADDQ.W  #0x6,D3                         | advance to next menu entry
-        CMP     (A3),D3                         | past lastMenu?
-        BLE.B   DRAWMENUBAR_NEXT                | no -> draw next title
-DRAWMENUBAR_DONE:
-        JSR     RestorePort(PC)                 | restore original port
-        MOVEM.L (SP)+,D3-D6/A3-A4               | restore regs
-        RTS                                     | return to caller
-
-| DRAWMENUBAR_CONT_2 -- paint gray over title (dim effect).
-| ----------------------------------------------------------
-|
-| DRAWMENUBAR_CONT_2
-|
-DRAWMENUBAR_CONT_2:
-        MOVE    #0xB,-(SP)                      | patBic mode (clear through pattern)
-        _PenMode                                | set pen mode to BIC
-        PEA.L   DT_mWMgrGray(PC)                | push gray pattern
-        _PenPat                                 | set pen pattern to gray
-        PEA.L   (scratch8).w                    | push title rect (built by DELETEMENU_CONT_2)
-        _PaintRect                              | paint gray BIC over title (dims it)
-        _PenNormal                              | restore default pen
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| _HiliteMenu ($A938)
-| stack: menuID -> (highlights menu title)
-|
-| Called during boot.
-HiliteMenu:
-        MOVE.L  D4,-(SP)                        | save D4 (used by GetSetWPort)
-        JSR     GetSetWPort(PC)                 | save port, switch to WMgr
-        BSR     FullClip                        | set clip to full port rect
-        MOVE    (TheMenu).w,D1                  | D1 = currently highlighted menuID
-        CMP     0x8(SP),D1                      | same as requested menuID?
-        BEQ.B   HILITEMENU_OK                   | yes -> no change needed
-        BSR.B   DISABLEITEM_CONT_4              | toggle old highlighted menu (unhighlight)
-        MOVE    0x8(SP),D1                      | D1 = new menuID to highlight
-        MOVE    D1,(TheMenu).w                  | set as current highlighted menu
-        BSR.B   DISABLEITEM_CONT_4              | toggle new menu (highlight)
-HILITEMENU_OK:
-        JSR     RestorePort(PC)                 | restore original port
-        MOVE.L  (SP)+,D4                        | restore D4
-        BRA     DELETEMENU_EXIT                 | -> strip menuID param and return
-
-| ----------------------------------------------------------
-|
-| _EnableItem ($A939)
-|
-| Called during boot (60,959 times in 30s trace).
-EnableItem:
-        BSR.B   ENABLEITEM_CONT                 | get menu enable flags -> D0=item, D1=flags
-        BSET    D0,D1                           | set item's enable bit
-ENABLEITEM_EXIT:
-        MOVE.L  D1,0xA(A0)                      | store updated menuEnable flags
-        BRA     INSERTMENU_EXIT                 | -> strip params and return
-
-| ----------------------------------------------------------
-|
-| ENABLEITEM_CONT
-|
-| Called during boot (157,003 times in 30s trace).
-ENABLEITEM_CONT:
-        MOVE.L  0xA(SP),A0                      | A0 = MenuHandle (past retAddr+retAddr)
-        MOVE.L  (A0),A0                         | dereference to MenuInfo
-        MOVE    0x8(SP),D0                      | D0 = item number (bit index)
-        MOVE.L  0xA(A0),D1                      | D1 = menuEnable flags (32-bit)
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| _DisableItem ($A93A)
-|
-| Called during boot (96,044 times in 30s trace).
-DisableItem:
-        BSR.B   ENABLEITEM_CONT                 | get menu enable flags -> D0=item, D1=flags
-        BCLR    D0,D1                           | clear item's enable bit
-        BRA.B   ENABLEITEM_EXIT                 | -> store and return
-
-| ----------------------------------------------------------
-|
-| DISABLEITEM_NEXT
-|
-| Called during boot (57,585 times in 30s trace).
-DISABLEITEM_NEXT:
-        BSR.B   DISABLEITEM_CONT                | A0 = dereferenced MenuList
-        MOVE.L  0x0(A0,D5.W),A1                 | A1 = MenuHandle at offset D5
-        TST.L   (A1)                            | handle empty (purged)?
-        BEQ.B   DISABLEITEM_ERR                 | yes -> system error
-        MOVE.L  (A1),A0                         | A0 = dereferenced MenuInfo
-DISABLEITEM_EXIT:
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| DISABLEITEM_CONT
-|
-| Called during boot (63,856 times in 30s trace).
-DISABLEITEM_CONT:
-        MOVE.L  (MenuList).w,A0                 | A0 = MenuList handle
-| DISABLEITEM_CONT_2 -- a0 = dereferenced source data.
-DISABLEITEM_CONT_2:
-        TST.L   (A0)                            | handle empty (purged)?
-        BEQ.B   DISABLEITEM_ERR                 | yes -> system error
-        MOVE.L  (A0),A0                         | dereference to MenuList data
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| DISABLEITEM_CONT_3
-|
-| Called during boot.
-DISABLEITEM_CONT_3:
-        MOVE.L  (MenuList).w,A1                 | A1 = MenuList handle
-        TST.L   (A1)                            | handle empty (purged)?
-        BEQ.B   DISABLEITEM_ERR                 | yes -> system error
-        MOVE.L  (A1),A1                         | dereference to MenuList data
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| DISABLEITEM_ERR
-|
-DISABLEITEM_ERR:
-        MOVEQ.L #0x54,D0                        | dsNoPatch = ID 84 (nil MenuList)
-        _SysError                               | fatal: Menu Manager not initialized
-| DISABLEITEM_CONT_4 -- toggle old highlighted menu (unhighlight).
-DISABLEITEM_CONT_4:
-        BSR     INSERTMENU_CONT_2               | search for menuID D1 -> D0=offset
-        BEQ.B   DISABLEITEM_EXIT                | not found -> return (nothing to invert)
-| DISABLEITEM_CONT_5 -- invert menu title (highlight it).
-DISABLEITEM_CONT_5:
-        BSR.B   DISABLEITEM_CONT_3              | A1 = dereferenced MenuList
-        CMP     (A1),D0                         | offset past lastMenu?
-        BGT.B   DISABLEITEM_SKIP                | yes -> nothing visible to invert
-        ANDI    #-0x2,D0                        | clear bit 0 (ensure word-aligned)
-        BEQ.B   DISABLEITEM_SKIP                | zero offset -> skip
-        BSR     DELETEMENU_CONT_2               | build title rect in scratch8
-        PEA.L   (scratch8).w                    | push title rect
-        _InvertRect                             | toggle highlight on menu title
-DISABLEITEM_SKIP:
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| _MenuSelect ($A93D)
-| stack: startPt -> stack: menuResult (menu ID + item)
-|
-| _MenuSelect ($A93D): track mouse through menus until button released
-| Returns: menuResult = menuID<<16 | itemNumber (0 if no selection)
-| This is the core menu tracking loop called from the event loop
-MenuSelect:
-        LINK    A6,#-0x28                       | 40 bytes local vars
-        MOVEM.L D3-D7/A3,-(SP)                  | save regs
-        CLR.L   -(SP)                           | push menuID 0
-        _HiliteMenu                             | unhighlight any previous menu
-        CLR.L   0xC(A6)                         | result = 0 (no selection)
-        CLR.L   -0x28(A6)                       | clear saved menu bits rect
-        _WaitMouseUp                            | is mouse still down?
-        TST.B   (SP)+                           | check result
-        BEQ     MENUSELECT_NO_7                 | no, cancelled ->
-        PEA.L   -0x20(A6)                       | push local var for saved port
-        _GetPort                                | save current port
-        MOVE.L  (WMgrPort).w,-(SP)              | push WMgr port
-        _SetPort                                | switch to WMgr port
-        BSR     FullClip                        | set clip to full port rect
-        CLR     D4                              | D4 = 0 (no menu currently open)
-        MOVE.L  0x8(A6),D3                      | D3 = startPt (initial mouse position)
-        BRA.B   MENUSELECT_LOOP_2               | -> enter tracking loop
-
-| ----------------------------------------------------------
-|
-| MENUSELECT_LOOP
-|
-| Called during boot (28,780 times in 30s trace).
-MENUSELECT_LOOP:
-        MOVEQ.L #0x0,D0                         | clear D0
-        MOVE    (MBarHeight).w,D0               | D0.w = menu bar height
-        SWAP    D0                              | D0 = (mbarHeight, 0) as packed point
-        CMP.L   D0,D3                           | mouse.v >= mbarHeight? (below bar)
-        BGE     MENUSELECT_SKIP                 | yes -> mouse in pulled-down menu
-MENUSELECT_LOOP_2:
-        CLR     D5                              | D5 = 0 (no menu hit yet)
-  .short 0x6180                                 | Bsr.B DISABLEITEM_CONT (A0 = dereferenced MenuList)
-        CMP     0x2(A0),D3                      | mouse.h >= lastRight?
-        BGE.B   MENUSELECT_FOUND                | yes -> past all menus
-        MOVE    (A0),D5                         | D5 = lastMenu (start from end)
-MENUSELECT_CONT:
-        CMP     0x4(A0,D5.W),D3                 | mouse.h > this menu's menuLeft?
-        BGT.B   MENUSELECT_FOUND                | yes -> found the menu
-        SUBQ.W  #0x6,D5                         | try previous menu
-        BNE.B   MENUSELECT_CONT                 | more entries -> continue
-MENUSELECT_FOUND:
-        MOVE    0x4(A0,D5.W),D6                 | D6 = menuLeft of hit menu
-        CMP     D5,D4                           | same menu as currently open?
-        BEQ     MENUSELECT_SKIP                 | yes -> skip menu switch
-        TST     D4                              | was a menu previously open?
-        BEQ.B   MENUSELECT_NO                   | no -> open new menu
-        BSR     MENUSELECT_CONT_3               | restore saved bits behind old menu
-        MOVE    D4,D0                           | D0 = old menu entry offset
-        BSR     DISABLEITEM_CONT_5              | unhighlight old menu title
-MENUSELECT_NO:
-        MOVE    D5,D4                           | D4 = new current menu entry offset
-        CLR.L   0xC(A6)                         | clear result (menuID:item)
-        TST     D5                              | mouse in a menu title?
-        BEQ.B   MENUSELECT_SKIP_2               | no -> skip menu display
-        BSR     DISABLEITEM_NEXT                | A0=MenuInfo, A1=MenuHandle at D5
-        TST.L   0x2(A0)                         | menuWidth:menuHeight valid?
-        BPL.B   MENUSELECT_OK                   | yes -> use cached size
-        MOVE.L  A0,-(SP)                        | save MenuInfo ptr
-        MOVE.L  A1,-(SP)                        | push MenuHandle for CalcMenuSize
-        _CalcMenuSize                           | compute width/height of menu
-        MOVE.L  (SP)+,A0                        | restore MenuInfo ptr
-MENUSELECT_OK:
-        MOVE    (A0),0xC(A6)                    | result.hi = menuID (high word)
-        MOVE.L  (WMgrPort).w,A1                 | A1 = WMgr port
-        MOVE    D6,D0                           | D0 = menu left edge
-        ADD     0x2(A0),D0                      | D0 = left + menuWidth
-        ADDQ.W  #0x8,D0                         | + 8 pixel padding
-        CMP     0x16(A1),D0                     | menu extends past screen right?
-        BLE.B   MENUSELECT_OK_2                 | no -> position is fine
-        MOVE    0x16(A1),D6                     | D6 = screen right edge
-        SUBQ.W  #0x8,D6                         | subtract padding
-        SUB     0x2(A0),D6                      | D6 = adjusted left to fit screen
-MENUSELECT_OK_2:
-        LEA.L   -0x1C(A6),A1                    | A1 = local menu rect
-        MOVE    (MBarHeight).w,D1               | D1 = menu bar height
-        MOVE    D1,(A1)+                        | rect.top = below menu bar
-        MOVE    D6,(A1)+                        | rect.left = menu left edge
-        ADD     0x4(A0),D1                      | D1 += menuHeight
-        MOVE    D1,(A1)+                        | rect.bottom = top + menuHeight
-        ADD     0x2(A0),D6                      | D6 += menuWidth
-        MOVE    D6,(A1)+                        | rect.right = left + menuWidth
-        MOVE    D5,D0                           | D0 = menu entry offset
-        BSR     DISABLEITEM_CONT_5              | highlight menu title (invert)
-        MOVE.L  (MBarHook).w,D0                 | D0 = MBarHook procedure
-        BEQ.B   MENUSELECT_NO_2                 | no hook -> proceed
-        MOVE.L  D0,A0                           | A0 = hook address
-        PEA.L   -0x1C(A6)                       | push menu rect
-        JSR     (A0)                            | call MBarHook
-        TST     D0                              | hook says abort?
-        BNE.B   MENUSELECT_EXIT_2               | yes -> exit MenuSelect
-MENUSELECT_NO_2:
-        BSR     MENUSELECT_CONT_5               | save bits behind menu, draw menu frame
-MENUSELECT_SKIP:
-        TST     D5                              | menu currently open?
-MENUSELECT_SKIP_2:
-        BEQ.B   MENUSELECT_NO_3                 | no -> just wait for mouse
-        PEA.L   -0x1C(A6)                       | push menu rect
-        _ClipRect                               | clip to menu area
-        BSR     DISABLEITEM_NEXT                | A0=MenuInfo, A1=MenuHandle
-        MOVE    #0x1,-(SP)                      | message 1 = mChooseMsg (track item)
-        MOVE.L  A1,-(SP)                        | push MenuHandle
-        PEA.L   -0x1C(A6)                       | push menu rect
-        MOVE.L  D3,-(SP)                        | push current mouse position
-        PEA.L   0xE(A6)                         | push ptr to selected item result
-        BSR     MENUSELECT_CONT_8               | load MDEF code -> A0
-        JSR     (A0)                            | call MDEF(mChooseMsg)
-        BSR     MENUSELECT_CONT_9               | unlock MDEF handle
-        BSR     FullClip                        | restore full clip
-MENUSELECT_NO_3:
-        CLR     -(SP)                           | space for WaitMouseUp result
-        _WaitMouseUp                            | mouse still down?
-        TST.B   (SP)+                           | check result
-        BEQ.B   MENUSELECT_NO_5                 | no -> mouse released, finish
-        SUBQ.W  #0x4,SP                         | space for GetMouse result
-        MOVE.L  A7,-(SP)                        | push ptr for GetMouse
-        _GetMouse                               | read current mouse position
-        MOVE.L  (SP)+,D3                        | D3 = current mouse (v:h packed)
-        MOVE.L  (MenuHook).w,D0                 | D0 = MenuHook procedure
-        BEQ.B   MENUSELECT_NO_4                 | no hook -> continue
-        MOVE.L  D0,A0                           | A0 = hook address
-        JSR     (A0)                            | call MenuHook
-MENUSELECT_NO_4:
-        BRA     MENUSELECT_LOOP                 | -> loop back to menu bar hit test
-
-| ----------------------------------------------------------
-|
-| MENUSELECT_NO_5
-|
-| Called during boot.
-MENUSELECT_NO_5:
-        TST     D5                              | was a menu open when released?
-        BEQ.B   MENUSELECT_NO_6                 | no -> check result
-        BSR     MENUSELECT_CONT_11              | flash selected item (visual feedback)
-        BSR.B   MENUSELECT_CONT_3               | restore saved bits behind menu
-MENUSELECT_NO_6:
-        TST     0xE(A6)                         | item selected? (from MDEF result)
-        BNE.B   MENUSELECT_EXIT                 | yes -> return selection
-        CLR     0xC(A6)                         | no item: clear menuID in result
-        MOVE    D5,D0                           | D0 = menu entry offset
-        BSR     DISABLEITEM_CONT_5              | unhighlight menu title
-MENUSELECT_EXIT:
-        MOVE    0xC(A6),(TheMenu).w             | TheMenu = selected menuID
-        BMI.B   MENUSELECT_CONT_2               | negative ID -> system menu (DA)
-        TST     (MBarEnable).w                  | menu bar enabled for DA access?
-        BMI.B   MENUSELECT_CONT_2               | negative -> handle as system menu
-MENUSELECT_EXIT_2:
-        MOVE.L  -0x20(A6),-(SP)                 | push saved port
-        _SetPort                                | restore original port
-MENUSELECT_NO_7:
-        MOVEM.L (SP)+,D3-D7/A3                  | restore regs
-        UNLK    A6                              | tear down frame
-        MOVE.L  (SP)+,(SP)                      | strip param (startPt)
-        RTS                                     | return menuResult on stack
-
-| ----------------------------------------------------------
-|
-| MENUSELECT_CONT_2 - system menu selected: dispatch to Desk Manager
-|
-MENUSELECT_CONT_2:
-        MOVE.L  0xC(A6),-(SP)                   | push menuResult (menuID:item)
-        _SystemMenu                             | dispatch to system menu handler
-        CLR.L   0xC(A6)                         | clear result (system handled it)
-        BRA.B   MENUSELECT_EXIT_2               | -> restore port and return
-
-| ----------------------------------------------------------
-|
-| MENUSELECT_CONT_3
-|
-| Called during boot.
-MENUSELECT_CONT_3:
-        TST.L   -0x28(A6)                       | offscreen bits rect valid?
-        BNE.B   MENUSELECT_OK_3                 | yes -> repaint from window list
-        MOVE.L  (SavedHandle).w,A0              | A0 = saved bits handle
-        MOVE.L  (A0),-0x14(A6)                  | store base addr in local BitMap
-        PEA.L   -0x14(A6)                       | push saved BitMap (source)
-        MOVE.L  (WMgrPort).w,A0                 | A0 = WMgr port
-        PEA.L   0x2(A0)                         | push screen portBits (dest)
-        BSR.B   MENUSELECT_CONT_4               | CopyBits from saved to screen
-        MOVE.L  (SavedHandle).w,A0              | A0 = saved bits handle
-        _DisposeHandle                          | free saved bits
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| MENUSELECT_OK_3
-|
-MENUSELECT_OK_3:
-        SUBQ.W  #0x4,SP                         | space for NewRgn result
-        _NewRgn                                 | allocate temp region
-        MOVE.L  (SP),-(SP)                      | dup handle for PaintBehind
-        PEA.L   -0x28(A6)                       | push saved menu rect
-        _RectRgn                                | convert rect to region
-        SUBQ.W  #0x4,SP                         | space for FrontWindow result
-        _FrontWindow                            | get front window
-        MOVE.L  0x4(SP),-(SP)                   | push temp region (clobbered area)
-        _PaintBehind                            | repaint all windows in menu area
-        _DisposeRgn                             | free temp region
-        BSR     FullClip                        | restore full clip
-        CLR.L   -0x28(A6)                       | clear saved menu rect
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| MENUSELECT_CONT_4
-|
-| Called during boot.
-MENUSELECT_CONT_4:
-        MOVE.L  (SP)+,D7                        | save return address
-        PEA.L   -0xE(A6)                        | push srcRect (saved menu bounds)
-        MOVE.L  (SP),-(SP)                      | push dstRect (same as srcRect)
-        CLR     -(SP)                           | srcCopy transfer mode
-        CLR.L   -(SP)                           | maskRgn = nil (no clipping)
-        _CopyBits                               | blit between BitMaps (src/dst on stack)
-        MOVE.L  D7,-(SP)                        | push saved return address
-        RTS                                     | return via pushed address
-
-| ----------------------------------------------------------
-|
-| MENUSELECT_ERR
-|
-MENUSELECT_ERR:
-        MOVE.L  (A3)+,-0x28(A6)                 | save menu rect topLeft for repaint
-        MOVE.L  (A3),-0x24(A6)                  | save menu rect botRight for repaint
-        BRA.B   MENUSELECT_CONT_6               | -> draw menu without saved bits
-
-| ----------------------------------------------------------
-|
-| MENUSELECT_CONT_5
-|
-| Called during boot.
-MENUSELECT_CONT_5:
-        MOVEM.L D4/A2-A4,-(SP)                  | save regs
-        MOVE.L  #0x20002,D4                     | D4 = shadow offset (2,2 pixels)
-        LEA.L   (scratch8).w,A3                 | A3 = scratch rect (expanded for shadow)
-        LEA.L   -0x1C(A6),A4                    | A4 = menu rect
-        MOVE.L  A4,A2                           | A2 = menu rect (for reading later)
-        MOVE.L  A3,-(SP)                        | push scratch rect for InsetRect
-        MOVE    (A2)+,(A3)                      | scratch.top = menu.top
-        ADDQ.W  #0x4,(A3)+                      | scratch.top += 4 (shadow above)
-        MOVE    (A2)+,(A3)+                     | scratch.left = menu.left
-        MOVE.L  (A2),(A3)+                      | scratch.bottom,right = menu bottom,right
-        MOVE.L  #0xFFFCFFFC,-(SP)               | inset by -4,-4 (expand for shadow)
-        _InsetRect                              | expand scratch rect for save area
-| compute offscreen bitmap size for saving menu area
-        MOVEQ.L #0xF,D0                         | D0 = 15 (for rounding up to word)
-        ADD     -(A3),D0                        | D0 = 15 + rect.right
-        MOVE    -(A3),D1                        | D1 = rect.bottom
-        SUB     -(A3),D0                        | D0 = width + 15 (right - left + 15)
-        SUB     -(A3),D1                        | D1 = height (bottom - top)
-        LSR     #0x4,D0                         | D0 = (width+15)/16 (words per row)
-        ADD     D0,D0                           | D0 = rowBytes (bytes per row)
-        MOVE    D0,-0x10(A6)                    | store rowBytes in local BitMap
-        MULU    D1,D0                           | D0 = total bytes for bitmap
-        _NewHandle                              | allocate offscreen buffer
-        BNE.B   MENUSELECT_ERR                  | failed -> fallback to repaint
-        MOVE.L  A0,(SavedHandle).w              | store handle for later restore
-        MOVE.L  (A0),-0x14(A6)                  | store baseAddr in local BitMap
-        MOVE.L  (A3)+,-0xE(A6)                  | store bounds.topLeft in local BitMap
-        MOVE.L  (A3),-0xA(A6)                   | store bounds.botRight in local BitMap
-        MOVE.L  (WMgrPort).w,A0                 | A0 = WMgr port
-        PEA.L   0x2(A0)                         | push screen portBits (source)
-        PEA.L   -0x14(A6)                       | push local BitMap (dest)
-        BSR.B   MENUSELECT_CONT_4               | CopyBits: save screen to offscreen
-MENUSELECT_CONT_6:
-        MOVE.L  A4,-(SP)                        | push menu rect
-        _EraseRect                              | erase menu background
-        SUBQ.W  #0x2,SP                         | space for EmptyRect result
-        MOVE.L  A4,-(SP)                        | push menu rect
-        _EmptyRect                              | is menu rect empty?
-        TST.B   (SP)+                           | check result
-        BNE.B   MENUSELECT_EMPTY                | empty -> nothing to draw
-        _PenNormal                              | reset pen for frame drawing
-| draw menu frame: 3 lines forming right and bottom edges + shadow
-        MOVE.L  (A2),-(SP)                      | push menu botRight for LineTo (3rd)
-        MOVE.L  (SP),-(SP)                      | dup for LineTo (2nd)
-        MOVE.L  (A4),-(SP)                      | push menu topLeft for LineTo (1st)
-        SUBQ.W  #0x1,0x2(SP)                    | adjust topLeft.h -= 1 (left edge)
-        MOVE.L  (SP),-(SP)                      | dup for MoveTo start point
-        MOVE    (A2),0x4(SP)                    | overwrite: pt2.v = botRight.v
-        MOVE    (A4),0xC(SP)                    | overwrite: pt3.h = topLeft.h
-        _MoveTo                                 | move to (left-1, top)
-        _LineTo                                 | draw right edge down
-        _LineTo                                 | draw bottom edge left
-        _LineTo                                 | draw left edge up
-        BSR.B   MENUSELECT_CONT_7               | draw menu shadow (2-pixel offset)
-| draw menu items via MDEF
-        MOVE.L  A4,-(SP)                        | push menu rect
-        _ClipRect                               | clip to menu area
-        CLR     -(SP)                           | message 0 = mDrawMsg
-        BSR     DISABLEITEM_NEXT                | A0=MenuInfo, A1=MenuHandle
-        MOVE.L  A1,-(SP)                        | push MenuHandle
-        MOVE.L  A4,-(SP)                        | push menu rect
-        SUBQ.W  #0x8,SP                         | space for hitPt + whichItem (unused)
-        BSR.B   MENUSELECT_CONT_8               | load MDEF code -> A0
-        JSR     (A0)                            | call MDEF(mDrawMsg)
-        BSR.B   MENUSELECT_CONT_9               | unlock MDEF handle
-        BSR     FullClip                        | restore full clip
-MENUSELECT_EMPTY:
-        MOVEM.L (SP)+,D4/A2-A4                  | restore regs
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| MENUSELECT_CONT_7
-|
-| Called during boot.
-MENUSELECT_CONT_7:
-        MOVE.L  D4,-(SP)                        | push shadow size (2,2) for PenSize
-        _PenSize                                | set thick pen for shadow
-        MOVE    0x6(A4),D0                      | D0 = menu rect.right
-        MOVE    D0,-(SP)                        | push right for LineTo end point
-        MOVE    (A4),-(SP)                      | push menu.top for LineTo y
-        ADD     D4,(SP)                         | adjust top += shadow offset (2)
-        MOVE    D0,-(SP)                        | push right for MoveTo x
-        MOVE    0x4(A4),D0                      | D0 = menu rect.bottom
-        MOVE    D0,-(SP)                        | push bottom for MoveTo y
-        MOVE    0x2(A4),-(SP)                   | push menu.left for LineTo x
-        ADD     D4,(SP)                         | adjust left += shadow offset (2)
-        MOVE    D0,-(SP)                        | push bottom for LineTo y
-        _MoveTo                                 | move to (right, bottom)
-        _LineTo                                 | draw shadow along bottom edge
-        _LineTo                                 | draw shadow along right edge
-        _PenNormal                              | restore default pen
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| MENUSELECT_CONT_8
-|
-| Called during boot (28,795 times in 30s trace).
-MENUSELECT_CONT_8:
-        MOVE.L  0x6(A0),D0                      | D0 = menuDefHandle (MDEF resource)
-        LEA.L   MENUSELECT_EXIT_3(PC),A0        | A0 = default stub (strip args, return)
-        BEQ.B   MENUSELECT_EMPTY_2              | nil MDEF -> use stub
-        MOVE.L  D0,A0                           | A0 = MDEF handle
-        MOVE.L  A0,-(SP)                        | push handle for LoadResource
-        _LoadResource                           | ensure MDEF is loaded
-        BSET    #0x7,(A0)                       | lock MDEF handle during call
-        MOVE.L  (A0),A0                         | A0 = MDEF code entry point
-MENUSELECT_EMPTY_2:
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| MENUSELECT_EXIT_3
-|
-MENUSELECT_EXIT_3:
-        MOVE.L  (SP)+,A0                        | pop return address
-        ADDA    #0xC,SP                         | strip 12 bytes of MDEF params
-        JMP     (A0)                            | return (no-op stub)
-
-| ----------------------------------------------------------
-|
-| MENUSELECT_CONT_9
-|
-| Called during boot (28,789 times in 30s trace).
-MENUSELECT_CONT_9:
-        BSR     DISABLEITEM_NEXT                | A0 = dereferenced MenuInfo
-| MENUSELECT_CONT_10 -- store computed width/height in MenuInfo.
-MENUSELECT_CONT_10:
-        MOVE.L  0x6(A0),D0                      | D0 = menuDefHandle (MDEF)
-        BEQ.B   MENUSELECT_EMPTY_3              | nil -> nothing to unlock
-        MOVE.L  D0,A0                           | A0 = MDEF handle
-        BCLR    #0x7,(A0)                       | unlock MDEF handle
-MENUSELECT_EMPTY_3:
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| MENUSELECT_CONT_11
-|
-| Called during boot.
-MENUSELECT_CONT_11:
-        MOVE    D4,-(SP)                        | save D4
-        MOVE    (MenuFlash).w,D4                | D4 = flash count (0-3)
-        BEQ.B   MENUSELECT_SKIP_3               | zero -> no flash effect
-        MOVE    0xE(A6),(ToolScratch).w         | save selected item number
-        BEQ.B   MENUSELECT_SKIP_3               | no item selected -> skip
-        PEA.L   -0x1C(A6)                       | push menu rect
-        _ClipRect                               | clip to menu area
-MENUSELECT_LOOP_3:
-        MOVEQ.L #0x0,D1                         | D1 = 0 (deselect: unhighlight item)
-        BSR.B   FULLCLIP_CONT                   | call MDEF to unhighlight
-        MOVE.L  D3,D1                           | D1 = mouse pt (highlight: re-highlight)
-        BSR.B   FULLCLIP_CONT                   | call MDEF to highlight
-        SUBQ.W  #0x1,D4                         | decrement flash counter
-        BNE.B   MENUSELECT_LOOP_3               | more flashes -> loop
-        BSR.B   FullClip                        | restore full clip
-MENUSELECT_SKIP_3:
-        MOVE    (SP)+,D4                        | restore D4
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| Full Clip
-|
-| Called during boot (28,789 times in 30s trace).
-FullClip:
-        MOVE.L  (WMgrPort).w,A0                 | A0 = WMgr port
-        PEA.L   0x10(A0)                        | push portRect (full screen)
-        _ClipRect                               | set clip to full port rect
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| FULLCLIP_CONT
-|
-| Called during boot.
-FULLCLIP_CONT:
-        MOVE    #0x1,-(SP)                      | message 1 = mChooseMsg
-        BSR     DISABLEITEM_NEXT                | A0=MenuInfo, A1=MenuHandle
-        MOVE.L  A1,-(SP)                        | push MenuHandle
-        PEA.L   -0x1C(A6)                       | push menu rect
-        MOVE.L  D1,-(SP)                        | push mouse point (0=deselect)
-        PEA.L   (ToolScratch).w                 | push ptr to selected item
-        BSR.B   MENUSELECT_CONT_8               | load MDEF code -> A0
-        JSR     (A0)                            | call MDEF(mChooseMsg)
-        BSR.B   MENUSELECT_CONT_9               | unlock MDEF handle
-        MOVE.L  (Ticks).w,D0                    | D0 = current tick count
-        ADDQ.L  #0x3,D0                         | target = now + 3 ticks (flash delay)
-FULLCLIP_NO:
-        CMP.L   (Ticks).w,D0                    | target time reached?
-        BGT.B   FULLCLIP_NO                     | no -> spin wait
-        RTS                                     | return to caller
-
-| GetMenuBar -- _GetMenuBar ($A93B): FUNCTION GetMenuBar: Handle;
-| ----------------------------------------------------------
-|
-| _GetMenuBar ($A93B)
-|
-GetMenuBar:
-        BSR     CALCMBHEIGHT_EMPTY              | allocate new empty MenuList -> A0
-        MOVE.L  A0,0x4(SP)                      | store as return value (Handle)
-        MOVE.L  (A0),A1                         | A1 = dest (new list data)
-        BSR     DISABLEITEM_CONT                | A0 = source (current MenuList data)
-GETMENUBAR_CONT:
-        MOVEQ.L #0x66,D0                        | 102 bytes to copy
-        _BlockMove                              | copy MenuList data from A0 to A1
-        RTS                                     | return to caller
-
-| SetMenuBar -- _SetMenuBar ($A93C): PROCEDURE SetMenuBar (menuList: Handle);
-| ----------------------------------------------------------
-|
-| _SetMenuBar ($A93C)
-|
-SetMenuBar:
-        MOVE.L  0x4(SP),A0                      | A0 = source MenuList handle
-        BSR     DISABLEITEM_CONT_2              | A0 = dereferenced source data
-        BSR     DISABLEITEM_CONT_3              | A1 = dereferenced current MenuList
-        MOVE.L  (SP)+,(SP)                      | strip param
-        BRA.B   GETMENUBAR_CONT                 | -> copy 102 bytes from source to current
-
-| ----------------------------------------------------------
-|
-| _DisposeMenu ($A932)
-|
-DisposeMenu:
-        MOVE.L  0x4(SP),A0                      | A0 = MenuHandle
-        BTST    #0x5,(A0)                       | is it a resource (resPurgeable)?
-        BEQ.B   DISPOSEMENU_NO                  | no -> dispose as plain handle
-        MOVE.L  A0,-(SP)                        | push handle for ReleaseResource
-        _ReleaseResource                        | release the resource
-        BRA.B   DISPOSEMENU_EXIT                | -> strip param and return
-
-| ----------------------------------------------------------
-|
-| DISPOSEMENU_NO - dispose plain (non-resource) menu handle
-|
-DISPOSEMENU_NO:
-        _DisposeHandle                          | free the handle
-DISPOSEMENU_EXIT:
-        MOVE.L  (SP)+,(SP)                      | strip param
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-|
-| _FlashMenuBar ($A94C)
-|
-FlashMenuBar:
-        MOVE.L  D4,-(SP)                        | save D4 (used by GetSetWPort)
-        MOVE.L  (WMgrPort).w,A0                 | A0 = WMgr port
-        MOVE.L  0x1C(A0),A0                     | A0 = WMgr clipRgn handle
-        MOVE.L  A0,-(SP)                        | push for DisposeRgn later
-        _HandToHand                             | duplicate clipRgn -> A0 = copy
-        MOVE.L  (SP)+,D0                        | D0 = original clipRgn handle
-        MOVE.L  A0,-(SP)                        | push copy for CopyRgn (source)
-        MOVE.L  A0,-(SP)                        | push copy for DisposeRgn
-        MOVE.L  D0,-(SP)                        | push original for CopyRgn (dest)
-        JSR     GetSetWPort(PC)                 | save port, switch to WMgr
-        BSR     FullClip                        | set clip to full port rect
-        MOVE    0x14(SP),D1                     | D1 = menuID to flash
-        BEQ.B   FLASHMENUBAR_EMPTY              | zero -> flash entire menu bar
-        BSR     DISABLEITEM_CONT_4              | invert specific menu title
-FLASHMENUBAR_EXIT:
-        JSR     RestorePort(PC)                 | restore original port
-        _CopyRgn                                | restore saved clipRgn
-        _DisposeRgn                             | free the copy
-        MOVE.L  (SP)+,D4                        | restore D4
-        BRA     DELETEMENU_EXIT                 | -> strip param and return
-
-| ----------------------------------------------------------
-|
-| FLASHMENUBAR_EMPTY - flash entire menu bar (invert rounded rect)
-|
-FLASHMENUBAR_EMPTY:
-        MOVE.L  (WMgrPort).w,A0                 | A0 = WMgr port
-        PEA.L   0x10(A0)                        | push portRect (for InvertRoundRect)
-        MOVE.L  0x1C(A0),-(SP)                  | push clipRgn for SetRectRgn
-        CLR.L   -(SP)                           | top=0, left=0
-        MOVE    0x16(A0),-(SP)                  | push screen width (right)
-        MOVE    #0x14,-(SP)                     | bottom = 20 (menu bar area)
-        _SetRectRgn                             | clip to menu bar rect
-        MOVE.L  #0x100010,-(SP)                 | corner radius 16x16
-        _InvertRoundRect                        | invert menu bar with rounded corners
-        BRA.B   FLASHMENUBAR_EXIT               | -> restore and return
+        RTS                                     | return from DrawGrowIcon
 

@@ -1,9 +1,11 @@
 | TextEdit
 |
-| Provides basic text editing capabilities: TENew, TEDispose,
-| TESetText, TEGetText, TEKey, TEClick, TEInsert, TEDelete,
-| TEActivate, TEDeactivate, TEIdle, TECopy, TECut, TEPaste,
-| TEScroll, TECalText, TEUpdate, and styled text support.
+| Apple source: TextEdit.a (MacSEROM.lst module TEXTEDIT): TEGetText,
+| TEInit, TEDispose, TextBox, TESetText, TECalText, TESetSelect, TENew,
+| TEUpdate, TEClick, TECopy, TECut, TEDelete, TEActivate, TEDeactivate,
+| TEIdle, TEPaste, TEInsert, TEKey, TEScroll, TESetJust, with the internal
+| measuring and line-breaking routines. (The automatic scrolling calls
+| TEPinScroll, TESelView and TEAutoView are Mac Plus additions.)
 |
 | TERec (MPW 1.0 TextEdit.h):
 | Offset 0: destRect Rect destination rectangle (8 bytes)
@@ -42,558 +44,7 @@
 | Inside Macintosh Vol I, Ch 12: TextEdit
 
 | ----------------------------------------------------------
-| SYSEVT_DISPATCH - SystemEvent dispatch table (word offsets from SYSEVT_DISPATCH)
-| Entries for event codes 0-11:
-| 0 (null): -> SYSEVT_HANDLED (not handled)
-| 1 (mouseDown): -> SYSEVT_HANDLED (not handled by system)
-| 2 (mouseUp): -> handler
-| 3 (keyDown): -> handler
-| 4 (keyUp): -> handler
-| 5 (autoKey): -> handler
-| 6 (update): -> desk accessory update handler
-| 7 (disk): -> disk-inserted handler
-| 8 (activate): -> desk accessory activate handler
-| 9 (abort): -> SYSEVT_HANDLED (not handled)
-| 10 (network): -> handler
-| 11 (driver): -> handler
-| SYSEVT_DISPATCH: 9-entry word-offset jump table indexed by event code
-| (D0.W). Upper-bound check + scaled index + LEA table,A0 + ADDA word
-| at table[D0],A0 + JMP (A0) pattern. Offsets are relative to table start.
-SYSEVT_DISPATCH:                                | jump table base
-        .short  SYSEVT_RESTORE - SYSEVT_DISPATCH | 0: null -> _SetPort cleanup
-        .short  SYSEVT_RESTORE - SYSEVT_DISPATCH | 1: mouseDn -> (same)
-        .short  SYSEVT_KEYEVENT - SYSEVT_DISPATCH | 2: mouseUp -> keyboard handler
-        .short  SYSEVT_KEYEVENT - SYSEVT_DISPATCH | 3: keyDn
-        .short  SYSEVT_KEYEVENT - SYSEVT_DISPATCH | 4: keyUp
-        .short  SYSEVT_KEYEVENT - SYSEVT_DISPATCH | 5: autoKey
-        .short  SYSEVT_ACTIVATE - SYSEVT_DISPATCH | 6: update
-        .short  SYSEVT_DISKEVT  - SYSEVT_DISPATCH | 7: disk-insert
-        .short  SYSEVT_ACTIVATE - SYSEVT_DISPATCH | 8: activate
-| ----------------------------------------------------------
-| Shared epilogs. SYSEVT_HANDLED entry marks result as handled; the
-| SYSEVT_RESTORE entry is used by disk-insert events that
-| already stored the result code in event.message.
-SYSEVT_HANDLED:
-        ADDQ.B  #0x1,0x10(SP)                   | set result byte = TRUE (handled)
-SYSEVT_RESTORE:
-        _SetPort                                | restore saved port
-        MOVE.L  (SP)+,A3                        | restore A3
-        MOVE.L  (SP)+,(SP)                      | slide retaddr over params
-        RTS                                     | return to SystemEvent caller
-| ----------------------------------------------------------
-| Key/mouse event -> front-window DA dispatcher
-SYSEVT_KEYEVENT:
-        SUBQ.W  #0x4,SP                         | space for FrontWindow result
-        _FrontWindow                            | get frontmost window
-        MOVE.L  (SP)+,A0                        | A0 = front window ptr
-        BSR.B   TEXTEDIT_CONT_2                 | look up DA DCE -> A1
-        BNE.B   SYSEVT_RESTORE                  | not a DA window, bail (no flag)
-        MOVE    (A3),D0                         | D0 = event code (from caller)
-        MOVE    dCtlEMask(A1),D1                | D1 = DCE event mask
-        BTST    D0,D1                           | DA interested in this event?
-        BEQ.B   SYSEVT_RESTORE                  | no, bail (no flag)
-        BSR.B   TEXTEDIT_CONT_3                 | send accEvent control call to DA
-        BRA.B   SYSEVT_HANDLED                  | -> return with handled=TRUE
-
-| ----------------------------------------------------------
-| TEXTEDIT_CONT_2
-| Called during boot (3,697 times in 30s trace).
-TEXTEDIT_CONT_2:
-        MOVE    windowKind(A0),D0               | D0 = windowKind from WindowRecord
-        BPL.B   TEXTEDIT_ERR                    | positive = not a DA, return error
-        NOT     D0                              | invert kind: -refNum-1 -> refNum
-        ASL     #0x2,D0                         | multiply by 4 = unit table byte index
-        MOVE.L  (UTableBase).w,A0               | A0 = unit table base
-        MOVE.L  0(A0,D0.W),A0                   | A0 = handle to DCE
-        MOVE.L  (A0),A1                         | A1 = dereferenced DCE pointer
-        MOVEQ.L #0x0,D0                         | return 0 = success (Z flag set)
-        RTS                                     | return success code (0)
-TEXTEDIT_ERR:
-        MOVEQ    #-0x1,D0                       | return -1 (Z=0): not a DA
-        RTS                                     | return error code (-1)
-TEXTEDIT_CONT_3:
-        MOVEQ    #0x40,D0                       | csCode = accEvent (0x40)
-
-| TEXTEDIT_CONT_4 -- send accCursor to front DA.
-TEXTEDIT_CONT_4:
-        LINK    A6,#-0x20                       | allocate param block on stack
-        LEA.L   -0x8(A6),A0                     | A0 = csParam area in param block
-        MOVE    dCtlRefNum(A1),(A0)+            | csParam[0] = DCE refNum
-        MOVE    D0,(A0)+                        | csParam[1] = csCode
-        MOVE.L  A3,(A0)                         | csParam[2] = event/menu ptr
-        LEA.L   -0x20(A6),A0                    | A0 = param block base
-        _ControlImmed                           | issue synchronous Control call to DA
-        UNLK    A6                              | tear down frame
-        RTS                                     | return from synchronous Control call
-DA_ACCRUN_ENTRY:
-        MOVEQ    #0x41,D0                       | csCode = accRun (periodic task)
-        BRA.B    TEXTEDIT_CONT_4                | -> issue Control call
-| ----------------------------------------------------------
-| Update / activate event -> look up window's DA, send accEvent
-SYSEVT_ACTIVATE:
-        MOVE.L  evtMessage(A3),A0               | A0 = window ptr from event record
-        BSR.B   TEXTEDIT_CONT_2                 | look up DA's DCE -> A1
-        BNE.B   SYSEVT_RESTORE                  | not a DA, bail (no flag)
-        BSR.B   TEXTEDIT_CONT_3                 | send accEvent control call
-        BRA.B   SYSEVT_HANDLED                  | -> return with handled=TRUE
-| ----------------------------------------------------------
-| Disk-insert event -> call _MountVol with drive number, return result
-SYSEVT_DISKEVT:
-        SUBA.W  #0x18,SP                        | allocate VolumeParam block on stack
-        MOVE.L  SP,A0                           | A0 = param block ptr
-        MOVE    4(A3),ioVRefNum(A0)             | ioVRefNum = drive number from caller
-        _MountVol                               | mount the volume
-        ADDA.W  #0x18,SP                        | discard param block
-        MOVE    D0,0x2(A3)                      | store result code in event.message hi
-        BRA.B   SYSEVT_RESTORE                  | -> return (no ADDQ handled-flag)
-
-| ----------------------------------------------------------
-| SystemClick -- _SystemClick ($A9B3). Plus textedit.s 138.
-| Routes a mouse click in a DA window to its DCE. Handles
-| click in window content (accClick), drag bar, close box,
-| desktop click (DeskHook), and inactive window selection.
-SystemClick:
-        MOVEM.L D0/D3-D4/A3-A4,-(SP)            | save registers
-        MOVE.L  SP,-(SP)                        | space for GetPort
-        _GetPort                                | save current port
-        MOVE.L  24(SP),A4                       | A4 = window ptr param
-        MOVE.L  28(SP),D4                       | D4 = event ptr param
-        MOVE.L  A4,D0                           | test window for NIL
-        BEQ.W   SYSTEMCLICK_EMPTY               | NIL -> desktop click
-        MOVE.L  D0,A0                           | A0 = window ptr for DA lookup
-        BSR.B   TEXTEDIT_CONT_2                 | call subroutine via A1
-        BNE.B   SYSTEMCLICK_EXIT                | not a DA window: bail
-        MOVE.L  A1,D3                           | push DA window to bring to front
-        MOVEQ.L #0x0,D0                         | zero-extend windowKind hi
-        MOVE.B  0x7E(A4),D0                     | D0 = control flag byte
-        CLR.L   -(SP)                           | space for FindWindow result
-        MOVE    D0,-(SP)                        | push window ptr
-        MOVE.L  A4,-(SP)                        | A0 = event record
-        MOVE    #0x1,-(SP)                      | push event.where (start point)
-        MOVE.L  D4,A0                           | A0 = app globals ptr
-        MOVE.L  10(A0),-(SP)                    | push event.where (mouse point)
-        MOVE.L  0x7E(A4),A0                     | A0 = window controlList handle
-        BSET    #0x7,(A0)                       | lock control list during call
-        MOVE.L  A0,-(SP)                        | push handle for LoadResource
-        _LoadResource                           | ensure DA control code in memory
-        MOVE.L  (A0),A0                         | push window ptr
-        JSR     (A0)                            | call subroutine via A0
-        MOVE.L  0x7E(A4),A0                     | push event.where (mouse point)
-        BCLR    #0x7,(A0)                       | unlock control list handle
-        MOVE.L  (SP)+,D0                        | D0 = part code from DA
-        BEQ.B   SYSTEMCLICK_EXIT                | no -> done
-        SUBQ.W  #0x2,D0                         | partCode 2 (drag bar)?
-        BEQ.B   SYSTEMCLICK_OK                  | yes: drag the DA window
-        SUBQ.W  #0x2,D0                         | partCode 4 (close box)?
-        BEQ.B   SYSTEMCLICK_OK_2                | yes: track close box
-        CLR.L   -(SP)                           | space for FrontWindow result
-        _FrontWindow                            | get frontmost window
-        MOVE.L  (SP)+,D0                        | D0 = front window
-        CMP.L   A4,D0                           | is DA window already in front?
-        BNE.B   SYSTEMCLICK_NO                  | no: select window first
-        MOVE.L  D4,A3                           | call subroutine via A0
-        MOVE.L  D3,A1                           | A1 = DCE ptr (saved earlier)
-        BSR.W   TEXTEDIT_CONT_3                 | send accEvent control call to DA
-| Called by: SYSTEMCLICK_EMPTY, SYSTEMCLICK_EMPTY_CONT, SYSTEMCLICK_OK, SYSTEMCLICK_OK_2, SYSTEMCLICK_OK_3
-SYSTEMCLICK_EXIT:
-        _SetPort                                | restore saved port
-        MOVEM.L (SP)+,D3-D4/A3-A4               | restore registers
-        MOVE.L  (SP)+,A0                        | A0 = return address
-        ADDQ.W  #0x8,SP                         | pop 2 params (window, event)
-        JMP     (A0)                            | RTS
-
-| ----------------------------------------------------------
-| SYSTEMCLICK_EMPTY
-| Called during boot.
-SYSTEMCLICK_EMPTY:
-        TST.L   (DeskHook).w                    | custom desktop hook installed?
-        BEQ.B   SYSTEMCLICK_EXIT                | no hook: just bail
-        MOVE.L  (WMgrPort).w,-(SP)              | set port to Window Manager port
-        _SetPort                                | switch to WMgr port
-        MOVE.L  (GrayRgn).w,-(SP)               | clip to gray region (desktop area)
-        _SetClip                                | restrict drawing to desktop
-        CLR.L   -(SP)                           | no window to clip above
-        _ClipAbove                              | clip to behind all windows
-        MOVE.L  D4,A0                           | A0 = event record
-        MOVE.L  (DeskHook).w,A1                 | A1 = desk hook procedure
-        MOVEQ.L #-0x1,D0                        | D0 = -1 (click in desktop)
-        JSR     (A1)                            | call desk hook
-        BRA.B   SYSTEMCLICK_EXIT                | -> restore and return
-SYSTEMCLICK_NO:
-        MOVE.L  A4,-(SP)                        | push window ptr (front != A4 case)
-        _SelectWindow                           | bring our window to front
-        BRA.B   SYSTEMCLICK_EXIT                | -> restore and return
-SYSTEMCLICK_OK:
-        MOVE.L  A4,-(SP)                        | push window ptr
-        MOVE.L  D4,A0                           | A0 = event record
-        MOVE.L  evtMouse(A0),-(SP)              | push event.where (start point)
-        MOVE.L  (A5),A0                         | A0 = app globals ptr
-        PEA.L   -0x74(A0)                       | push drag boundary rect
-        _DragWindow                             | let user drag DA title bar
-        BRA.B   SYSTEMCLICK_EXIT                | -> restore and return
-SYSTEMCLICK_OK_2:
-        CLR     -(SP)                           | space for TrackGoAway result
-        MOVE.L  A4,-(SP)                        | push window ptr
-        MOVE.L  D4,A0                           | A0 = event record
-        MOVE.L  evtMouse(A0),-(SP)              | push event.where (mouse point)
-        _TrackGoAway                            | track close box click
-        TST.B   (SP)+                           | user confirmed close?
-        BEQ.B   SYSTEMCLICK_EXIT                | no: just exit
-        MOVE.L  D3,A1                           | A1 = DCE ptr
-        MOVE.L  (CloseOrnHook).w,D0             | custom close hook installed?
-        BNE.B   SYSTEMCLICK_OK_3                | yes -> call custom hook
-        MOVE    dCtlRefNum(A1),-(SP)            | push DA refNum from DCE
-        _CloseDeskAcc                           | close the desk accessory
-        BRA.B   SYSTEMCLICK_EXIT                | -> restore and return
-SYSTEMCLICK_OK_3:
-        MOVE.L  D0,A0                           | A0 = close ornament hook
-        JSR     (A0)                            | call custom close handler
-        BRA.B   SYSTEMCLICK_EXIT                | -> restore and return
-
-| ----------------------------------------------------------
-| SystemTask -- _SystemTask ($A9B4). Plus textedit.s 261.
-| Walks the unit table calling each DA's accRun entry if it has
-| dNeedTime + dOpened set and its dCtlDelay has elapsed.
-SystemTask:
-        MOVEM.L D3/A3,-(SP)                     | save registers
-        BSET    #0x7,(TaskLock).w               | atomically test+set TaskLock bit 7
-        BNE.W   SYSTEMTASK_CONT                 | already locked - exit immediately
-        SUBQ.W  #0x4,SP                         | space for GetPort result
-        MOVE.L  SP,-(SP)                        | D0 = next DCE handle
-        _GetPort                                | save current port on stack
-        CLR.L   -(SP)                           | space for FrontWindow result
-        _FrontWindow                            | get frontmost window
-        MOVE.L  (SP)+,A0                        | A0 = front window ptr
-        BSR.W   TEXTEDIT_CONT_2                 | look up DA's DCE -> A1
-        BNE.B   SYSTEMTASK_SKIP                 | not a DA window: skip accCursor
-        BTST    #0x7,5(A1)                      | test "no DA cursor" flag in DCE
-        BNE.B   SYSTEMTASK_SKIP                 | flag set: skip accCursor
-        MOVEQ.L #0x42,D0                        | csCode = accMenu (67)
-        BSR.W   TEXTEDIT_CONT_4                 | send accMenu control call
-SYSTEMTASK_SKIP:
-        MOVE.L  (UTableBase).w,A3               | A3 = unit table base
-        MOVE    (UnitTableEntryCount).w,D3      | D3 = unit table entry count
-SYSTEMTASK_LOOP:
-        MOVE.L  (A3)+,D0                        | D0 = next DCE handle
-        BEQ.B   SYSTEMTASK_SKIP_2               | nil -> skip this slot
-        MOVE.L  D0,A0                           | A0 = DCE handle
-        MOVE.L  (A0),A1                         | A1 = dereferenced DCE
-        MOVE    dCtlFlags(A1),D0                | D0 = dCtlFlags
-        ANDI    #0x20A0,D0                      | mask dNeedTime + dOpened + dRAMBased
-        CMPI    #0x2020,D0                      | dNeedTime and dOpened both set?
-        BNE.B   SYSTEMTASK_SKIP_2               | missing flags: skip this DA
-        MOVEQ.L #0x0,D0                         | clear high word
-        MOVE    dCtlDelay(A1),D0                | D0 = dCtlDelay (tick interval)
-        BEQ.B   SYSTEMTASK_EMPTY                | zero delay -> always run
-        ADD.L   26(A1),D0                       | D0 = last run time + delay
-        CMP.L   (Ticks).w,D0                    | time to run yet?
-        BGT.B   SYSTEMTASK_SKIP_2               | not yet -> skip
-        MOVE.L  (Ticks).w,26(A1)                | update last run time to now
-SYSTEMTASK_EMPTY:
-        BSR.W   DA_ACCRUN_ENTRY                 | call DA's periodic-task entry point
-SYSTEMTASK_SKIP_2:
-        SUBQ.W  #0x1,D3                         | decrement unit counter
-        BGT.B   SYSTEMTASK_LOOP                 | more entries -> loop
-        _SetPort                                | restore saved port
-        CLR.B   (TaskLock).w                    | release task lock
-SYSTEMTASK_CONT:
-        MOVEM.L  (SP)+,D3/A3                    | restore saved registers
-        RTS                                     | return from SystemTask
-
-| ----------------------------------------------------------
-| SystemMenu -- _SystemMenu ($A9B5). Plus textedit.s 314.
-| Routes a menu selection to the owning DA's accMenu entry if
-| the menuID matches a DA's dCtlMenu field.
-SystemMenu:
-        MOVEM.L A2-A3,-(SP)                     | save registers
-        MOVE.L  12(SP),D1                       | D1 = menu result (menuID | item)
-        SWAP    D1                              | D1.W = menuID
-        MOVE    (MBarEnable).w,D0               | D0 = menu bar enable word
-        BEQ.B   SYSTEMMENU_EMPTY                | zero -> use menuID from param
-        MOVE    D0,D1                           | override with MBarEnable menuID
-SYSTEMMENU_EMPTY:
-        MOVE.L  (UTableBase).w,A2               | A2 = unit table base
-        MOVE    (UnitTableEntryCount).w,D2      | D2 = unit table entry count
-SYSTEMMENU_LOOP:
-        MOVE.L  (A2)+,D0                        | D0 = next DCE handle
-        BEQ.B   SYSTEMMENU_SKIP                 | nil -> skip slot
-        MOVE.L  D0,A0                           | A0 = DCE handle
-        MOVE.L  (A0),A1                         | A1 = dereferenced DCE
-        BTST    #0x5,5(A1)                      | dCtlFlags: dNeedTime set? (has menu)
-        BEQ.B   SYSTEMMENU_SKIP                 | flag clear: not a menu DA
-        CMP     dCtlMenu(A1),D1                 | DCE menuID matches selected menu?
-        BNE.B   SYSTEMMENU_SKIP                 | no -> try next
-        MOVE.L  12(SP),A3                       | A3 = menu result for accMenu
-        MOVEQ.L #0x43,D0                        | csCode = accMenu (67)
-        BSR.W   TEXTEDIT_CONT_4                 | send accMenu control call
-        BRA.B   SYSTEMMENU_DONE                 | -> done
-SYSTEMMENU_SKIP:
-        SUBQ.W  #0x1,D2                         | decrement entry count
-        BGT.B   SYSTEMMENU_LOOP                 | more entries: continue scan
-SYSTEMMENU_DONE:
-        MOVEM.L (SP)+,A2-A3                     | restore saved registers
-        MOVE.L  (SP)+,(SP)                      | pop return addr over name param
-        RTS                                     | return from DA window activation
-
-| ----------------------------------------------------------
-| SysEdit -- _SysEdit ($A9C2). Plus textedit.s 355.
-| Routes Edit menu commands (Undo/Cut/Copy/Paste/Clear) to a DA
-| if the front window is a desk accessory.
-SysEdit:
-        CLR     6(SP)                           | clear result (FALSE by default)
-        SUBQ.W  #0x8,SP                         | allocate saved port + window
-        PEA.L     4(SP)                         | push ptr for GetPort result
-        _GetPort                                | save current port
-        _FrontWindow                            | get frontmost window
-        MOVE.L  (SP)+,D0                        | D0 = front window ptr
-        BEQ.B   SYSEDIT_SKIP                    | no window -> skip
-        MOVE.L  D0,A0                           | A0 = front window
-        BSR.W   TEXTEDIT_CONT_2                 | look up DA's DCE -> A1
-        BNE.B   SYSEDIT_SKIP                    | not a DA -> skip
-        MOVE    8(SP),D0                        | D0 = editCmd parameter (0-3)
-        ADDI    #0x44,D0                        | csCode = accUndo+editCmd (0x44+)
-        BSR.W   TEXTEDIT_CONT_4                 | send edit command to DA
-        ADDQ.B  #0x1,10(SP)                     | set result = TRUE (DA handled it)
-SYSEDIT_SKIP:
-        _SetPort                                | restore saved port (on stack)
-        BRA.B   CLOSEDA_EPILOG                  | -> pop retaddr + param + return
-
-| ----------------------------------------------------------
-| OpenDeskAcc -- _OpenDeskAcc ($A9B6). Plus textedit.s 378.
-| Open a desk accessory by name. Calls _Open with name as ioPB,
-| then on success calls _SelectWindow + _ShowWindow on the
-| DA's window.
-OpenDeskAcc:
-        CLR     8(SP)                           | clear result slot
-        SUBA.W  #0x20,SP                        | allocate ioParam block
-        MOVE.L  0x24(SP),18(SP)                 | ioFileName = name from param
-        CLR     22(SP)                          | ioVersNum = 0
-        CLR     26(SP)                          | ioPermssn = 0
-        CLR.L   28(SP)                          | ioMisc = 0
-        MOVE.L  SP,A0                           | A0 = ioPB
-        _Open                                   | open the DA driver
-        BNE.B   OPENDESKACC_ERR                 | failed - cleanup
-        MOVE    24(SP),D0                       | D0 = ioRefNum (DA refNum)
-        MOVE    D0,0x28(SP)                     | store refNum as return value
-        NOT     D0                              | invert refNum: -refNum-1
-        ASL     #0x2,D0                         | multiply by 4 = unit table index
-        MOVE.L  (UTableBase).w,A1               | A1 = unit table base
-        MOVE.L  0(A1,D0.W),A1                   | A1 = handle to DCE
-        MOVE.L  (A1),A1                         | A1 = dereferenced DCE pointer
-        MOVE.L  30(A1),D0                       | D0 = dCtlWindow (DA window ptr)
-        BEQ.B   OPENDESKACC_ERR                 | no window: just return
-        MOVE.L  D0,-(SP)                        | push window for SelectWindow
-        MOVE.L  D0,-(SP)                        | push window for ShowWindow
-        _SelectWindow                           | bring DA window to front
-        _ShowWindow                             | make DA window visible
-OPENDESKACC_ERR:
-        ADDA    #0x20,SP                        | discard param block
-        MOVE.L  (SP)+,(SP)                      | pop return addr over name param
-        RTS                                     | return from DA window activation
-
-| ----------------------------------------------------------
-| _CloseDeskAcc ($A9B7)
-CloseDeskAcc:
-        MOVE    0x4(SP),D0                      | D0 = DA refNum (param)
-        SUBA    #0x1E,SP                        | allocate IOParam block
-        MOVE    D0,0x18(SP)                     | ioRefNum = DA refNum
-        MOVE.L  A7,A0                           | A0 = param block
-        _Close                                  | close the DA driver
-        ADDA    #0x1E,SP                        | discard param block
-CLOSEDA_EPILOG:                                 | shared with SYSEDIT_SKIP exit
-        MOVE.L  (SP)+,A0                        | A0 = saved return addr
-        ADDQ.W  #0x2,SP                         | pop 16-bit refNum parameter
-        JMP     (A0)                            | return to caller
-
-| ----------------------------------------------------------
-| GetPattern -- _GetPattern ($A9B8). Plus textedit.s 427.
-| Gets a 'PAT ' resource by ID. Common epilog GETPATTERN_EXIT
-| is shared with GetCursor/GetString/GetIcon/GetPicture.
-GetPattern:
-        MOVE.L  #0x50415420,D0                  | D0 = 'PAT ' resource type
-GETPATTERN_EXIT:
-        SUBQ.W  #0x4,SP                         | space for GetResource result
-        MOVE.L  D0,-(SP)                        | push resource type
-        MOVE    0xC(SP),-(SP)                   | push resource ID (param)
-        _GetResource                            | load resource -> handle on stack
-        MOVE.L  (SP)+,D0                        | D0 = resource handle
-        MOVE.L  (SP)+,A0                        | A0 = return address
-        ADDQ.W  #0x2,SP                         | pop resID parameter
-        MOVE.L  D0,(SP)                         | store handle as return value
-        JMP     (A0)                            | RTS
-
-| ----------------------------------------------------------
-| GetCursor -- _GetCursor ($A9B9). Plus textedit.s 445.
-GetCursor:                                      | jump via A0
-        MOVE.L  #0x43555253,D0                  | D0 = 'CURS' resource type
-        BRA.B   GETPATTERN_EXIT                 | share GetResource epilog
-
-| ----------------------------------------------------------
-| GetString -- _GetString ($A9BA). Plus textedit.s 454.
-GetString:
-        MOVE.L  #0x53545220,D0                  | D0 = 'STR ' resource type
-        BRA.B   GETPATTERN_EXIT                 | share GetResource epilog
-
-| ----------------------------------------------------------
-| GetIcon -- _GetIcon ($A9BB). Plus textedit.s 463.
-GetIcon:
-        MOVE.L  #0x49434F4E,D0                  | D0 = 'ICON' resource type
-        BRA.B   GETPATTERN_EXIT                 | share GetResource epilog
-
-| ----------------------------------------------------------
-| GetPicture -- _GetPicture ($A9BC). Plus textedit.s 472.
-GetPicture:
-        MOVE.L  #0x50494354,D0                  | D0 = 'PICT' resource type
-        BRA.B   GETPATTERN_EXIT                 | share GetResource epilog
-
-| ----------------------------------------------------------
-| GetNewWindow -- _GetNewWindow ($A9BD). Plus textedit.s 480.
-| Loads a 'WIND' resource and creates a new window from the template.
-GetNewWindow:
-        LINK    A6,#0x0                         | set up stack frame
-        MOVE.L  A3,-(SP)                        | save A3
-        CLR.L   18(A6)                          | clear return value (window ptr)
-        SUBQ.W  #0x4,SP                         | space for GetResource result
-        MOVE.L  #0x57494E44,-(SP)               | push 'WIND' resource type
-        MOVE    16(A6),-(SP)                    | push resource ID (param)
-        _GetResource                            | load WIND template
-        MOVE.L  (SP)+,A3                        | A3 = WIND resource handle
-        MOVE.L  A3,D0                           | test for nil
-        BEQ.B   GETPATTERN_EXIT_FOUND           | not found -> bail
-        MOVE.L  (A3),A0                         | A0 = dereferenced WIND data
-        SUBQ.W  #0x4,SP                         | space for NewWindow result
-        MOVE.L  12(A6),-(SP)                    | push wStorage (behind param)
-        MOVE.L  A0,-(SP)                        | push boundsRect from template
-        PEA.L     18(A0)                        | push title string from template
-        MOVE.L  8(A0),-(SP)                     | push visible + procID from template
-        MOVE.L  8(A6),-(SP)                     | push behind window (param)
-        MOVE    12(A0),-(SP)                    | push goAwayFlag from template
-        MOVE.L  14(A0),-(SP)                    | push refCon from template
-        BSET    #0x7,(A3)                       | lock WIND handle during NewWindow
-        _NewWindow                              | create the window
-        MOVE.L  (SP)+,18(A6)                    | store window ptr as return value
-        MOVE.L  A3,-(SP)                        | push WIND handle
-        _ReleaseResource                        | release the WIND template
-GETPATTERN_EXIT_FOUND:
-        MOVE.L  (SP)+,A3                        | restore A3
-        UNLK    A6                              | tear down frame
-        MOVE.L  (SP)+,A0                        | pop return address
-        ADDA.W  #0xA,SP                         | strip 10 bytes of params
-        JMP     (A0)                            | RTS
-| ----------------------------------------------------------
-| _GetNewControl ($A9BE)
-GetNewControl:
-        LINK    A6,#0x0                         | set up stack frame
-        MOVE.L  A3,-(SP)                        | save A3
-        CLR.L   0xE(A6)                         | clear return value (ControlHandle)
-        SUBQ.W  #0x4,SP                         | space for GetResource result
-        MOVE.L  #0x434E544C,-(SP)               | push 'CNTL' resource type
-        MOVE    0xC(A6),-(SP)                   | push resource ID (param)
-        _GetResource                            | load CNTL template
-        MOVE.L  (SP)+,A3                        | A3 = CNTL resource handle
-        MOVE.L  A3,D0                           | test for nil
-        BEQ.B   GETNEWCONTROL_FOUND             | not found -> bail
-        MOVE.L  (A3),A0                         | A0 = dereferenced CNTL data
-        SUBQ.W  #0x4,SP                         | space for NewControl result
-        MOVE.L  0x8(A6),-(SP)                   | push owning window (param)
-        MOVE.L  A0,-(SP)                        | push boundsRect from template
-        PEA.L   0x16(A0)                        | push title string from template
-        LEA.L   0x8(A0),A1                      | A1 = pointer past boundsRect
-        MOVE.L  (A1)+,-(SP)                     | push visible + initial value
-        MOVE.L  (A1)+,-(SP)                     | push min + max
-        MOVE    (A1)+,-(SP)                     | push procID
-        MOVE.L  (A1)+,-(SP)                     | push refCon
-        BSET    #0x7,(A3)                       | lock CNTL handle during NewControl
-        _NewControl                             | create the control
-        MOVE.L  (SP)+,0xE(A6)                   | store ControlHandle as return value
-        MOVE.L  A3,-(SP)                        | push CNTL handle
-        _ReleaseResource                        | release the CNTL template
-GETNEWCONTROL_FOUND:
-        MOVE.L  (SP)+,A3                        | restore A3
-        UNLK    A6                              | tear down frame
-        MOVE.L  (SP)+,A0                        | A0 = return address
-        ADDQ.W  #0x6,SP                         | pop parameters (6 bytes)
-        JMP     (A0)                            | RTS
-
-| ----------------------------------------------------------
-| GetRMenu -- _GetRMenu ($A9BF). Plus textedit.s 554.
-| Loads a MENU resource by ID and inserts it via _InsertMenu.
-| Resolves MDEF reference to actual menu definition proc.
-GetRMenu:
-        LINK    A6,#0x0                         | set up stack frame
-        MOVE.L  A3,-(SP)                        | save A3
-        SUBQ.W  #0x4,SP                         | space for GetResource result
-        MOVE.L  #0x4D454E55,-(SP)               | push 'MENU' resource type
-        MOVE    8(A6),-(SP)                     | push resource ID (param)
-        _GetResource                            | load MENU resource
-        MOVE.L  (SP)+,A3                        | A3 = MENU resource handle
-        MOVE.L  A3,10(A6)                       | store handle as result
-        BEQ.B   GETRMENU_EXIT                   | NIL - bail
-        SUBQ.W  #0x4,SP                         | space for GetResource result
-        MOVE.L  #0x4D444546,-(SP)               | push 'MDEF' resource type
-        MOVE.L  (A3),A0                         | dereference MENU handle
-        MOVE    6(A0),-(SP)                     | push procID from MENU
-        _GetResource                            | load MDEF resource
-        MOVE.L  (A3),A0                         | dereference MENU handle (may have moved)
-        MOVE.L  (SP)+,6(A0)                     | store MDEF handle in MENU's procID slot
-        MOVE.L  A3,-(SP)                        | push MENU handle
-        _CalcMenuSize                           | calculate menu width/height
-GETRMENU_EXIT:
-        MOVE.L  (SP)+,A3                        | restore A3
-        UNLK    A6                              | tear down frame
-        MOVE.L  (SP)+,A0                        | A0 = return address
-        ADDQ.W  #0x2,SP                         | pop resID parameter
-        JMP     (A0)                            | RTS
-
-| ----------------------------------------------------------
-| GetNewMBar -- _GetNewMBar ($A9C0). Plus textedit.s 623.
-| Loads an MBAR resource and inserts each menu via GetRMenu.
-GetNewMBar:
-        LINK    A6,#0x0                         | set up stack frame
-        MOVEM.L D3/A3,-(SP)                     | save registers
-        CLR.L   10(A6)                          | clear return value (menu bar handle)
-        SUBQ.W  #0x4,SP                         | space for GetMenuBar result
-        _GetMenuBar                             | save current menu bar
-        _ClearMenuBar                           | clear menu list
-        SUBQ.W  #0x4,SP                         | space for GetResource result
-        MOVE.L  #0x4D424152,-(SP)               | push 'MBAR' resource type
-        MOVE    8(A6),-(SP)                     | push resource ID (param)
-        _GetResource                            | load MBAR resource
-        MOVE.L  (SP)+,A3                        | A3 = MBAR handle
-        MOVE.L  A3,D0                           | test for nil
-        BEQ.B   GETNEWMBAR_FOUND                | MBAR not found: bail
-        MOVEQ.L #0x0,D3                         | D3 = menu index counter
-GETNEWCONTROL_FOUND_CONT_3:
-        SUBQ.W  #0x4,SP                         | space for GetRMenu result
-        MOVE.L  (A3),A0                         | A0 = MBAR data ptr
-        MOVE    D3,D0                           | D0 = current menu index
-        ADD     D0,D0                           | index *= 2 (word entries)
-        MOVE    2(A0,D0.W),-(SP)                | push menu resID from MBAR[i]
-        BSR.B   GetRMenu                        | load MENU + MDEF resource
-        CLR     -(SP)                           | push beforeID = 0 (append)
-        _InsertMenu                             | insert into current menu list
-        MOVE.L  (A3),A0                         | reload MBAR ptr (may have moved)
-        ADDQ.W  #0x1,D3                         | advance to next index
-        CMP     (A0),D3                         | more menus to load?
-        BLT.B   GETNEWCONTROL_FOUND_CONT_3      | yes: continue
-        SUBQ.W  #0x4,SP                         | space for GetMenuBar result
-        _GetMenuBar                             | grab handle to new menu bar
-        MOVE.L  (SP)+,10(A6)                    | return menu bar handle
-        MOVE.L  A3,-(SP)                        | push MBAR handle
-        _ReleaseResource                        | release MBAR template
-GETNEWMBAR_FOUND:
-        MOVE.L  (SP),-(SP)                      | dup saved menu bar handle on stack
-        _SetMenuBar                             | restore original menu bar
-        MOVE.L  (SP)+,A0                        | A0 = old menu bar handle
-        _DisposeHandle                          | dispose old menu bar copy
-        MOVEM.L (SP)+,D3/A3                     | restore registers
-        UNLK    A6                              | tear down frame
-        MOVE.L  (SP)+,A0                        | A0 = return address
-        ADDQ.W  #0x2,SP                         | pop resource ID parameter
-        JMP     (A0)                            | RTS
-
-| ----------------------------------------------------------
-| TEGetText -- _TEGetText ($A9CB). Plus textedit.s 672.
+| TEGetText -- _TEGetText ($A9CB).
 | Returns the text Handle of a TERec.
 TEGetText:
         BSR.W   XTRIMMEASURE_CONT_12            | set up TE state
@@ -601,7 +52,7 @@ TEGetText:
         BRA.W   TECALTEXT_EXIT                  | -> common TE epilog
 
 | ----------------------------------------------------------
-| TEInit -- _TEInit ($A9CC). Plus textedit.s 684.
+| TEInit -- _TEInit ($A9CC).
 | Initialize TextEdit globals: allocate empty scrap handle and
 | install default TEDoText / TERecal / TEWdBreak hooks.
 TEInit:
@@ -618,7 +69,7 @@ TEInit:
         RTS                                     | return from default hook installation
 
 | ----------------------------------------------------------
-| TEDispose -- _TEDispose ($A9CD). Plus textedit.s 703.
+| TEDispose -- _TEDispose ($A9CD).
 | Dispose a TERec handle (its text handle and the TERec itself).
 TEDispose:
         MOVEM.L D2-D7/A2-A4,-(SP)               | save registers
@@ -629,16 +80,20 @@ TEDispose:
         MOVE.L  A4,A0                           | A0 = TE handle
         _DisposeHandle                          | dispose TERec itself
         MOVEQ.L #0x4,D0                         | 4 param bytes
-        BRA.B   TETEXTBOX_EXIT                  | -> common TE exit
+        BRA.B   TEXTBOX_EXIT                    | -> common TE exit
 | ----------------------------------------------------------
-| TETextBox -- _TETextBox ($A9CE). Plus textedit.s 720.
-| Draws a string of text within a rect using a temporary TERec.
-| Pascal: PROCEDURE TETextBox(text: Ptr; length: LongInt;
-| box: Rect; just: INTEGER);
-TETextBox:
+|
+| _TextBox ($A9CE): draw text in a rectangle with the given justification
+| Pascal: PROCEDURE TextBox(text: Ptr; length: LongInt; box: Rect;
+|                           just: INTEGER);
+| Erases box, creates a temporary TERec with destRect = viewRect = box
+| (TENew) and sets its just; unless length = 0, sets the text
+| (TESetText) and draws it (TEUpdate(box)); then disposes the TERec.
+|
+TextBox:
         MOVEM.L D2-D7/A2-A4,-(SP)               | save regs
         SUBQ.W  #0x4,SP                         | space for TENew result
-        MOVE.L  0x2E(SP),-(SP)                  | push box rect
+        MOVE.L  0x2E(SP),-(SP)                  | push @box (destRect)
         MOVE.L  (SP),-(SP)                      | dup for viewRect
         MOVE.L  (SP),-(SP)                      | dup for EraseRect
         _EraseRect                              | clear the box area
@@ -647,23 +102,23 @@ TETextBox:
         MOVE.L  (A4),A0                         | A0 = dereferenced TERec
         MOVE    0x28(SP),0x3A(A0)               | set TERec.just from param
         MOVE.L  0x2E(SP),D0                     | D0 = text length param
-        BEQ.B   TETEXTBOX_NO                    | empty -> skip text setup
+        BEQ.B   TEXTBOX_NO                      | empty -> skip text setup
         MOVE.L  0x32(SP),-(SP)                  | push text ptr param
         MOVE.L  D0,-(SP)                        | push text length
         MOVE.L  A4,-(SP)                        | push TEHandle
         _TESetText                              | set the text content
-        MOVE.L  0x2A(SP),-(SP)                  | push update rect ptr
+        MOVE.L  0x2A(SP),-(SP)                  | push @box (update rect)
         MOVE.L  A4,-(SP)                        | push TEHandle
         _TEUpdate                               | draw all text lines
-TETEXTBOX_NO:
+TEXTBOX_NO:
         MOVE.L  A4,-(SP)                        | push TEHandle
         _TEDispose                              | dispose temporary TERec
         MOVEQ.L #0xE,D0                         | strip 14 param bytes
-TETEXTBOX_EXIT:
+TEXTBOX_EXIT:
         BRA.B   TECALTEXT_EXIT_3                | share TE common epilog
 
 | ----------------------------------------------------------
-| TESetText -- _TESetText ($A9CF). Plus textedit.s 822.
+| TESetText -- _TESetText ($A9CF).
 | Replaces the text content of a TERec with a Ptr+length copy.
 TESetText:
         BSR.W   XTRIMMEASURE_CONT_12            | set up TE state (A3, A2=params)
@@ -681,7 +136,7 @@ TESETTEXT_EXIT:
         BRA.W   TEINSERT_EXIT                   | share TE epilog
 
 | ----------------------------------------------------------
-| TECalText -- _TECalText ($A9D0). Plus textedit.s 857.
+| TECalText -- _TECalText ($A9D0).
 | Recalculate line breaks for the text.
 TECalText:
         BSR.W   XTRIMMEASURE_CONT_12            | set up TE state
@@ -712,22 +167,22 @@ TECALTEXT_EXIT_3:
         JMP     (A0)                            | RTS
 
 | ----------------------------------------------------------
-| TESetSelect -- _TESetSelect ($A9D1). Plus textedit.s 887.
+| TESetSelect -- _TESetSelect ($A9D1).
 | Set the current selection range (selStart, selEnd) and
 | re-highlight.
 TESetSelect:
         BSR.W   XTRIMMEASURE_CONT_12            | set up TE state
         BSR.W   P_TERECAL_CONT_3                | erase old caret
         BSR.W   TEUPDATE_CONT_2                 | erase old hilite
-        MOVE.L  (A2)+,teSelStart(A3)            | new selStart from param
-        MOVE.L  (A2)+,30(A3)                    | new selEnd from param
+        MOVE.L  (A2)+,teSelStart(A3)            | selEnd (long): low word -> teSelEnd (+$22)
+        MOVE.L  (A2)+,30(A3)                    | selStart: low word -> teSelStart, high -> teSelPoint.h
         BSR.W   TETEXTHAND_LOCK_LEN             | relock text handle, refresh teLength
         BSR.W   P_TERECAL_NO_3                  | redraw caret
         BSR.W   TEUPDATE_CONT_2                 | redraw hilite
         BRA.B   TESETTEXT_EXIT                  | share TE epilog
 
 | ----------------------------------------------------------
-| TENew -- _TENew ($A9D2). Plus textedit.s 906.
+| TENew -- _TENew ($A9D2).
 | Allocate + initialize a new TERec handle from destRect/viewRect.
 TENew:
         MOVEM.L D2-D7/A2-A4,-(SP)               | save regs
@@ -767,7 +222,7 @@ TENew:
         BRA.W   TECALTEXT_EXIT_3                | share TE epilog
 
 | ----------------------------------------------------------
-| TEUpdate -- _TEUpdate ($A9D3). Plus textedit.s 957.
+| TEUpdate -- _TEUpdate ($A9D3).
 | Redraw text within the update rectangle.
 TEUpdate:
         BSR.W   XTRIMMEASURE_CONT_12            | set up TE state
@@ -803,12 +258,12 @@ TEUPDATE_CONT_2:                                | call subroutine via A0
         BRA.W   XTRIMMEASURE_OK_CONT_2          | -> draw/erase selection hilite
 
 | ----------------------------------------------------------
-| TEClick -- _TEClick ($A9D4). Plus textedit.s 996.
+| TEClick -- _TEClick ($A9D4).
 | Process a mouse click in the TE text area: hit-test, set
 | selection, track mouse for double-click and drag-select.
 TEClick:
         BSR.W   XTRIMMEASURE_CONT_12            | set up TE state
-        MOVE.L  0x38(SP),28(A3)                 | store click point in teClikLoc
+        MOVE.L  0x38(SP),28(A3)                 | save click point in teSelPoint (+$1C)
         BSR.W   TECLICK_CONT_5                  | hit-test point -> D6 = char offset
         BSR.W   P_TERECAL_CONT_3                | erase existing caret/hilite
         SUBQ.W  #0x4,SP                         | space for TickCount result
@@ -826,15 +281,15 @@ TEClick:
         BEQ.B   TECLICK_NO_2                    | no: start fresh selection
         MOVEM   teSelStart(A3),D0-D1            | D0=teSelStart, D1=teSelEnd
         CMP     D6,D0                           | click before selStart?
-        BCC.B   TECLICK_NO                      | no: extend from selEnd
-        MOVE    D0,A2                           | D3.W = old teSelEnd
-        MOVE    D0,A4                           | teSelEnd = new end
+        BCC.B   TECLICK_NO                      | click <= selStart: anchor at selEnd
+        MOVE    D0,A2                           | A2 = anchor start = selStart
+        MOVE    D0,A4                           | A4 = anchor end = selStart
         BRA.B   TECLICK_CONT                    | update with new position
 TECLICK_NO:
         MOVE    D1,A2                           | A2 = anchor at selEnd
         MOVE    D1,A4                           | A4 = anchor at selEnd
 TECLICK_CONT:
-        MOVE    D6,D5                           | D3.W = old teSelStart
+        MOVE    D6,D5                           | D5 = last tracked click offset
         BRA.B   TECLICK_CONT_2                  | update selection highlighting
 TECLICK_NO_2:
         BSR.B   TEUPDATE_CONT_2                 | unhighlight current selection
@@ -914,7 +369,7 @@ TECLICK_CONT_5:
         BGE.B   TECLICK_CONT_6                  | beyond last line -> selEnd
         ADD     D0,D0                           | word offset into lineStarts
         BLT.B   TECLICK_CONT_5_CONT_2           | before first line: offset 0
-        MOVEM   0x60(A3,D0.W),D3-D4             | load 2 cached carets from D0 offset
+        MOVEM   0x60(A3,D0.W),D3-D4             | D3/D4 = lineStarts[line], lineStarts[line+1]
         MOVEQ.L #0x0,D7                         | D7=0: pixel-to-char mode
         BSR.B   XTRIMMEASURE_OK_CONT_2          | find char offset at click.h
         MOVE    D0,D6                           | D6 = character offset at click
@@ -1128,7 +583,7 @@ XTRIMMEASURE_OK_OK_2:
 | Called during boot.
 XTRIMMEASURE_CONT_7:
         PEA.L     16(A3)                        | push selection rect for hilite
-        BEQ.B   XTRIMMEASURE_NO_5               | D0=0 (no hook) -> use InvertRect
+        BEQ.B   XTRIMMEASURE_NO_5               | D0=0 (no hook) -> use InverRect
         MOVE.L  D0,A0                           | A0 = custom highlight hook
         JMP     (A0)                            | call hook with rect on stack
 XTRIMMEASURE_NO_5:
@@ -1195,11 +650,11 @@ XTRIMMEASURE_OK_6:
         RTS                                     | return to caller (@ $F8BC)
 
 | ----------------------------------------------------------
-| TECopy -- _TECopy ($A9D5). Plus textedit.s 1712.
+| TECopy -- _TECopy ($A9D5).
 | Copy selection to TEScrap. Doesn't modify the TERec.
 TECopy:
         BSR.W   XTRIMMEASURE_CONT_12            | set up TE state
-        BSR.B   XTRIMMEASURE_CONT_15            | dereference text/lock handle
+        BSR.B   XTRIMMEASURE_CONT_15            | A2 -> teSelStart, D0.W = selEnd (sorted)
         SUB     (A2),D0                         | D0 = selEnd - selStart
         MOVE    D0,(TEScrpLength).w             | TEScrpLength = sel length
         MOVE.L  teTextH(A3),A0                  | A0 = text handle
@@ -1213,7 +668,7 @@ TECOPY_EXIT:
         BRA.W   TECALTEXT_EXIT                  | share TE common epilog
 
 | ----------------------------------------------------------
-| TECut -- _TECut ($A9D6). Plus textedit.s 1733.
+| TECut -- _TECut ($A9D6).
 | Cut: TECopy + TEDelete.
 TECut:
         BSR.W   XTRIMMEASURE_CONT_12            | set up TE state
@@ -1224,7 +679,7 @@ TECut:
         BRA.B   TECOPY_EXIT                     | -> common TE epilog
 
 | ----------------------------------------------------------
-| TEDelete -- _TEDelete ($A9D7). Plus textedit.s 1746.
+| TEDelete -- _TEDelete ($A9D7).
 | Remove the selection range from the text and recalc lines.
 TEDelete:
         BSR.W   XTRIMMEASURE_CONT_12            | set up TE state
@@ -1272,7 +727,7 @@ TEDELETE_CONT_CONT_2:
         ADD     D0,(A0)                         | (A0) += D0
         MOVE.L  A0,-(SP)                        | push selRect for EraseRect
         _EraseRect                              | call subroutine via A1
-        TST     teJust(A3)                      | test teActive / style flag @ +0x3A
+        TST     teJust(A3)                      | teJust <> 0 (centered/right justified)?
         BNE.B   TEDELETE_CONT_NO                | not left-justify: skip
         BSR.B   TEDELETE_CONT_OK                | expand D3 to word start
         MOVE    D0,D3                           | D3 = adjusted start char
@@ -1309,20 +764,6 @@ TEFINDWORD_DONE:
 TEFINDWORD_CONT_4:
         MOVEM.L D0/A0-A1,-(SP)                  | save registers
         MOVE    A1,D0                           | D0 = char offset to test
-
-| === TextEdit routines continued (from ROM layout after packages) ===
-| Package Manager and Standard Packages
-| The Package Manager loads and calls code packages from resources.
-| Packages in ROM include:
-| PACK 4: FP68K (Floating-Point Arithmetic)
-| PACK 5: Elems68K (Transcendental Functions)
-| PACK 7: DecStr68K (Binary-Decimal Conversion)
-| References:
-| Inside Macintosh Vol I, Ch 17: The Package Manager
-| Inside Macintosh Vol II, Ch 15: FP Arithmetic and Transcendental Packages
-
-| Package Manager & packages
-| ROM section: src/toolbox/packages.asm
         MOVE.L  teTextH(A3),A0                  | A0 = teTextH (text handle)
         MOVE.L  (A0),A0                         | A0 = dereferenced text ptr
         MOVE.L  teWordBreak(A3),A1              | A1 = teWordBreak proc ptr
@@ -1363,7 +804,7 @@ TEFINDWORD_CONT_4_CONT_5:
         BGE.B   TEFINDWORD_CONT_4_CONT_7        | no: wrap before this word
 TEFINDWORD_CONT_4_NO:
         MOVE    D3,D5                           | store new lineStart; advance
-        MOVE.L  teTextH(A3),A0                  | D6 = start of next line
+        MOVE.L  teTextH(A3),A0                  | A0 = text handle (hText)
         MOVE.L  (A0),A0                         | A0 = text data ptr
         CMPI.B  #0xD,0(A0,D3.W)                 | CR at D3?
         BEQ.B   TEFINDWORD_CONT_4_CONT_7        | yes: hard line break
@@ -1504,7 +945,7 @@ P_TERECAL_CONT_4:
         RTS                                     | return from caret toggle
 
 | ----------------------------------------------------------
-| TEActivate -- _TEActivate ($A9D8). Plus textedit.s 2178.
+| TEActivate -- _TEActivate ($A9D8).
 | Activate a TERec: enable caret blink (if no selection),
 | set teActive flag, redraw highlight.
 TEActivate:
@@ -1522,7 +963,7 @@ TEACTIVATE_OK:
         BRA.B   TEIDLE_EXIT                     | share TE common epilog
 
 | ----------------------------------------------------------
-| TEDeactivate -- _TEDeactivate ($A9D9). Plus textedit.s 2197.
+| TEDeactivate -- _TEDeactivate ($A9D9).
 | Deactivate a TERec: hide caret, unhighlight, clear teActive.
 TEDeactivate:
         BSR.W   XTRIMMEASURE_CONT_12            | set up TE state
@@ -1534,7 +975,7 @@ TEDeactivate:
         BRA.B   TEIDLE_EXIT                     | share TE common epilog
 
 | ----------------------------------------------------------
-| TEIdle -- _TEIdle ($A9DA). Plus textedit.s 2212.
+| TEIdle -- _TEIdle ($A9DA).
 | Blink the caret if its time has come.
 TEIdle:
         BSR.W   XTRIMMEASURE_CONT_12            | set up TE state (A3=TERec)
@@ -1553,7 +994,7 @@ TEIDLE_EXIT:
         BRA.W   TECALTEXT_EXIT                  | share TE common epilog
 
 | ----------------------------------------------------------
-| TEPaste -- _TEPaste ($A9DB). Plus textedit.s 2232.
+| TEPaste -- _TEPaste ($A9DB).
 | Insert TEScrap at the selection.
 TEPaste:
         BSR.W   XTRIMMEASURE_CONT_12            | set up TE state
@@ -1579,7 +1020,7 @@ P_TERECAL_CONT_4_CONT:
         RTS                                     | return from paste/insert
 P_TERECAL_CONT_4_CONT_2:
         SUBQ.L  #0x4,SP                         | space for Munger result
-        MOVE.L  teTextH(A3),A0                  | D0 = selStart
+        MOVE.L  teTextH(A3),A0                  | A0 = text handle (hText)
         MOVE.L  A0,-(SP)                        | push handle for HUnlock
         _HUnlock                                | unlock text before Munger
         MOVE    teSelStart(A3),-(SP)            | push offset = selStart
@@ -1587,7 +1028,7 @@ P_TERECAL_CONT_4_CONT_2:
         CLR.L   -(SP)                           | ptr1 = nil (no search)
         CLR.L   -(SP)                           | len1 = 0 (insert only)
         MOVE.L  D6,-(SP)                        | push insert ptr (D6)
-        MOVE.L  D5,-(SP)                        | push TEHandle
+        MOVE.L  D5,-(SP)                        | push len2 = D5 (bytes to insert)
         _Munger                                 | insert D5 bytes at selStart
         ADDQ.L  #0x4,SP                         | discard Munger result
         MOVE.L  teTextH(A3),A0                  | A0 = text handle
@@ -1597,7 +1038,7 @@ P_TERECAL_CONT_4_CONT_2:
         RTS                                     | return from text insert
 
 | ----------------------------------------------------------
-| TEInsert -- _TEInsert ($A9DE). Plus textedit.s 2344.
+| TEInsert -- _TEInsert ($A9DE).
 | Insert text at the current selection point. If selection is
 | not empty, the selected text is deleted first.
 TEInsert:
@@ -1617,12 +1058,12 @@ TEINSERT_EXIT:
         BRA.W    TECALTEXT_EXIT_2               | share TE epilog
 
 | ----------------------------------------------------------
-| TEKey -- _TEKey ($A9DC). Plus textedit.s 2367.
+| TEKey -- _TEKey ($A9DC).
 | Process a typed character: backspace deletes the char before
 | the cursor; otherwise the char is inserted at the selection.
 TEKey:
         BSR.W   XTRIMMEASURE_CONT_12            | set up TE state (A3=TERec, A2=params)
-        ST      0x47(A3)                        | set teJust flag (caret active)
+        ST      0x47(A3)                        | teLftCaret (+$47) := TRUE
         _ObscureCursor                          | hide cursor during typing
         MOVE    (A2),D1                         | D1 = key character
         CMPI.B  #0x8,D1                         | backspace?
@@ -1650,7 +1091,7 @@ TEKEY_DONE:
         BRA.W   TECALTEXT_EXIT_2                | share TE epilog
 
 | ----------------------------------------------------------
-| TEScroll -- _TEScroll ($A9DD). Plus textedit.s 2426.
+| TEScroll -- _TEScroll ($A9DD).
 | Scroll text within view rect by (dh, dv) offsets via _ScrollRect.
 | Redraws caret and uses temp clip rgn for affected area.
 TEScroll:
@@ -1704,7 +1145,7 @@ XTRIMMEASURE_CONT_6_CONT:
         BGE.B   XTRIMMEASURE_CONT_6_CONT_2      | past end: skip table lookup
         ADD     D0,D0                           | line *= 2 (word offset)
         BLT.B   XTRIM_CBMLOAD_NEG1              | negative: skip indexed load
-        MOVE    0x60(A3,D0.W),D3                | D3 = teCarets+D0 (width-cache lookup)
+        MOVE    0x60(A3,D0.W),D3                | D3 = lineStarts[line] (teLines +$60)
 XTRIM_CBMLOAD_NEG1:
         MOVEQ.L #-0x1,D4                        | D4 = -1 (default end)
         ADD     teLineHite(A3),D1               | D1 = bottom + lineHeight
@@ -1713,7 +1154,7 @@ XTRIM_CBMLOAD_NEG1:
         BSR.B   XTRIMMEASURE_CONT_6             | y -> end line number
         BGE.B   XTRIM_CBMLOAD_LAST_D7NEG1       | past end -> D4=-1, skip table
         ADD     D0,D0                           | line *= 2 (word offset)
-        MOVE    0x60(A3,D0.W),D4                | D4 = teCarets+D0 (width-cache lookup)
+        MOVE    0x60(A3,D0.W),D4                | D4 = lineStarts[line] (teLines +$60)
 XTRIM_CBMLOAD_LAST_D7NEG1:
         MOVEQ.L #-0x1,D7                        | D7=-1: draw mode
         BSR.W   XTRIMMEASURE_OK_CONT_2          | draw lines D3..D4
@@ -1722,198 +1163,3 @@ XTRIMMEASURE_CONT_6_CONT_2:
         TST.B   teCarOn(A3)                     | caret currently visible?
         BEQ.B   XTRIMMEASURE_CONT_6_RTS         | zero -> early RTS
         BRA.W   P_TERECAL_OK_3                  | -> P_TERECAL_CONT_4 via .W reach extender
-        MOVE.L  (SP)+,A0                        | pop return address
-        LEA.L     (ScrapSize).w,A1              | A1 = ScrapSize lomem
-        MOVE.L  A1,(SP)                         | push ScrapSize ptr to caller
-        JMP     (A0)                            | RTS
-| Called by: XTRIMMEASURE_CONT_6_CONT_4, XTRIMMEASURE_CONT_6_CONT_9, XTRIMMEASURE_CONT_6_CONT_11, XTRIMMEASURE_CONT_6_CONT_16, GETSCRAP_DONE
-XTRIMMEASURE_CONT_6_CONT_3:
-        MOVE.L  (SP)+,A1                        | A1 = saved return address
-        LINK    A6,#-0x58                       | set up stack frame
-        MOVEM.L D2-D7/A2-A4,-(SP)               | save working registers
-        MOVE.L  A1,-(SP)                        | re-push return address
-        MOVEM.L (ScrapSize).w,D4-D6/A2          | (ScrapSize).w -> D4-D6/A2
-        LEA.L     (ScrapHandle).w,A4            | A4 -> scrap globals (handle/state)
-        LEA.L     -0x50(A6),A0                  | A0 -> local IOParam block
-        MOVE.L  A0,A3                           | A3 = IOParam block ptr
-        MOVE.L  A2,18(A0)                       | ioFileName = scrap filename ptr
-        CLR     22(A0)                          | ioVRefNum = 0 (default volume)
-        CLR     26(A0)                          | ioPermssn = read/write
-        CLR.L   28(A0)                          | ioMisc = 0
-        TST     D6                              | scrap state set?
-        BNE.B   XTRIMMEASURE_CONT_6_CONT_8      | in memory or on disk: skip open
-XTRIMMEASURE_CONT_6_CONT_4:
-        _Open                                   | open Clipboard File
-        BEQ.B   XTRIMMEASURE_CONT_6_CONT_9      | success: return ioRefNum
-        CMPI    #-0x31,D0                       | dirNFErr (-49)?
-        BEQ.B   XTRIMMEASURE_CONT_6_CONT_8      | no dir: skip silently
-        CMPI    #-0x2B,D0                       | fnfErr (file not found)?
-        BNE.B   XTRIMMEASURE_CONT_6_CONT_9      | other err: return error
-        _Create                                 | file missing: create it
-        BNE.B   XTRIMMEASURE_CONT_6_CONT_9      | create failed: return error
-        BRA.B   XTRIMMEASURE_CONT_6_CONT_4      | retry _Open
-        BSR.B   XTRIMMEASURE_CONT_6_CONT_3      | set up scrap globals
-        BNE.B   XTRIMMEASURE_CONT_6_CONT_6      | setup err: return error
-        TST     D6                              | ScrapState
-        BLE.B   XTRIMMEASURE_CONT_6_CONT_5      | on disk/uninit: noErr
-        BSR.B   XTRIMMEASURE_CONT_6_CONT_4      | reopen Clipboard File
-        MOVE.L  D4,D0                           | D0 = ScrapSize
-        BSR.B   XTRIMMEASURE_CONT_6_CONT_10     | build IOParam from handle
-        _Write                                  | write scrap to file
-        BNE.B   XTRIMMEASURE_CONT_6_CONT_6      | write err: return error
-        MOVE.L  D5,A0                           | A0 = ScrapHandle
-        _DisposeHandle                          | free in-memory scrap
-        CLR.L   (A4)+                           | ioMisc/logical EOF = 0
-        CLR.L   (A4)+                           | ScrapCount|State = 0
-XTRIMMEASURE_CONT_6_CONT_5:
-        MOVEQ.L #0x0,D0                         | D0 = 0 (@ $FD4C)
-XTRIMMEASURE_CONT_6_CONT_6:
-        EXT.L    D0                             | sign-extend result
-        MOVE.L  D0,8(A6)                        | store result in stack frame
-        MOVEQ.L #0x0,D0                         | strip 0 param bytes
-XTRIMMEASURE_CONT_6_CONT_7:
-        MOVEM.L (SP)+,D2-D7/A2-A4               | restore working registers
-        UNLK    A6                              | tear down frame
-        MOVE.L  (SP)+,A0                        | pop return address
-        ADDA.W  D0,SP                           | SP += D0
-        JMP     (A0)                            | RTS
-XTRIMMEASURE_CONT_6_CONT_8:
-        MOVEQ.L #0x0,D0                         | D0 = noErr
-XTRIMMEASURE_CONT_6_CONT_9:
-        RTS                                     | return from setup
-        BSR.B   XTRIMMEASURE_CONT_6_CONT_3      | set up scrap globals
-        BNE.B   XTRIMMEASURE_CONT_6_CONT_6      | setup err: return error
-        TST     D6                              | scrap in memory?
-        BNE.B   XTRIMMEASURE_CONT_6_CONT_5      | yes: just return
-        MOVE.L  D4,D0                           | D0 = ScrapSize
-        _NewHandle                              | allocate scrap buffer
-        BNE.B   XTRIMMEASURE_CONT_6_CONT_6      | alloc fail: error
-        MOVE.L  A0,(A4)+                        | ScrapHandle = new handle
-        ADDQ.L  #0x1,(A4)+                      | ScrapState = 1 (in memory)
-        BSR.B   XTRIMMEASURE_CONT_6_CONT_11     | build IOParam from A0
-        _Read                                   | read scrap data from file
-        BRA.B   XTRIMMEASURE_CONT_6_CONT_6      | return result code
-XTRIMMEASURE_CONT_6_CONT_10:
-        MOVE.L  D5,A0                           | A0 = ScrapHandle
-XTRIMMEASURE_CONT_6_CONT_11:
-        MOVE.L  (A0),teSelStart(A3)             | ioBuffer = *handle
-        MOVE.L  D0,teActive(A3)                 | D7 = scrap entry type code
-        MOVE    #0x1,0x2C(A3)                   | ioPosMode = fsFromStart
-        CLR.L   teClikTime(A3)                  | 0x2E(A3) := 0
-        MOVE.L  A3,A0                           | A0 = IOParam block
-        RTS                                     | return with IOParam ready
-        BSR.W   XTRIMMEASURE_CONT_6_CONT_3      | set up scrap globals
-        BNE.B   XTRIMMEASURE_CONT_6_CONT_6      | setup err: return
-        MOVE.L  D0,(ScrapSize).w                | ScrapSize = 0
-        ADDQ.W  #0x8,4(A4)                      | ScrapCount += 8
-        TST     D6                              | scrap state?
-        BEQ.B   XTRIMMEASURE_CONT_6_CONT_14     | on disk: truncate file
-        BGT.B   XTRIMMEASURE_CONT_6_CONT_12     | in memory: resize handle
-        _NewHandle                              | uninit: allocate empty handle
-        BRA.B   XTRIMMEASURE_CONT_6_CONT_13     | store handle, set state
-XTRIMMEASURE_CONT_6_CONT_12:
-        MOVE.L  D5,A0                           | A2 -> VAR offset parameter
-        _SetHandleSize                          | shrink scrap to 0 bytes
-XTRIMMEASURE_CONT_6_CONT_13:
-        MOVE.L  A0,(A4)+                        | D0 = data length for this entry
-        MOVE    (A4)+,(A4)                      | store length as function result
-        BRA.B   XTRIMMEASURE_CONT_6_CONT_6      | return result code
-XTRIMMEASURE_CONT_6_CONT_14:
-        CLR.L   28(A0)                          | ioMisc = 0 (truncate to 0)
-        _SetEOF                                 | truncate Clipboard File
-        BRA.B   XTRIMMEASURE_CONT_6_CONT_6      | return result code
-XTRIMMEASURE_CONT_6_CONT_15:
-        TST     D6                              | scrap on disk?
-        BEQ.B   XTRIMMEASURE_CONT_6_CONT_16     | yes: read from file
-        MOVE.L  D5,A2                           | A1 = *hDest (dereferenced destination ptr)
-        MOVE.L  (A2),A0                         | A0 = *ScrapHandle
-        ADDA.L  D3,A0                           | A0 += offset D3
-        _BlockMove                              | copy D0 bytes to A1
-        BRA.B   XTRIMMEASURE_CONT_6_CONT_8      | return noErr
-XTRIMMEASURE_CONT_6_CONT_16:
-        BSR.B   XTRIMMEASURE_CONT_6_CONT_10     | build IOParam from ScrapHandle
-        MOVE.L  D3,0x2E(A0)                     | ioPosOffset = D3
-        MOVE.L  A1,0x20(A0)                     | ioBuffer = A1 (caller dest)
-        _Read                                   | read D0 bytes from file
-        RTS                                     | return Read result
-        BSR.W   XTRIMMEASURE_CONT_6_CONT_3      | set up scrap globals
-        BNE.B   GETSCRAP_ERR                    | setup err: return error
-        MOVEQ.L #-0x64,D0                       | D0 = noScrapErr (-100)
-        TST     D6                              | scrap initialized?
-        BMI.B   GETSCRAP_ERR                    | uninit: return error
-        MOVEQ.L #0x0,D3                         | D3 = scan offset (0)
-| scan through scrap entries looking for matching type
-GETSCRAP_SCAN:
-        CMP.L   D4,D3                           | D3 >= D4 (walked off end)?
-        BGE.B   GETSCRAP_NOTYPE                 | yes: report noTypeErr (-> $FE0A)
-        MOVEQ.L #0x8,D0                         | D0 = 8 (entry-type field offset)
-        LEA.L     -0x58(A6),A1                  | A1 = frame slot with search target
-        BSR.B   XTRIMMEASURE_CONT_6_CONT_15     | compare entry type
-        BNE.B   GETSCRAP_ERR                    | mismatch: -> continuation
-        ADDQ.L  #0x8,D3                         | advance to next scrap entry
-        MOVE.L  (A1)+,D7                        | D7 = entry ID
-        CMP.L   12(A6),D7                       | matches requested ID?
-        BEQ.B   GETSCRAP_FOUND                  | yes: -> found path
-        ADD.L   (A1)+,D3                        | skip entry data
-        ADDQ.L  #0x1,D3                         | round up by 1
-        BCLR    D0,D3                           | clear bit 0 (word-align)
-        BRA.B   GETSCRAP_SCAN                   | keep scanning
-| ----------------------------------------------------------
-| GETSCRAP_NOTYPE -- fall-through tail at $FE0A..$FE0D, reached by
-| the BGE.B above when GETSCRAP_SCAN walks past the end of the scrap
-| without finding the requested type. Sets the error code -102
-| (noTypeErr) and branches into package_mgr.s at $FE30 (mid-body of
-| GETSCRAP_ERR) to finish the _GetScrap epilogue.
-GETSCRAP_NOTYPE:
-        MOVEQ   #-0x66,D0                       | D0 = -102 (noTypeErr)
-        BRA.B   GETSCRAP_ERR+2                  | continue at $FE30 (package_mgr.s)
-GETSCRAP_FOUND:
-        MOVE.L  8(A6),A2                        | A2 -> VAR offset param
-        MOVE.L  D3,(A2)                         | store data offset
-        MOVE.L  (A1),D0                         | D0 = entry data length
-        MOVE.L  D0,20(A6)                       | store length as result
-        MOVE.L  16(A6),D1                       | D1 = hDest handle
-        BEQ.B   GETSCRAP_DONE                   | NIL: just return length
-        MOVE.L  D1,A0                           | A0 = hDest handle
-        _SetHandleSize                          | resize hDest to D0 bytes
-        BNE.B   GETSCRAP_ERR                    | resize failed: error
-        MOVE.L  (A1),D0                         | jump via A0
-        MOVE.L  (A0),A1                         | A1 = *hDest (dest ptr)
-        BSR.B   XTRIMMEASURE_CONT_6_CONT_15     | copy D0 bytes from scrap+D3
-        BEQ.B   GETSCRAP_DONE                   | success: return length
-GETSCRAP_ERR:
-        EXT.L    D0                             | sign-extend error code
-        MOVE.L  D0,20(A6)                       | store error as result
-GETSCRAP_DONE:
-        MOVEQ.L #0xC,D0                         | strip 12 param bytes
-        BRA.W   XTRIMMEASURE_CONT_6_CONT_7      | share scrap epilog
-        BSR.W   XTRIMMEASURE_CONT_6_CONT_3      | set up scrap globals
-        BSR.W   XTRIMMEASURE_CONT_6_CONT_10     | build IOParam from ScrapHandle
-        MOVEQ.L #-0x64,D0                       | D0 = noScrapErr (-100)
-        TST     D6                              | scrap initialized?
-        BMI.B   GETSCRAP_ERR                    | uninit: error
-        MOVEQ.L #0x8,D0                         | header size = 8 bytes
-        LEA.L     12(A6),A0                     | A0 -> theType param
-        BSR.B   SCRAP_APPEND                    | append type+length header
-        MOVE.L  8(A6),A0                        | A0 = source data ptr
-        MOVE.L  16(A6),D0                       | D0 = data length
-        MOVEQ.L #-0x2,D1                        | D1 = even-mask
-        ADDQ.L  #0x1,D0                         | length += 1 for round-up
-        AND.L   D1,D0                           | align length to even
-        BSR.B   SCRAP_APPEND                    | append data bytes
-        MOVE.L  D4,-(A4)                        | ScrapSize = D4 (new total)
-        BRA.B   GETSCRAP_ERR                    | epilog
-SCRAP_APPEND:
-        MOVE.L  D4,0x2E(A3)                     | ioPosOffset = current end
-        ADD.L   D0,D4                           | D4 += D0 (new size)
-        TST     D6                              | scrap on disk?
-        BEQ.B   SCRAP_WRITE_FILE                | yes: write to file
-        MOVE.L  D5,A1                           | A1 = ScrapHandle
-        _PtrAndHand                             | append A0[D0] to handle
-        RTS                                     | return from append
-SCRAP_WRITE_FILE:
-        MOVE.L  A0,teSelStart(A3)               | ioBuffer = source A0
-        MOVE.L  D0,teActive(A3)                 | ioByteCount = D0
-        MOVE.L  A3,A0                           | A0 = IOParam block
-        _Write                                  | write D0 bytes at end of file
-        RTS                                     | return Write result

@@ -1,12 +1,15 @@
 | Resource Manager
 |
-| Manages resources in resource files (including the ROM resource map
-| at $176F8). Provides GetResource, LoadResource, ReleaseResource,
-| AddResource, WriteResource, OpenResFile, CloseResFile, and
-| resource map manipulation routines.
-|
-| The ROM itself contains a resource fork with DRVR, FONT, CURS,
-| PACK, WDEF, MDEF, and SERD resources.
+| Apple source: ResourceMgr.a (MacSEROM.lst module RMGR). It starts with
+| the empty-map template RESOURCE_MAP (used by CreateResFile), then
+| InitResources, RsrcZoneInit, the file calls (CreateResFile, OpenResFile,
+| UseResFile, Get/SetResFileAttrs, UpdateResFile, CloseResFile), the
+| search calls (CountResources, GetIndResource, CountTypes, GetIndType,
+| UniqueID, GetResource, GetNamedResource) and the resource calls
+| (LoadResource, ReleaseResource, DetachResource, ChangedResource,
+| WriteResource, HomeResFile, CurResFile, Get/SetResAttrs,
+| Get/SetResInfo, AddResource, AddReference, RmveResource,
+| RmveReference, ResError). The 64K ROM has no resources of its own.
 |
 | Resource file map structure (on disk and in memory):
 | Offset 0: reserved for data offset LongInt
@@ -56,7 +59,15 @@
 | References:
 | Inside Macintosh Vol I, Ch 5: The Resource Manager
 
-| ROM section: src/toolbox/resource_mgr.asm
+RESOURCE_MAP:                                   | 32-byte param blob + BSR to helper
+        .short  0x0000, 0x0100                  | $D724-$D727
+        .short  0x0000, 0x0100                  | $D728-$D72B
+        .short  0x0000, 0x0000                  | $D72C-$D72F
+        .short  0x0000, 0x001E                  | $D730-$D733
+        .short  0x0000, 0x0000                  | $D734-$D737
+        .short  0x0000, 0x0000                  | $D738-$D73B
+        .short  0x001C, 0x001E                  | $D73C-$D73F
+        .short  0xFFFF, 0x0000                  | $D740-$D743
 | _GetIndResource inner loop: advance to next resource of matching type
 | Called after RETURNS_24 sets up type list scan; iterates across types and maps
 
@@ -72,7 +83,7 @@ InitResources:
         MOVE.L  (A3),-(SP)                      | push current zone for restore
         MOVE.L  (SysZone).w,(A3)                | switch to system zone
         LEA.L     (SysResName).w,A1             | A1 = "System" filename
-        BSR.B   DRAWCONTROLS_NEXT_12            | open file + allocate map (NewMap)
+        BSR.B   NewMap                          | open file + allocate map (NewMap)
         MOVE.L  (SP)+,(A3)                      | restore zone
         MOVE    D6,8(A6)                        | store System refnum result
         TST.L   D0                              | NewMap success?
@@ -82,39 +93,39 @@ InitResources:
         MOVE.L  A2,(A0)+                        | SysMapHndl = SysMap handle
         MOVE    D6,(A0)+                        | SysMap = System refnum
         MOVE    D6,(A0)                         | CurMap = System refnum
-        BSR.B   DRAWCONTROLS_NEXT_8             | preload flagged resources
+        BSR.B   INITRES_LOADALL                 | preload flagged resources
 INITRESOURCES_EXIT:
         BRA.W   CMP_WRITE_MAP_CONT_15           | epilog
-DRAWCONTROLS_NEXT_8:
+INITRES_LOADALL:
         ST      (ResLoad).w                     | (ResLoad).w := -1 (true)
         BSR.W   RETURNS_21                      | walk all type entries in map
         BSR.W   STDMAPENTRY_CONT_2              | start ref-entry scan
-        BMI.B   DRAWCONTROLS_NEXT_11            | empty -> done
-DRAWCONTROLS_NEXT_9:
-        CLR.L   contrlRect(A2)                  | 8(A2) := 0
-        BTST    #0x2,contrlOwner(A2)            | preload flag (bit 2) set?
-        BEQ.B   DRAWCONTROLS_NEXT_10            | no -> skip resource
+        BMI.B   INITRES_LOADALL_DONE            | empty -> done
+INITRES_LOADALL_LOOP:
+        CLR.L   0x8(A2)                         | rHndl (+$8) := NIL (map just read from disk)
+        BTST    #0x2,0x4(A2)                    | resPreload (bit 2) set in rAttr (+$4)?
+        BEQ.B   INITRES_LOADALL_NEXT            | no -> skip resource
         BSR.W   RETURNS_28_CONT                 | yes -> load resource
-DRAWCONTROLS_NEXT_10:
+INITRES_LOADALL_NEXT:
         BSR.W   STDMAPENTRY_CONT_3              | advance to next ref entry
-        BEQ.B   DRAWCONTROLS_NEXT_9             | more -> continue scan
-DRAWCONTROLS_NEXT_11:
+        BEQ.B   INITRES_LOADALL_LOOP            | more -> continue scan
+INITRES_LOADALL_DONE:
         RTS                                     | done preloading flagged resources
-DRAWCONTROLS_NEXT_12:
+NewMap:
         MOVEQ.L #0x10,D0                        | allocate 16-byte map handle
         _NewHandle                              | map header fits in 16 bytes
         BMI.B   NEWMAP_ERR_3                    | NewHandle failed -> error exit
         MOVE.L  A0,A2                           | A2 = map handle
         BSR.W   CHECKLOAD_CONT_9                | set up IOParam for filename
         BSR.W   OPENRES_FORK                    | _OpenRF the resource fork
-        BEQ.B   DRAWCONTROLS_NEXT_13            | success -> read map
+        BEQ.B   NEWMAP_GETEOF                   | success -> read map
         CMPI    #-0x31,D0                       | error eofErr (-49)?
         BNE.B   NEWMAP_ERR_2                    | other error -> dispose handle
         CLR     (ResErr).w                      | eof is non-fatal -> clear
         MOVE.L  A2,A0                           | A0 = map handle
         _DisposeHandle                          | free unused map handle
         RTS                                     | return with no map
-DRAWCONTROLS_NEXT_13:
+NEWMAP_GETEOF:
         _GetEOF                                 | get fork length into ioLEOF
         MOVE    #-0x27,(ResErr).w               | assume mapReadErr (-39)
         TST.L   ioLEOF(A0)                      | resource fork EOF = 0?
@@ -169,9 +180,9 @@ RsrcZoneInit:
         BSR.W   RETURNS_24                      | walk type list
         BMI.B   RSRCZONEINIT_EXIT               | empty - skip walk
 RSRCZONEINIT_HANDLE_LOOP:
-        BTST    #0x6,contrlOwner(A2)            | bit 6 = locked-in-ROM-map flag
-        BNE.B   RSRCZONEINIT_HANDLE_NEXT        | locked - keep handle
-        CLR.L   contrlRect(A2)                  | clear handle ptr (purged with zone)
+        BTST    #0x6,0x4(A2)                    | resSysHeap (bit 6) set in rAttr (+$4)?
+        BNE.B   RSRCZONEINIT_HANDLE_NEXT        | in the system heap - keep the handle
+        CLR.L   0x8(A2)                         | rHndl (+$8) := NIL (handle was in the app heap)
 RSRCZONEINIT_HANDLE_NEXT:
         BSR.W   RETURNS_28                      | advance to next ref entry
         BPL.B   RSRCZONEINIT_HANDLE_LOOP        | more entries - continue
@@ -192,7 +203,7 @@ RSRCZONEINIT_NEXT:
 OPENRES_FORK:
         MOVE.L  A1,ioFileName(A0)               | ioFileName = filename ptr
         CLR     26(A0)                          | ioVersNum / ioPermssn = 0 (word-aligned)
-        CLR.L   ioLEOF(A0)                      | ioLEOF = 0 (also zeros ioMisc tail)
+        CLR.L   ioOwnBuf(A0)                    | ioOwnBuf = NIL (no private buffer)
         CLR     ioVRefNum(A0)                   | ioVRefNum = 0 (default volume)
         _OpenRF                                 | open resource fork by name
         MOVE    ioRefNum(A0),D6                 | D6 = ioRefNum from PB
@@ -239,7 +250,7 @@ CREATERES_CHKEOF_CONT:
 OpenResFile:
         BSR.W   RESMGR_PROLOG                   | StdEntry: link A6, save regs
         MOVE.L  (A0),A1                         | A1 = filename pointer
-        BSR.W   DRAWCONTROLS_NEXT_12            | open file, read map into memory
+        BSR.W   NewMap                          | open file, read map into memory
         MOVE    D6,12(A6)                       | store refnum as function result
         BMI.B   CREATERES_CHKEOF_ERR            | NewMap failed, skip linking
         MOVE    D6,(CurMap).w                   | set as current resource file
@@ -247,7 +258,7 @@ OpenResFile:
         BEQ.B   CREATERES_CHKEOF_ERR            | no, skip
         MOVE.L  (TopMapHndl).w,16(A1)           | new map->nextMap = old TopMap
         MOVE.L  A2,(TopMapHndl).w               | TopMapHndl = new map
-        BSR.W   DRAWCONTROLS_NEXT_8             | preload flagged resources
+        BSR.W   INITRES_LOADALL                 | preload flagged resources
 CREATERES_CHKEOF_ERR:
         BRA.W   RESMGR_EXIT_5                   | ResMgr StdExit (UNLK + return)
 
@@ -263,7 +274,7 @@ UseResFile:
 | Returns the resFileAttrs byte for a resource file refnum.
 GetResFileAttrs:
         BSR.B   STDMAPENTRY                     | find map by refnum
-        MOVE.B  contrlMax(A3),11(A6)            | return mapAttr byte
+        MOVE.B  0x16(A3),11(A6)                 | return map attributes (mAttr, +$16)
         BRA.B   STDMAPENTRY_CONT                | epilog
 
 | ----------------------------------------------------------
@@ -274,7 +285,7 @@ SetResFileAttrs:
         MOVE    10(A6),D6                       | D6 = refnum from stack frame
         BSR.W   RESMGR_CONT                     | GetMap: find map by refnum
         BMI.B   CREATERES_CHKEOF_SKIP_2         | map not found, skip
-        MOVE.B  9(A6),contrlMax(A3)             | set map attributes byte
+        MOVE.B  9(A6),0x16(A3)                  | set map attributes (mAttr, +$16)
 CREATERES_CHKEOF_SKIP_2:
         BRA.B   CREATERES_CHKEOF_ERR            | ResMgr StdExit
 
@@ -301,7 +312,7 @@ STDMAPENTRY_CONT_2:
         MOVEQ.L #-0x1,D0                        | D0 = -1 (start before any entry)
         BRA.B   FINDNEXT_ENTER                  | enter FindNext loop
 STDMAPENTRY_CONT_3:
-        MOVE.L  contrlOwner(A2),D0              | D0 = current entry attrs+offset
+        MOVE.L  0x4(A2),D0                      | D0 = current entry attrs+offset (rLocn, +$4)
         AND.L   (Lo3Bytes).w,D0                 | mask to 24-bit data offset
 FINDNEXT_ENTER:
         MOVEM.L D2-D7/A3-A4,-(SP)               | save registers
@@ -314,9 +325,9 @@ FINDNEXT_ENTER:
         MOVEQ.L #-0x1,D7                        | D7 = 0x7FFFFFFF (max offset)
         LSR.L   #0x1,D7                         | largest positive long
 FINDNEXT_LOOP:                                  | iterate through entries
-        TST.B    contrlOwner(A2)                | attr byte high bit set (deleted)?
-        BMI.B    STDMAPENTRY_SKIP               | yes -> skip deleted entry
-        MOVE.L  contrlOwner(A2),D0              | get attrs+offset of this entry
+        TST.B    0x4(A2)                        | resSysRef (bit 7 of rAttr, +$4) set?
+        BMI.B    STDMAPENTRY_SKIP               | yes -> skip (system reference, no data here)
+        MOVE.L  0x4(A2),D0                      | get attrs+offset of this entry (rLocn, +$4)
         AND.L   (Lo3Bytes).w,D0                 | mask to 24-bit data offset
         CMP.L   D0,D2                           | offset > minimum?
         BGE.B   STDMAPENTRY_SKIP                | no, skip
@@ -330,7 +341,7 @@ STDMAPENTRY_SKIP:
 FINDNEXT_DONE:
         MOVE.L  D6,A2                           | A2 = best matching ref entry
         MOVE.L  D7,D0                           | D0 = best offset found
-        MOVE.L  contrlOwner(A2),D7              | get attrs+offset of best entry
+        MOVE.L  0x4(A2),D7                      | get attrs+offset of best entry (rLocn, +$4)
         AND.L   (Lo3Bytes).w,D7                 | mask to data offset
         CMP.L   D0,D7                           | set Z if valid match found
 FINDNEXT_RTS:
@@ -338,7 +349,7 @@ FINDNEXT_RTS:
         RTS                                     | return Z=1 if entry found
 FINDNEXT_OFS:
         MOVEM.L D7-A2,-(SP)                     | save D7 + A2
-        MOVE.L  contrlOwner(A2),D0              | D0 = current entry attrs+offset
+        MOVE.L  0x4(A2),D0                      | D0 = current entry attrs+offset (rLocn, +$4)
         AND.L   (Lo3Bytes).w,D0                 | mask to 24-bit data offset
         MOVE.L  D0,D7                           | D7 = current data offset
         BSR.B   STDMAPENTRY_CONT_3              | find next greater offset
@@ -367,14 +378,14 @@ UpdateResFile:
         BSR.W   STDMAPENTRY_CONT_2              | start ref-entry scan
         BMI.B   UPDRES_CHECK_COMPACT            | empty map - skip walk
 UPDRES_WRITE_LOOP:
-        BTST    #0x1,contrlOwner(A2)            | changed flag (bit 1) set?
+        BTST    #0x1,0x4(A2)                    | resChanged (bit 1) set in rAttr (+$4)?
         BEQ.B   UPDRES_WRITE_NEXT               | no -> skip write
         BSR.W   CHECKLOAD_CONT_8                | _WriteResource for this entry
 UPDRES_WRITE_NEXT:
         BSR.W   STDMAPENTRY_CONT_3              | advance to next ref entry
         BEQ.B   UPDRES_WRITE_LOOP               | more entries -> continue
 UPDRES_CHECK_COMPACT:
-        BCLR    #0x6,contrlMax(A3)              | test+clear mapCompact flag
+        BCLR    #0x6,0x16(A3)                   | test+clear mapCompact in mAttr (+$16)
         BEQ.B   CMP_WRITE_MAP                   | flag was clear -> just write map
         ST      (ResLoad).w                     | (ResLoad).w := -1 (true)
         BSR.W   STDMAPENTRY_CONT_2              | FindNext from start
@@ -385,7 +396,7 @@ UPDRES_ADJ_LOOP:
         TST.L   D7                              | any gap to compact?
         BEQ.B   UPDRES_ADJ_NEXT                 | no gap -> skip move
         BSR.W   RETURNS_28_CONT                 | move resource data forward
-        LEA.L     contrlOwner(A2),A0            | A0 = &4(A2)
+        LEA.L     0x4(A2),A0                    | A0 = &rLocn (+$4): attr byte + 3-byte offset
         MOVE.B  (A0),D0                         | D0 = saved attr byte
         CLR.B   (A0)                            | isolate offset bytes
         ADD.L   D7,(A0)                         | (A0) += D7
@@ -404,11 +415,11 @@ UPDRES_ADJ_NEXT:
 UPDRES_FIXUP:
         ADD.L   D7,8(A3)                        | 8(A3) += D7
 CMP_WRITE_MAP:
-        BCLR    #0x5,contrlMax(A3)              | clear+test mapChanged flag
+        BCLR    #0x5,0x16(A3)                   | clear+test mapChanged in mAttr (+$16)
         BEQ.B   CMP_WRITE_MAP_SKIP              | was not set, skip map rewrite
-        MOVE.L  8(A3),D2                        | D2 = data fork length
-        ADD.L   (A3),D2                         | D2 += data fork offset = map file pos
-        MOVE.L  D2,contrlOwner(A3)              | update map offset in map header
+        MOVE.L  8(A3),D2                        | D2 = resource data length (dataSize, +$8)
+        ADD.L   (A3),D2                         | D2 += resDataOffset = map file position
+        MOVE.L  D2,0x4(A3)                      | update map offset in header (resMapOffset, +$4)
         MOVE.L  12(A3),D0                       | D0 = map length (header field at +0xC)
         MOVE.L  A3,D1                           | D1 = map data source address
         BSR.W   CHECKLOAD_EMPTY_2               | write map data to file at position D2
@@ -435,9 +446,9 @@ CMP_WRITE_MAP_CONT:
         _UpdateResFile                          | flush map + changed resources
         BSR.W   RETURNS_24                      | walk type list of this map
 CMP_WRITE_MAP_CONT_2:
-        TST.B   contrlOwner(A2)                 | attr byte high bit set (deleted)?
-        BMI.B   CMP_WRITE_MAP_CONT_3            | yes -> skip
-        MOVE.L  contrlRect(A2),D0               | D0 = resource handle from entry
+        TST.B   0x4(A2)                         | resSysRef (bit 7 of rAttr, +$4) set?
+        BMI.B   CMP_WRITE_MAP_CONT_3            | yes -> skip (system reference, no handle)
+        MOVE.L  0x8(A2),D0                      | D0 = resource handle (rHndl, +$8)
         BEQ.B   CMP_WRITE_MAP_CONT_3            | nil handle -> skip
         MOVE.L  D0,-(SP)                        | push handle
         _ReleaseResource                        | dispose loaded resource
@@ -445,7 +456,7 @@ CMP_WRITE_MAP_CONT_3:
         BSR.W   RETURNS_28                      | advance to next ref entry
         BPL.B   CMP_WRITE_MAP_CONT_2            | more entries -> continue
         BSR.W   RESMGR_CONT                     | find this map's predecessor in chain
-        MOVE.L  16(A3),A0                       | A0 = this map's next-map link
+        MOVE.L  16(A3),A0                       | A0 = this map's next-map link (mNext, +$10)
         TST.L   D0                              | was predecessor found?
         BNE.B   CMP_WRITE_MAP_OK                | yes, unlink via predecessor
         MOVE.L  A0,(TopMapHndl).w               | no predecessor: set TopMap to next
@@ -537,7 +548,7 @@ CMP_WRITE_MAP_CONT_10:
         BSR.W   RETURNS_27                      | walk ref entries of this type
 CMP_WRITE_MAP_CONT_11:
         TST.B   0x4(A2)                         | test attr byte of this ref entry
-        BMI.B   GETINDRES_SCAN_SKIP             | deleted/discard -> skip
+        BMI.B   GETINDRES_SCAN_SKIP             | resSysRef (bit 7) set -> skip (reference entry)
         SUBQ.W  #0x1,D7                         | count this entry (decrement D7)
         BEQ.B   CMP_WRITE_MAP_CONT_13           | reached desired index -> exit
 GETINDRES_SCAN_SKIP:
@@ -637,10 +648,20 @@ GetIndType:
 CNTTYPE_ENTRY_LP_EXIT:
         UNLK    A6                              | tear down frame
         BRA.B   CMP_WRITE_MAP_OK_2              | jump to ResMgr epilog
-        BSR.W   RESMGR_PROLOG                   | StdEntry: link A6, save regs
-        MOVE    (Ticks_LoWord).w,D7             | D7 = Ticks low word (for UniqueID)
+| ----------------------------------------------------------
+|
+| _UniqueID ($A9C1): return a resource ID not used in any open resource file
+| Pascal: FUNCTION UniqueID(theType: ResType): INTEGER;
+| Candidate ID := (previous candidate + Random) AND $7FFF, starting from
+| the low word of Ticks. Walks the whole map chain from TopMapHndl and
+| retries (UNIQID_RETRY) as soon as a resource of theType with that ID is
+| found. The result is in 0..32767 (0 is not excluded).
+|
 UniqueID:
-        BSR.W   RETURNS_20                      | set up map chain traversal
+        BSR.W   RESMGR_PROLOG                   | StdEntry: link A6, save regs
+        MOVE    (Ticks_LoWord).w,D7             | D7 = Ticks low word (initial seed)
+UNIQID_RETRY:
+        BSR.W   RETURNS_20                      | start at the top map (TopMapHndl)
         SUBQ.W  #0x2,SP                         | allocate space for Random result
         _Random                                 | generate random word on stack
         ADD     (SP)+,D7                        | add randomness to seed
@@ -652,7 +673,7 @@ UNIQID_CHECK:
         BMI.B   UNIQID_NEXTMAP                  | type not present, ID is unique here
         BSR.W   RETURNS_27                      | get ref list for this type
         BSR.W   RESMGR_LOOP_4                   | search ref list for ID D2
-        BEQ.B   UniqueID                        | ID already taken, retry with new seed
+        BEQ.B   UNIQID_RETRY                    | ID already taken, retry with new seed
 UNIQID_NEXTMAP:
         BSR.W   RESMGR_NEXT_2                   | advance to next map in chain
         BEQ.B   UNIQID_CHECK                    | more maps - keep checking uniqueness
@@ -660,7 +681,7 @@ UNIQID_NEXTMAP:
         BRA.W   RESMGR_EXIT_5                   | epilogue: pop params, return
 
 | ----------------------------------------------------------
-| GetResource -- _GetResource ($A9A0). Plus control_mgr.s 1039.
+| GetResource -- _GetResource ($A9A0).
 | Pascal: function GetResource(theType: ResType; theID: INTEGER): Handle;
 | Searches the resource map chain for a resource by type and ID.
 | Plus 1986 added a CurMap fast-path (try current map first via
@@ -685,7 +706,7 @@ GETRES_NEXTMAP:
         BRA.W   CMP_WRITE_MAP_OK_2              | not found in any map - exit
 
 | ----------------------------------------------------------
-| GetNamedResource -- _GetNamedResource ($A9A1). Plus control_mgr.s 1079.
+| GetNamedResource -- _GetNamedResource ($A9A1).
 | Pascal: function GetNamedResource(theType: ResType; name: Str255): Handle;
 | Searches the resource map chain for a resource by type and name.
 | Plus 1986 uses the same CurMap fast-path optimization as
@@ -741,7 +762,7 @@ RESMGR_CONT_2:
         MOVEQ.L #0x0,D0                         | D0 = 0 (not used, sets Z for entry)
         BRA.B   RESMGR_LOOP                     | enter chain walk to find refNum D6
 RESMGR_FOUND_2:
-        MOVE.L  16(A3),D0                       | get next map handle from chain link
+        MOVE.L  16(A3),D0                       | get next map handle from chain link (mNext, +$10)
         BEQ.W   RESMGR_ERR                      | end of chain - refNum not found
         EXG     D0,A4                           | A4 = next map handle
 RESMGR_LOOP:
@@ -764,11 +785,11 @@ RESMGR_NEXT_2:
 | ----------------------------------------------------------
 | RETURNS_23 - GetTypeList: set up type list pointer for current map
 | Dereferences the map handle and advances to the type list.
-| VISRGN offset = 0x18, which is the "offset to type list" field in map.
+| The map's mTypes field (+$18) holds the offset to the type list.
 | Returns: A2=first type entry, A3=type list base, D5=numTypes-1 (or -1).
 RETURNS_23:
         MOVE.L  (A4),A3                         | dereference map handle
-        ADDA.W  24(A3),A3                       | add type list offset (at map+0x18)
+        ADDA.W  24(A3),A3                       | add type list offset (mTypes, +$18)
         MOVE.L  A3,A2                           | A2 = type list pointer
         MOVE    (A2)+,D5                        | D5 = number of types minus 1
         RTS                                     | return type list in A2 and count in D5
@@ -792,7 +813,7 @@ RESMGR_LOOP_4:
         BRA.B   RESMGR_ERR                      | ID not found - return Z=0
 | Called by: CMP_WRITE_MAP_CONT_10, UNIQID_CHECK, GETRES_FIND_TYPE, GETNAMED_LOOP, RETURNS_24_CONT_4 (and 3 more)
 RETURNS_26:
-        BSR.B   RETURNS_23                      | remove VBL sound task
+        BSR.B   RETURNS_23                      | get type list pointer + count in D5
         BMI.B   RESMGR_ERR                      | empty type list - return N=1
 RESMGR_LOOP_5:
         CMP.L   (A2),D3                         | compare current type with target D3
@@ -830,7 +851,7 @@ RESMGR_EPILOG:
         BNE.B   RESMGR_EPILOG_RTS               | handler installed - call it
         ADDQ.W  #0x4,SP                         | no handler - drop pushed nil
 RESMGR_EPILOG_RTS:
-        RTS                                     | return to caller
+        RTS                                     | return from RESMGR_EPILOG_RTS
 | Called by: RESMGR_LOOP_4, RESMGR_LOOP_5, RETURNS_24_CONT_6, RESMGR_EMPTY, RESMGR_CONT_16_EXIT
 RESMGR_ERR:
         MOVEQ.L #-0x1,D0                        | set N=1, Z=0 (not found)
@@ -847,8 +868,8 @@ RETURNS_24_CONT_4:
         BSR.B   RETURNS_27                      | get ref list for this type
 RETURNS_24_CONT_5:
         TST.B   4(A2)                           | test attributes byte (high bit)
-        BPL.B   RETURNS_24_CONT_6               | not overridden - skip ID compare
-        CMP     8(A2),D2                        | compare ref's resID with D2
+        BPL.B   RETURNS_24_CONT_6               | resSysRef clear: not a reference - next entry
+        CMP     8(A2),D2                        | refID (+$8) = ID of this system resource?
         BEQ.B   RESMGR_EXIT_3                   | ID match - return Z=1 found
 RETURNS_24_CONT_6:
         BSR.B   RETURNS_28                      | advance to next ref entry
@@ -866,7 +887,7 @@ RESMGR_CONT_13:
         BMI.B   RESMGR_EMPTY                    | type list empty - try next map
 FINDRES_HANDLE_LOOP:
         TST.B   4(A2)                           | test attributes byte
-        BMI.B   FINDRES_HANDLE_NEXT             | ref unloaded - skip
+        BMI.B   FINDRES_HANDLE_NEXT             | resSysRef: +$8 holds no handle - skip
         CMPA.L  8(A2),A1                        | compare ref's handle with A1
         BEQ.B   RESMGR_EXIT_3                   | handle matches - return Z=1
 FINDRES_HANDLE_NEXT:
@@ -906,14 +927,14 @@ RETURNS_28:
         MOVE    6(A3,D0.W),D4                   | D4 = numItems-1 for new type
         MOVEQ.L #0x1,D0                         | set Z=0 (more entries available)
         RTS                                     | return Z=1 (more refs to scan)
-| Called by: DRAWCONTROLS_NEXT_9, UPDRES_ADJ_LOOP, CMP_WRITE_MAP_CONT_14, GETNAMED_FOUND, LOADRESOURCE_FOUND
+| Called by: INITRES_LOADALL_LOOP, UPDRES_ADJ_LOOP, CMP_WRITE_MAP_CONT_14, GETNAMED_FOUND, LOADRESOURCE_FOUND
 RETURNS_28_CONT:
         MOVE.B  4(A2),D1                        | D1 = resource attributes byte
-        BPL.B   RETURNS_28_CONT_3               | not overridden - go normal load
-        BSR.B   RETURNS_28_NO                   | get resource size, reserve if locked
-        ADDQ.W  #0x8,A2                         | A2 = pointer to handle field
-        MOVE    (A2),D1                         | D1 = override flags
-        BSR.B   RESMGR_CONT_16                  | get pointer to resource name
+        BPL.B   RETURNS_28_CONT_3               | resSysRef clear: normal load
+        BSR.B   RETURNS_28_NO                   | swap CurMap and SysMap (undone after the load)
+        ADDQ.W  #0x8,A2                         | A2 -> refID (+$8) / refNameOff (+$A)
+        MOVE    (A2),D1                         | D1 = refID (ID of the referenced resource)
+        BSR.B   RESMGR_CONT_16                  | A0 = its name (refNameOff at A2+2)
         BMI.B   RETURNS_28_CONT_2               | no name - load by ID instead
         SUBQ.W  #0x4,SP                         | reserve handle slot on stack
         MOVE.L  D3,-(SP)                        | push resource type
@@ -936,8 +957,8 @@ RETURNS_28_NO:
 RETURNS_28_CONT_3:
         MOVE.L  (TheZone).w,-(SP)               | save current heap zone
         BTST    #0x6,D1                         | test resSysHeap bit
-        BEQ.B   CHECKLOAD_NO                    | NIL - don't store in ref entry
-        MOVE.L  (SysZone).w,(TheZone).w         | store handle in ref entry (offset 8)
+        BEQ.B   CHECKLOAD_NO                    | resSysHeap clear: keep the current zone
+        MOVE.L  (SysZone).w,(TheZone).w         | resSysHeap: load into the system heap
 CHECKLOAD_NO:
         MOVE.L  8(A2),A0                        | A0 = resource handle from ref entry
         SUBA.L  (A4),A3                         | make A3 relative to map base (relocatable)
@@ -999,14 +1020,14 @@ CHECKLOAD_SKIP_2:
         MOVE.L  (SP)+,(TheZone).w               | restore saved heap zone
         RTS                                     | return to caller after storing handle
 CHECKLOAD_SKIP_2_CONT:
-        LSL.B   #0x3,D1                         | shift resAttr: purgeable bit -> bit 7
-        BPL.B   CHECKLOAD_SKIP_2_NO             | not purgeable - use non-purgeable flags
-        MOVEQ.L #-0x7F,D1                       | D1 = 0x81: purgeable + resource flag
+        LSL.B   #0x3,D1                         | resLocked (bit 4) -> bit 7, resPurgeable (bit 5) -> X
+        BPL.B   CHECKLOAD_SKIP_2_NO             | not locked
+        MOVEQ.L #-0x7F,D1                       | D1 = $81: locked
         BRA.B   CHECKLOAD_CONT_4                | go set handle flags
 CHECKLOAD_SKIP_2_NO:
         MOVEQ.L #-0x80,D1                       | D1 = -128 (@ $DE5C)
 CHECKLOAD_CONT_4:
-        ROXR.B  #0x2,D1                         | position lock bit from resAttr into handle flags
+        ROXR.B  #0x2,D1                         | D1 = lock (7) | purge from X (6) | resource (5)
         ANDI.B  #0x1F,(A0)                      | clear upper 3 flag bits of master pointer
         OR.B    D1,(A0)                         | set resource/purgeable/lock flags on handle
         RTS                                     | return with updated handle flags
@@ -1063,9 +1084,9 @@ CHECKLOAD_OK_2:
         MOVE.L  (SP)+,D0                        | D0 = data size to write
         BSR.B   CHECKLOAD_EMPTY_2               | _Write resource data to file
         BRA.B   CHECKLOAD_EXIT_2                | restore regs and return
-| Called by: DRAWCONTROLS_NEXT_12, NEWMAP_ERR, CreateResFile, CMP_WRITE_MAP_NO, CHECKLOAD_CONT_10 (and 3 more)
+| Called by: NewMap, NEWMAP_ERR, CreateResFile, CMP_WRITE_MAP_NO, CHECKLOAD_CONT_10 (and 3 more)
 CHECKLOAD_CONT_9:
-        LEA.L   -0x1A(A6),A0                    | A0 = IOParam block in local frame
+        LEA.L   -0x1A(A6),A0                    | A0 -> ioRefNum (I/O block +$18 = -$1A(A6))
         MOVE    D6,(A0)+                        | ioRefNum = file reference number
         ADDQ.W  #0x6,A0                         | skip ioPermssn/ioMisc fields
         MOVE.L  D1,(A0)+                        | ioBuffer = data buffer address
@@ -1090,7 +1111,7 @@ CHECKLOAD_ERR_3:
         MOVE    D0,(ResErr).w                   | stash _Write error code
 CHECKLOAD_EXIT_3:
         MOVEM.L (SP)+,D0/A0-A1                  | restore saved regs
-        RTS                                     | return to caller
+        RTS                                     | return from CHECKLOAD_EXIT_3
 CHECKLOAD_OK_3:
         MOVEM.L D0/A0-A1,-(SP)                  | save working registers
         BSR.B   CHECKLOAD_OK_4                  | verify file mode is open-for-write
@@ -1186,7 +1207,7 @@ CHECKLOAD_SKIP_3_CONT:
         ADDA.L  (A4),A3                         | A3 := absolute type-list ptr
         ADDA.L  (A4),A2                         | A2 := absolute ref-entry ptr
         MOVEM.L (SP)+,D0-D2/A0-A1               | restore working registers
-        RTS                                     | return to caller
+        RTS                                     | return from CHECKLOAD_SKIP_3_CONT
 
 | ----------------------------------------------------------
 | LoadResource -- _LoadResource ($A9A2). Plus 1062.
@@ -1212,7 +1233,7 @@ LOADRESOURCE_SKIP:
 LOADRESOURCE_EXIT:                              | @ $E000 (cleanup pushed by PEA above)
         MOVEM.L (SP)+,D0/A0                     | restore caller's D0/A0
         MOVE.L  (SP)+,(SP)                      | collapse: discard PEA-pushed return addr
-        RTS                                     | return to caller
+        RTS                                     | return from LOADRESOURCE_EXIT
 
 | ----------------------------------------------------------
 | ReleaseResource -- _ReleaseResource ($A9A3). Plus 1103.
@@ -1305,7 +1326,7 @@ HOMERESFILE_EXIT:
 CurResFile:
         MOVE    (CurMap).w,4(SP)                | return CurMap refNum to caller
 WRITERESOURCE_EXIT:
-        RTS                                     | return to caller
+        RTS                                     | return from WRITERESOURCE_EXIT
 
 | ----------------------------------------------------------
 | GetResAttrs -- _GetResAttrs ($A9A6). Plus 1313.
@@ -1435,7 +1456,7 @@ AddResource:
         SUBQ.L  #0x8,A2                         | back up A2 to ref entry start
         MOVE.L  8(A6),A0                        | A0 = resource name Pascal string
         BSR.W   RMVERESOURCE_EMPTY              | add name to name list if non-empty
-        BSR.W   CHECKLOAD_CONT_9_CONT_9         | write resource data at end of data fork
+        BSR.W   CHECKLOAD_CONT_9_CONT_9         | place the resource data at the end of the data area
 ADDRESOURCE_ERR:
         MOVEQ    #0xE,D0                        | D0 = 14 bytes of params to pop
         BRA.W    RESMGR_EXIT_TRAMP              | jump to common epilogue
@@ -1527,8 +1548,8 @@ ADDRESOURCE_EMPTY_CONT_3:
         BSR.W   RMVERESOURCE_EMPTY              | add caller name to name list
         MOVE    12(A6),(A2)                     | store caller resID in new ref
         CLR.L   4(A2)                           | clear attrs+offset
-        BSET    #0x7,4(A2)                      | set resOverride bit (bit 7)
-        ADDQ.W  #0x8,A2                         | skip to handle field
+        BSET    #0x7,4(A2)                      | set resSysRef (bit 7): entry is a reference
+        ADDQ.W  #0x8,A2                         | A2 -> refID (+$8) / refNameOff (+$A)
         MOVE    (SP)+,(A2)                      | store source resID at +8
         MOVE.L  (SP)+,A0                        | A0 = saved source name ptr
         BSR.W   RMVERESOURCE_EMPTY              | add source name to name list
@@ -1609,8 +1630,8 @@ RmveReference:
         BMI.B   RMVERESOURCE_EXIT               | not found - error exit
         BTST    #0x3,4(A2)                      | test resProtected
         BNE.B   RMVERESOURCE_EXIT               | protected - error exit
-        ADDQ.W  #0x8,A2                         | skip past type entry to ref entry data
-        BSR.W   RMVERESOURCE_CONT_4_CONT        | shift ref list up to remove this entry
+        ADDQ.W  #0x8,A2                         | A2 -> refID (+$8) / refNameOff (+$A)
+        BSR.W   RMVERESOURCE_CONT_4_CONT        | remove the name at refNameOff from the name list
         SUBQ.W  #0x8,A2                         | restore A2
         MOVEQ.L #0x20,D0                        | mapChanged only (bit 5)
         BRA.W   RMVERESOURCE_MARK               | mark map changed + return
@@ -1626,7 +1647,7 @@ ResError:
 | RMVERESOURCE_EMPTY -- store name in ref entry's name-offset slot,
 | appending the Pascal string to the map's name list if non-empty.
 | Called by AddResource (line 809), SetResInfo (line 779), and the
-| AddReference body (lines 899/906). Plus textedit.s 1604 (Plus's
+| AddReference body (lines 899/906). (Plus's
 | RMVERESOURCE_EMPTY differs by an added CLR.L (RMgrLastResHand).w
 | at entry and uses the extracted RMVERESOURCE_CONT_3 helper instead
 | of inline RMVERESOURCE_CONT_OK).
@@ -1721,7 +1742,7 @@ RMVERESOURCE_CONT_4_CONT:
         BSR.W   RETURNS_24                      | get first type + ref list
 RMVERESOURCE_CONT_4_CONT_2:
         LEA.L     2(A2),A1                      | A1 = name offset slot of ref
-        MOVE.B  4(A2),D0                        | push duration = 3 ticks
+        MOVE.B  4(A2),D0                        | D0 = rAttr (+$4); bit 7 = resSysRef
 RMVERESOURCE_CONT_4_NO:
         TST     (A1)                            | test name offset (-1 if none)
         BMI.B   RMVERESOURCE_CONT_4_CONT_3      | no name - skip
@@ -1729,9 +1750,9 @@ RMVERESOURCE_CONT_4_NO:
         BGE.B   RMVERESOURCE_CONT_4_CONT_3      | before removed name - keep
         ADD     D1,(A1)                         | (A1) += D1
 RMVERESOURCE_CONT_4_CONT_3:
-        ADDQ.W  #0x8,A1                         | advance to next ref-entry slot
-        BCLR    #0x7,D0                         | test/clear high bit of attr
-        BNE.B   RMVERESOURCE_CONT_4_NO          | more refs - keep adjusting
+        ADDQ.W  #0x8,A1                         | A1 -> refNameOff (+$A)
+        BCLR    #0x7,D0                         | test+clear resSysRef (bit 7)
+        BNE.B   RMVERESOURCE_CONT_4_NO          | reference: adjust refNameOff too
         BSR.W   RETURNS_28                      | advance to next ref entry
         BPL.B   RMVERESOURCE_CONT_4_CONT_2      | more entries - continue
         MOVEM.L (SP)+,D3-D7/A2-A4               | restore registers
@@ -1740,9 +1761,3 @@ RMVERESOURCE_CONT_4_CONT_4:
         MOVE    (MinusOne).w,2(A2)              | ref's name offset := -1
         RTS                                     | return after fixup
 
-| Small data region @ $E436-$E443, referenced by PEA PC-rel from
-| the Alert sites below. Bytes preserved as raw data.
-ALERT_ICON_RECT:                                | 8-byte icon rect param
-        .short  0x000A, 0x0014, 0x002A, 0x0034  | top=10, left=20, bottom=42, right=52
-ALERT_EMPTY_TITLE:                              | 2-byte empty Pascal string
-        .short  0x0000                          | length=0

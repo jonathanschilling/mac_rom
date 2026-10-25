@@ -1,40 +1,54 @@
-| Sad Mac / Happy Mac icon display (ROM $078E-$09F9).
-| Called after a boot-time memtest or self-test failure to render the
-| sad-face (or happy-face) glyph on the boot screen.
+| Sad Mac / Happy Mac icon display (ROM $078E-$0903)
+|
+| Draws the Mac icon with the sad face (after a failed startup test) or
+| the happy face (a startup disk was found), and the disk icons with the
+| question and X marks.
 |
 | Entry points:
-| ShowSadMac @ $07CC -- A5 = return addr, draws the Mac-outline
-| icon + sad-face overlay.
-| ShowHappyMac @ $07F4 -- ShowHappyMac alt-entry (smile glyph).
+| PutIcon @ $0790 -- the _PutIcon trap ($A9CA): decompress a 32x32 icon
+| onto the screen. The boot code enters two bytes earlier, at
+| PUTICON_REBASE ($078E), which first adds the RAM base A3 to A2.
+| ShowSadMac @ $07CC -- A5 = return addr, draws the Mac-outline icon +
+| sad-face overlay.
+| ShowHappyMac @ $07F4 -- the same with the happy face.
 |
-| Internal helpers:
-| DeviceLoop @ $078E -- DeviceLoop icon-row
-| decoder for the RLE-compressed Mac-outline icon.
-| ICON_XOR_PROPAGATE @ $07BC -- after RLE decode, delta-XOR each row
-| with the one above to reconstruct the bitmap.
-| PutSymbol @ $07FA -- copy a small glyph bitmap into the
-| current screen cell.
-|
-| Data blocks in this range:
-| DT_mSadMac @ $08B4 -- sad-face glyph bitmap (16 rows).
-| ICON_MAC_OUTLINE @ $080C -- RLE-compressed Mac-shaped outline.
-|
-| DS-alert support (LOOKUP_LOOP / LOOKUP_FOUND @ $09DC) used by the
-| system error handler in sys_error.s to find an alert string by ID.
+| Internal helpers and data:
+| ICON_XOR_PROPAGATE @ $07BC -- after RLE decode, delta-XOR each row with
+| the one above to reconstruct the bitmap.
+| PutSymbol @ $07FA -- copy a small glyph bitmap into the screen.
+| ICON_MAC_OUTLINE @ $080C, ICON_DISK @ $0870 -- RLE-compressed icons.
+| DT_mHappyMac, DT_mSadMac, DT_mQMark, DT_mXMark -- overlay glyphs.
+| The System Error Handler (SysBeep, SysError, the alert) follows in
+| os/sys_error.s.
 
-DeviceLoop:                                     | DeviceLoop entry
+| ----------------------------------------------------------
+|
+| PUTICON_REBASE - boot-code entry, two bytes before PutIcon:
+| A2 += A3 (RAM base, $600000 or 0), then falls into PutIcon.
+| Used by PlotDisk and DRAW_MAC_ICON.
+PUTICON_REBASE:                                 | boot entry: A2 is RAM-relative
         ADDA.L  A3,A2                           | A2 += RAM base (screen buffer)
-        MOVEQ.L #0xF,D3                         | D3 = 15 (16 rows to decode)
+|
+| _PutIcon ($A9CA): decompress a 32x32 icon onto the screen
+| Entry: A2 = screen address of the icon's top-left byte,
+|        A4 = compressed icon data, A6 = return address
+| Exit:  via JMP (A6); A4 past the data; D2-D4, A0-A2 trashed
+| Format: 16 flag bytes, each followed by its data bytes. Each flag
+| bit (LSB first) yields one output byte: 1 = zero byte, 0 = next
+| data byte. Output fills 4 bytes per screen row (64-byte stride),
+| 32 rows; then every row is XORed with the one above (delta coding).
+PutIcon:
+        MOVEQ.L #0xF,D3                         | D3 = 15: 16 flag bytes (8 output bytes each)
         MOVE.L  A2,A0                           | A0 = save screen start for XOR-propagate
         MOVEQ.L #0x3,D2                         | D2 = 3 (4 bytes per row before row-skip)
 | ----------------------------------------------------------
-| DeviceLoop inner row -- decode one 32-pixel row from RLE icon data
+| ICON_ROW_LOOP - fetch the next flag byte (8 output bytes = 2 rows)
 ICON_ROW_LOOP:                                  | ICON_ROW_LOOP
         MOVE    #0x100,D4                       | D4 bit 8 = sentinel (detect end of flag byte)
         MOVE.B  (A4)+,D4                        | D4 low byte = run-length flag bits
 ICON_BIT_LOOP:                                  | ICON_BIT_LOOP
         LSR     #0x1,D4                         | shift next flag bit into carry
-        BEQ.B   ICON_NEXT_ROW                   | sentinel reached: 8 bits consumed, next row
+        BEQ.B   ICON_NEXT_ROW                   | sentinel reached: 8 bits used, next flag byte
         BCC.B   ICON_COPY_BYTE                  | carry=0: data byte comes from (A4) (skip zero)
         CLR.B   (A2)+                           | carry=1: write zero (white pixel column)
         BRA.B   ICON_BYTE_COUNT                 | -> byte counter
@@ -46,7 +60,7 @@ ICON_BYTE_COUNT:                                | ICON_BYTE_COUNT
         MOVEQ.L #0x3,D2                         | reset byte counter (4 bytes per group)
         BRA.B   ICON_BIT_LOOP                   | continue decoding
 ICON_NEXT_ROW:                                  | ICON_NEXT_ROW
-        DBRA    D3,ICON_ROW_LOOP                | 16 rows total
+        DBRA    D3,ICON_ROW_LOOP                | 16 flag bytes (32 rows) total
         MOVE.L  A0,A1                           | A1 = icon start row (source for XOR)
         MOVEQ.L #0x1E,D3                        | D3 = 30: propagate icon down 31 more rows
 | XOR each row with the previous to reconstruct delta-encoded image
@@ -56,7 +70,7 @@ ICON_XOR_PROPAGATE:
         EOR.L   D4,(A1)                         | XOR previous row into current (delta decode)
         MOVE.L  A1,A0                           | current row becomes source for next iteration
         DBRA    D3,ICON_XOR_PROPAGATE           | repeat for 31 rows
-        JMP     (A6)                            | jump via A6
+        JMP     (A6)                            | return to caller (A6)
 | ----------------------------------------------------------
 | ShowSadMac -- draw sad-Mac icon on boot screen after test failure
 | Return address in A5. Encodes as `LEA 0xE6(PC),A0` which loads A0
@@ -66,10 +80,10 @@ ShowSadMac:
         LEA     DT_mSadMac(PC),A0               | A0 = sad-face glyph data at $08B4
 DRAW_MAC_ICON:                                  | DRAW_MAC_ICON
         LEA     ICON_MAC_OUTLINE(PC),A4         | A4 = compressed Mac outline icon
-        MOVE.L  A0,D7                           | D7 = save face-data ptr across DeviceLoop
+        MOVE.L  A0,D7                           | D7 = save face-data ptr across PutIcon
         MOVE.L  #0x7CB5E,A2                     | A2 = SEScrnIcon (centered screen pos)
         LEA     DRAW_FACE_OVERLAY(PC),A6        | return to DRAW_FACE_OVERLAY after outline
-        BRA.B   DeviceLoop                      | decode and draw Mac outline icon
+        BRA.B   PUTICON_REBASE                  | decode and draw Mac outline icon
 DRAW_FACE_OVERLAY:                              | DRAW_FACE_OVERLAY
         MOVE.L  #0x7CCDF,A2                     | A2 = SEScrnFace (face position in icon)
         MOVE.L  D7,A4                           | A4 = face data (sad/happy, saved in D7)
@@ -93,7 +107,7 @@ PUTSYMBOL_EXIT:
 
 | ==========================================================================
 | $080C..$0903 -- boot-screen icon + face glyph data tables.
-| Six bitmap tables used by DeviceLoop (RLE decoder, above) and
+| Six bitmap tables used by PutIcon (RLE decoder, above) and
 | PUTSYMBOL_LOOP to draw the boot screen:
 | ICON_MAC_OUTLINE @ $080C (100 B) Mac computer outline, RLE-encoded
 | ICON_DISK @ $0870 ( 48 B) floppy-disk icon (retry animation)
@@ -108,9 +122,9 @@ PUTSYMBOL_EXIT:
 | tables exactly (lines 349-402).
 | ==========================================================================
 
-| ICON_MAC_OUTLINE -- compressed Macintosh computer outline (32-pixel wide,
-| delta-encoded). Consumed row-by-row by DeviceLoop (which writes into
-| SEScrnIcon). 100 bytes: 16 rows x 6 bytes + 4-byte base bottom.
+| ICON_MAC_OUTLINE -- compressed Macintosh computer outline (32x32 pixels,
+| delta-encoded), decoded by PutIcon at SEScrnIcon. 100 bytes in PutIcon
+| format: 16 flag bytes, each followed by its non-zero data bytes.
 ICON_MAC_OUTLINE:
         .byte   0x00,0x57,0xFF,0xFF,0xD5,0xFF   | rows 1-2 (top edge)
         .byte   0xFF,0xFF,0xFF,0x06,0xF8,0x3F   | rows 2-3 (bezel top corners)
@@ -131,9 +145,9 @@ ICON_MAC_OUTLINE:
         .byte   0xF7,0xFF,0xFF,0xDF             | base bottom edge
 
 | ----------------------------------------------------------
-| ICON_DISK -- 32x16 floppy-disk icon used during the read-failure
-| animation that cycles between Mac outline and disk. 48 bytes:
-| 8 rows x 6 bytes. Also decoded by DeviceLoop.
+| ICON_DISK -- 32x32 floppy-disk icon used during the read-failure
+| animation that cycles between Mac outline and disk. 48 bytes in
+| PutIcon format (16 flag bytes + 32 data bytes). Drawn by PlotDisk.
 ICON_DISK:
         .byte   0x00,0x7F,0xFF,0xFF,0xF5,0xFE   | rows 1-2 (top edge)
         .byte   0xFF,0xFE,0xFF,0x33,0x70,0x0F   | rows 2-3 (disk label area)
@@ -182,140 +196,3 @@ DT_mXMark:
         .byte   0x07,0xE0,0x0E,0x70,0x1C,0x38   | rows 10-12 (widen, lower arms, spread)
         .byte   0x38,0x1C,0x10,0x08,0x00,0x00   | rows 13-15 (outer tips, endpoints, blank)
 
-| ----------------------------------------------------------
-| INSTALL_DSERR_TRAMP -- install the sad-Mac trampoline at two
-| low-memory vector slots. Called from SysErrInit during boot.
-| A6 = work-area base (set up earlier)
-| Writes SysErrTrampoline's address ($091E) at two consecutive
-| long-word slots so that system-error vectors point at the trampoline.
-INSTALL_DSERR_TRAMP:
-        LEA     0x18(A6),A1                     | A1 = first stash slot
-        LEA     0x6C(A6),A0                     | A0 = second stash slot
-        MOVE.L  A0,(A1)+                        | stash1 := A0
-        ADDQ.W  #0x4,A0                         | advance A0 to stash2+4 (second vector slot)
-        MOVE.L  A0,(A1)+                        | stash1+4 := A0
-        LEA     SysErrTrampoline(PC),A1         | A1 = trampoline handler @ $091E
-        MOVE.L  A1,(A0)                         | install trampoline at stash2
-        SUBQ.W  #0x4,A0                         | A0 back to stash2 (first slot of pair)
-        MOVE.L  A1,(A0)                         | also install at stash2-4
-        RTS                                     | return to system error init
-
-| ----------------------------------------------------------
-| SysErrTrampoline -- sad-Mac alert trampoline.
-| Entered via the vectors installed by INSTALL_DSERR_TRAMP. The lead
-| `.short 0x000A` is a signature/header word; real execution starts
-| after the two `.short 0x8AD0` alignment words, at the MOVEQ.
-SysErrTrampoline:
-        .short  0x000A                          | trampoline signature word
-        .short  0x8AD0                          | alignment pad (decodes as DIVU.W)
-        .short  0x8AD0                          | alignment pad (decodes as DIVU.W)
-| Real handler body starts here. The bytes 7530 7530 48E7 FF7E looked
-| like one long "mvsb" to FDisasm, but are really two MOVEQ instructions
-| followed by MOVEM.L register save.
-        .short  0x7530, 0x7530                  | MOVEQ #0x30,D2 (pair)
-        .short  0x48E7, 0xFF7E                  | MOVEM.L D0-D7/A1-A6,-(SP)
-        MOVE    0x3C(SP),D3                     | D3 = saved exception code from frame
-        SUBA.L  A3,A3                           | A3 = 0 (RAM-base offset for screen addr)
-        LEA.L     SYSBEEP_EPILOG(PC),A6         | A6 = epilogue (pop regs + RTS)
-        BRA.W   BootBeep                        | beep then draw sad Mac
-
-| ----------------------------------------------------------
-| SYSBEEP_EPILOG - SysBeep epilogue, pops duration param and returns
-SYSBEEP_EPILOG:
-        MOVEM.L (SP)+,D0-D7/A1-A6               | restore caller-saved regs
-        MOVE.L  (SP)+,A0                        | pop return address
-        ADDQ.W  #0x2,SP                         | discard duration parameter word
-        JMP     (A0)                            | return to SysBeep caller
-| ----------------------------------------------------------
-| SysError -- fatal-error system-reset entry point
-| Reached when an unrecoverable error has been signalled (D0 = err
-| code). Saves ALL registers and PC to SERegs ($7FC80), clears the
-| framebuffer, opens a grafport on the screen, then draws the sad-Mac
-| alert dialog. Also the target of `BRA.W SysError` in
-| PLOTDISK_AFTER_ICON_CONT (vectors.s $0594).
-SysError:                                       | SysError entry (fatal)
-        MOVEM.L D0-D7/A0-A7,(0x0007FC80).l      | save all registers to SERegs ($7FC80)
-SysErr2:
-        MOVE.L  (SP),(0x0007FCC0).l             | save PC (ret addr from caller) to SERegs+0x40
-        MOVEM.L D0-A6,-(SP)                     | save current working registers
-        MOVE    D0,(DSErrCode).w                | DSErrCode = system error code
-        TST.L   (DSAlertTab).w                  | custom DS alert table installed?
-        BEQ.B   DSERR_SKIP_PROC_CONT            | no: fall to CritErr (blinking screen)
-        LEA.L     -4(SP),A5                     | A5 = frame anchor
-        SUBA.W  #0x15A,SP                       | reserve 346 bytes for GrafPort + strings
-        MOVE.L  SP,A6                           | A6 = work-area base
-        MOVE    D0,-(SP)                        | save DS err code on stack
-        PEA.L     -4(A5)                        | push &thePort
-        _InitGraf                               | InitGraf(&thePort)
-        BSR.B   INSTALL_DSERR_TRAMP             | install DSAlertTab trampoline
-        MOVE.L  A6,-(SP)                        | push work-area base (the new GrafPort)
-        _InitPort                               | InitPort(port)
-        TST     (SP)                            | test low word of D0-pushed-earlier
-        BMI.B   SysErrAfterFrame                | negative: skip dialog frame
-        BSR.W   DRAW_ALERT_FRAME                | draw dialog frame (rect + border)
-SysErrAfterFrame:
-        MOVE    (SP)+,D0                        | pop saved error code
-        BSR.B   LOOKUP_ALERT_ID                 | look up err in alert table
-        BNE.B   DSERR_DRAW_ALERT                | found: use the alert definition
-        MOVE.L  (DSAlertTab).w,A0               | not found: use default alert (entry 0)
-        ADDQ.W  #0x6,A0                         | skip alert-table header (6 bytes)
-DSERR_DRAW_ALERT:                               | draw alert using A0's fields
-        MOVE.L  A0,A3                           | A3 = ptr to alert definition fields
-        BSR.B   DRAW_ALERT_TEXT                 | draw first text field
-        BSR.B   DRAW_ALERT_TEXT                 | draw second text field
-        MOVE    (A3)+,D0                        | D0 = icon resource ID
-        BEQ.B   DSERR_SKIP_ICON                 | 0 = no icon, skip
-        BSR.B   LOOKUP_ALERT_ID                 | look up icon ID in table
-        BEQ.B   DSERR_SKIP_ICON                 | not found - skip icon draw
-        PEA.L     8(A0)                         | push icon rect ptr (past 8-byte header)
-        MOVE.L  A0,-(SP)                        | push icon data ptr
-        PEA.L     4(SP)                         | push dest rect on stack (reuse rect)
-        _PlotIcon                               | draw the alert icon
-        ADDQ.W  #0x4,SP                         | pop extra rect ptr
-DSERR_SKIP_ICON:
-        MOVE    (A3)+,D0                        | D0 = custom procedure resource ID
-        BEQ.B   DSERR_SKIP_PROC                 | 0 = no custom procedure
-        BSR.B   LOOKUP_ALERT_ID                 | look up procedure in table
-        BEQ.B   DSERR_SKIP_PROC                 | not found - skip custom call
-        JSR     (A0)                            | run custom alert procedure
-DSERR_SKIP_PROC:
-        MOVE    (A3)+,D0                        | D0 = button definition ID
-        BEQ.B   DSERR_SKIP_PROC_NO              | 0 = no buttons (auto-resume)
-        TST.L   (ResumeProc).w                  | resume procedure installed?
-        BEQ.B   DSERR_SKIP_PROC_OK              | no: use button count as-is
-        ADDQ.W  #0x1,D0                         | yes: add Resume button option
-DSERR_SKIP_PROC_OK:
-        BSR.W   SHOW_ALERT_BTNS                 | draw buttons and wait for click
-        BNE.B   DSERR_SKIP_PROC_NO_2            | got a button click: exit via ResumeProc
-DSERR_SKIP_PROC_NO:
-        ADDA.W  #0x15A,SP                       | free GrafPort work area
-        MOVEM.L (SP)+,D0-A6                     | restore regs
-        RTS                                     | return to caller (auto-resume)
-DSERR_SKIP_PROC_NO_2:
-        JMP     (A0)                            | tail-call ResumeProc
-DSERR_SKIP_PROC_CONT:                           | no DSAlertTab: CritErr fallback
-        MOVE    D0,D1                           | D1 = err code (for CritErr display)
-        MOVE    #0xF,A4                         | A4 = 15 (critical-err glyph row count)
-        SUBA.L  A3,A3                           | A3 = nil (no alert text, RAM-base = 0)
-        BRA.W   CritErr                         | -> sad-Mac blinking-screen handler
-| Called by: SysErrAfterFrame, DSERR_DRAW_ALERT, DSERR_SKIP_ICON, DRAW_ALERT_TEXT, SHOW_ALERT_BTNS (and 2 more)
-LOOKUP_ALERT_ID:                                | DSAlertTab lookup helper
-        MOVE.L  (DSAlertTab).w,A0               | A0 = alert table base
-        MOVE    (A0)+,D1                        | D1 = entry count (post-increment)
-        BRA.B   LOOKUP_NEXT                     | drop into scan loop
-
-| ----------------------------------------------------------
-| LOOKUP_LOOP - alert table search loop
-LOOKUP_LOOP:
-        CMP     (A0)+,D0                        | compare ID with table entry
-        BEQ.B   LOOKUP_FOUND                    | match - return this entry
-        ADDA    (A0)+,A0                        | skip entry data (offset to next)
-LOOKUP_NEXT:
-        DBF     D1,LOOKUP_LOOP                  | loop through all entries
-        MOVEQ.L #0x0,D0                         | not found: D0=0, Z=1
-        SUBA.L  A0,A0                           | A0 = nil
-        RTS                                     | return with Z flag set (not found)
-LOOKUP_FOUND:
-        MOVEQ.L #-0x1,D0                        | found: D0=-1, Z=0
-        ADDQ.W  #0x2,A0                         | skip past offset word to entry data
-        RTS                                     | return with Z flag clear (found)

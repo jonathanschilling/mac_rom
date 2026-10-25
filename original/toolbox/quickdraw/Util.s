@@ -1,80 +1,9 @@
-| QuickDraw Utility (ROM $533A-$5745).
-|
-| Note on cross-subsystem leakage in this file's head:
-|
-| $533A-$5347 (14 B) -- unreferenced Font Manager cursor stub (below).
-| Looks like dead code left over from an earlier
-| SetCursor path. Related Font Manager routines
-| live in toolbox/font_mgr.s.
-|
-| $5348-$536A (34 B) -- FMQD_BuildCursorParms* -- Font Manager
-| helpers that tail-call through J-vectors
-| (JSetCrsr, JInitCrsr, JHideCursor) resolved
-| at runtime from low-memory proc pointers.
-| Reachable only from the Font Manager; logical
-| home is toolbox/font_mgr.s, but the bytes
-| sit here at $5348 and moving them would
-| re-order QuickDraw.
-|
-| $536E-$53A3 (54 B) -- DrawControls -- _DrawControls ($A969) trap
-| handler. Control Manager code assembled
-| inside the QuickDraw Util segment by the
-| original ROM layout; the rest of the Control
-| Manager lives in toolbox/control_mgr.s.
-|
-| $53A4+ -- real QuickDraw Util begins (DRAWCONTROLS_EXIT,
-| BitNot, LeftMask, MASKTAB, PatExpand, etc.).
-|
-| ----------------------------------------------------------
-| Unreferenced 14-byte Font Manager cursor stub @ $533A-$5347
-| (see banner above for why this is here).
-| ----------------------------------------------------------
-        MOVEA.L (A5),A0                         | A0 = QuickDraw globals base
-        PEA.L   -0x6C(A0)                       | push &QDGlobals-0x6C
-        JSR     FMQD_BuildCursorParms(PC)       | build cursor param block + call JSetCrsr
-        JMP     InitCursor(PC)                  | tail-jump to JInitCrsr vector ($B25C)
-FMQD_BuildCursorParms:
-        MOVEA.L 4(SP),A0                        | A0 := arg (rect pointer?)
-        MOVE    0x42(A0),-(SP)                  | push word @ +0x42
-        MOVE    0x40(A0),-(SP)                  | push word @ +0x40
-        MOVE    #0x10,-(SP)                     | push constant 16
-        PEA.L     (A0)                          | jump via A0
-        PEA.L     0x20(A0)                      | push cursor data (offset $20 in struct)
-        JSR     SetCursor(PC)                   | call SetCursor (J-vector or local)
-        MOVE.L  (SP)+,(SP)                      | pop arg, leave return address
-        RTS                                     | return to caller
-FMQD_HideCursor:
-        JMP     HideCursor(PC)                  | tail-jump to HideCursor (J-vector)
-FMQD_ShowCursor:
-        JMP     ShowCursor(PC)                  | tail-jump to ShowCursor (J-vector)
-
-| ----------------------------------------------------------
-| _DrawControls ($A969)
-| Called during boot.
-DrawControls:
-        LINK    A6,#0x0                         | set up frame (no locals)
-        MOVEM.L D0-D2/A0-A1,-(SP)               | save scratch registers
-        MOVE.L  12(A6),A0                       | A0 = WindowPtr arg
-        MOVE    2(A0),D0                        | D0 = window left in port coords
-        SUB.W    10(FP),D0                      | shift to global coords
-        MOVE    D0,-(SP)                        | push left for ShieldCursor rect
-        MOVE    (A0),D0                         | D0 = window top
-        SUB     8(A6),D0                        | jump via A0
-        MOVE    D0,-(SP)                        | push top for ShieldCursor rect
-        MOVE    6(A0),D0                        | D0 = window right
-        SUB     10(A6),D0                       | shift to global coords
-        MOVE    D0,-(SP)                        | push right for ShieldCursor rect
-        MOVE    4(A0),D0                        | D0 = window bottom
-        SUB     8(A6),D0                        | shift to global coords
-        MOVE    D0,-(SP)                        | GET COUNT
-        JSR     ShieldCursor(PC)                | shield cursor over draw rect
-DRAWCONTROLS_EXIT:
-        MOVEM.L (SP)+,D0-D2/A0-A1               | restore scratch registers
-        UNLK    A6                              | tear down frame
-        MOVE.L  (SP)+,A0                        | POP RETURN ADDR
-        ADDQ.W  #0x8,SP                         | pop two longwords (window args)
-        JMP     (A0)                            | RTS
-        JMP     ObscureCursor(PC)               | tail-jump to obscure cursor
+| QuickDraw Utility (ROM $53B4-$5803), from the 1983 Util.a: the bit
+| routines BitAnd, BitXor, BitNot, BitOr, BitShift, BitTst, BitSet and
+| BitClr, Random, ForeColor/BackColor/ColorBit, BitMask/LeftMask with
+| MASKTAB, PatExpand, ColorMap, GetPixel, StuffHex, DrawSlab and
+| SlabMode with its slab-drawing loops (SLAB_*). XorSlab is not here: the
+| 64K ROM links it after StretchBits (Stretch.s).
 
 | -----------------------------------------------------------
 | Function BitAnd(long1,long2: LongInt): LongInt;
@@ -134,17 +63,35 @@ SHLEFT:
 BITSHIFT_DONE:
         MOVE.L  D0,(SP)                         | STORE RESULT
         JMP     (A0)                            | RTS
-        MOVE.L  (SP)+,A0                        | BitTst: pop return addr
+| ----------------------------------------------------------
+|
+| _BitTst ($A85D): test one bit
+| Pascal: FUNCTION BitTst(bytePtr: Ptr; bitNum: LongInt): BOOLEAN;
+| Bits are numbered from the high-order bit of bytePtr^: byte offset =
+| bitNum DIV 8 (ASR.L #3), bit within the byte = NOT bitNum (mod 8 in BTST),
+| so bitNum 0 is bit 7 ($80) of the first byte.
+| The 1983 Util.a shares this prologue via BSR SHARE; the 1984 ROM inlines
+| it into BitTst, BitSet and BitClr.
+|
+BitTst:
+        MOVE.L  (SP)+,A0                        | POP RETURN ADDR
         MOVE.L  (SP)+,D1                        | D1 = bit number
         MOVE    D1,D0                           | D0 = copy of bit num
         ASR.L   #0x3,D1                         | D1 = byte offset (bits / 8)
         NOT     D0                              | reverse bit sense (BTST counts from LSB)
         MOVE.L  (SP)+,A1                        | GET PTR
-        BTST    D0,0(A1,D1.L)                   | test bit D0 of 0(A1,D1.L)
+        BTST    D0,0(A1,D1.L)                   | TEST THE BIT
         SNE     (SP)                            | SET OR CLEAR RESULT
-        NEG.B   (SP)                            | (SP) = -(SP)
+        NEG.B   (SP)                            | CONVERT -1 TO 1 (TRUE)
         JMP     (A0)                            | RTS
-        MOVE.L  (SP)+,A0                        | BitSet: pop return addr
+| ----------------------------------------------------------
+|
+| _BitSet ($A85E): set one bit
+| Pascal: PROCEDURE BitSet(bytePtr: Ptr; bitNum: LongInt);
+| Same bit numbering as BitTst (bitNum 0 = high-order bit of bytePtr^).
+|
+BitSet:
+        MOVE.L  (SP)+,A0                        | POP RETURN ADDR
         MOVE.L  (SP)+,D1                        | D1 = bit number
         MOVE    D1,D0                           | D0 = copy of bit num
         ASR.L   #0x3,D1                         | D1 = byte offset (bits / 8)
@@ -152,35 +99,53 @@ BITSHIFT_DONE:
         MOVE.L  (SP)+,A1                        | GET PTR
         BSET    D0,0(A1,D1.L)                   | SET THE BIT
         JMP     (A0)                            | RTS
+| ----------------------------------------------------------
+|
+| _BitClr ($A85F): clear one bit
+| Pascal: PROCEDURE BitClr(bytePtr: Ptr; bitNum: LongInt);
+| Same bit numbering as BitTst (bitNum 0 = high-order bit of bytePtr^).
+|
+BitClr:
         MOVE.L  (SP)+,A0                        | POP RETURN ADDR
         MOVE.L  (SP)+,D1                        | GET BITNUM
         MOVE    D1,D0                           | COPY IT
         ASR.L   #0x3,D1                         | D1 = byte offset (bits / 8)
         NOT     D0                              | REVERSE BIT SENSE
         MOVE.L  (SP)+,A1                        | A1 = byte pointer
-        BCLR    D0,0(A1,D1.L)                   | clear bit at byte offset
+        BCLR    D0,0(A1,D1.L)                   | CLEAR THE BIT
         JMP     (A0)                            | RTS
-        MOVE.L  (A5),A0                         | A0 = QuickDraw globals
+| ----------------------------------------------------------
+|
+| _Random ($A861): return a pseudo-random integer
+| Pascal: FUNCTION Random: INTEGER;
+| Exit:  function result (4(SP)) = low word of the new randSeed, with -32768
+|        replaced by 0; randSeed updated. Clobbers D0-D2/A0.
+| From the 1983 Util.a: randSeed := (randSeed * 16807) MOD (2^31-1), computed
+| with 16x16-bit MULUs (Schrage, ACM Trans. Math. Software 5(2), 1979).
+| randSeed is the QuickDraw global at -$7E from the (A5) globals pointer.
+|
+Random:
+        MOVE.L  (A5),A0                         | POINT TO QUICKDRAW GLOBALS
         MOVE    #0x41A7,D0                      | D0 = a = 16807 (7^5)
-        MULU    -0x7C(A0),D0                    | D0 = D0 *u -0x7C(A0)
+        MULU    -0x7C(A0),D0                    | xalo := a * LoWord(randSeed)
         MOVE.L  D0,D1                           | COPY xalo
         CLR     D1                              | zero low word of D1
         SWAP    D1                              | GET HiWord(xalo) as a long
         MOVE    #0x41A7,D2                      | D2 = a = 16807 again
-        MULU    -0x7E(A0),D2                    | D2 = D2 *u -0x7E(A0)
+        MULU    -0x7E(A0),D2                    | a * HiWord(randSeed)
         ADD.L   D1,D2                           | ADD LEFTLO = FHI
         MOVE.L  D2,D1                           | COPY FHI
         ADD.L   D1,D1                           | CALC 2 TIMES FHI
         CLR     D1                              | zero low word of D1
         SWAP    D1                              | CALC FHI SHIFTED RIGHT 15 FOR K
-        ANDI.L  #0xFFFF,D0                      | isolate low word of XALO
-        SUBI.L  #0x7FFFFFFF,D0                  | subtract long imm: 0x7FFFFFFF,D0
-        ANDI.L  #0x7FFF,D2                      | isolate low 15 bits of FHI
+        ANDI.L  #0xFFFF,D0                      | GET LO WORD XALO
+        SUBI.L  #0x7FFFFFFF,D0                  | SUBTRACT P = 2^31-1
+        ANDI.L  #0x7FFF,D2                      | BitAnd(fhi,$00007FFF)
         SWAP    D2                              | TIMES 64K
         ADD.L   D1,D2                           | PLUS K
         ADD.L   D2,D0                           | CALC TOTAL
-        BPL.B   RANDOM_UPDATE                   | if non-negative, skip P add-back
-        ADDI.L  #0x7FFFFFFF,D0                  | add long imm: 0x7FFFFFFF,D0
+        BPL.B   RANDOM_UPDATE                   | seed >= 0 -> done
+        ADDI.L  #0x7FFFFFFF,D0                  | seed < 0: ADD P BACK
 RANDOM_UPDATE:
         MOVE.L  D0,-0x7E(A0)                    | UPDATE SEED
         CMPI    #-0x8000,D0                     | IS NUMBER -32768 ?
@@ -189,12 +154,39 @@ RANDOM_UPDATE:
 RANDOM_UPDATE_NO:
         MOVE    D0,4(SP)                        | return low word as Pascal result
         RTS                                     | AND RETURN
+| ----------------------------------------------------------
+|
+| _ForeColor ($A862): set the current port's foreground color
+| Pascal: PROCEDURE ForeColor(color: LongInt);
+| Stores color into thePort^.fgColor ($50) through PortLong (L_mPortLong).
+|
+ForeColor:
         MOVEQ.L #0x50,D0                        | ForeColor: D0 = fgColor offset ($50)
         JMP     L_mPortLong(PC)                 | install long into thePort
+| ----------------------------------------------------------
+|
+| _BackColor ($A863): set the current port's background color
+| Pascal: PROCEDURE BackColor(color: LongInt);
+| Stores color into thePort^.bkColor ($54) through PortLong (L_mPortLong).
+|
+BackColor:
         MOVEQ.L #0x54,D0                        | BackColor: D0 = bkColor offset ($54)
         JMP     L_mPortLong(PC)                 | install long into thePort
+| ----------------------------------------------------------
+|
+| _ColorBit ($A864): select the color plane for subsequent drawing
+| Pascal: PROCEDURE ColorBit(whichBit: INTEGER);
+| Stores whichBit into thePort^.colrBit ($58) through PortWord (L_mPortWord).
+|
+ColorBit:
         MOVEQ.L #0x58,D0                        | ColorBit: D0 = colrBit offset ($58)
         JMP     L_mPortWord(PC)                 | install word into thePort
+| ----------------------------------------------------------
+| .PROC GetMaskTab,0
+| .DEF LeftMask,RightMask,BitMask,MaskTab
+| ASSEMBLY LANGUAGE CALLABLE PROCEDURES LEFTMASK, RIGHTMASK, AND BITMASK:
+| ENTER WITH COORDINATE IN D0, RETURNS WITH 16 BIT MASK IN D0
+| NO OTHER REGISTERS ALTERED.
 | Called by: DRAWSLAB_BODY, CLRLOOP_CONT_9, DRAWLINE_ABLOOP_NO, GETSRC_CONT, SEEKRGN_NEXTHOR_CONT_2 (and 1 more)
 BitMask:
         ANDI    #0xF,D0                         | treat coordinate mod 16
@@ -209,7 +201,7 @@ LeftMask:
         ANDI    #0xF,D0                         | TREAT MOD 16
         ADD     D0,D0                           | DOUBLE FOR TABLE
         MOVE.W  MASKTAB(PC,D0.W),D0             | GET RIGHT MASK (labeled LEFT in ROM)
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from LeftMask
 LEFTMASK_CONT:
         ANDI    #0xF,D0                         | treat coordinate mod 16
         ADD     D0,D0                           | DOUBLE FOR TABLE
@@ -304,7 +296,7 @@ THINLP:                                         | thin-pattern loop @ $5580
 PATEXPAND_DONE:
         MOVE.L  (SP)+,A4                        | DONE: RESTORE REG
         UNLK    A6                              | RELEASE STACK FRAME
-        RTS                                     | RETURN TO CALLER
+        RTS                                     | return from PATEXPAND_DONE
 | --- STRETCH (bit-doubling) table -- 16 bytes, map nibble -> byte where each bit is doubled ---
 | used by DLOOP to expand doubled patterns
 
@@ -369,16 +361,12 @@ COLOROK:
         RTS                                     | AND RETURN
 
 | -------------------------------------------------------
-| PROCEDURE PortWord(word: INTEGER);
-| INSTALL A WORD INTO CURRENT GRAFPORT. ENTER WITH OFFSET IN D0
-| PortWord
-
-| .PROC GetMaskTab,0
-| .DEF LeftMask,RightMask,BitMask,MaskTab
-| ----------------------------------------------------------
-| ASSEMBLY LANGUAGE CALLABLE PROCEDURES LEFTMASK, RIGHTMASK, AND BITMASK:
-| ENTER WITH COORDINATE IN D0, RETURNS WITH 16 BIT MASK IN D0
-| NO OTHER REGISTERS ALTERED.
+| PROCEDURE PortWord(word: INTEGER);   (L_mPortWord)
+| PROCEDURE PortLong(long: LongInt);   (L_mPortLong)
+| INSTALL A WORD / LONG INTO THE CURRENT GRAFPORT. ENTER WITH THE FIELD
+| OFFSET IN D0; the value is popped off the stack. Tail-jumped to by
+| ForeColor/BackColor (PortLong) and ColorBit, GrafDevice, TextFont,
+| TextMode, TextSize, PenMode (PortWord).
 | Called during boot.
 L_mPortWord:
         MOVE.L  (SP)+,A1                        | POP RETURN ADDR
@@ -395,9 +383,9 @@ L_mPortLong:
 
 | ----------------------------------------------------------
 | FUNCTION GetPixel(h, v: INTEGER): BOOLEAN;
-| Returns TRUE if pixel at (h,v) is black. Plus equivalent: Util.s 573.
+| Returns TRUE if pixel at (h,v) is black.
 GetPixel:
-        JSR     FMQD_HideCursor(PC)             | GET RID OF CURSOR
+        JSR     HideCursor(PC)                  | GET RID OF CURSOR
         MOVE.L  (SP)+,D2                        | POP RETURN ADDR
         MOVE.L  (A5),A1                         | POINT TO QUICKDRAW GLOBALS
         MOVE.L  (A1),A1                         | GET THEPORT
@@ -415,14 +403,14 @@ GetPixel:
         SNE     (SP)                            | SET BOOLEAN RESULT
         NEG.B   (SP)                            | MAKE $FF --> $01
         MOVE.L  D2,-(SP)                        | PUSH RETURN ADDR
-        JMP     FMQD_ShowCursor(PC)             | RESTORE CURSOR AND RETURN
+        JMP     ShowCursor(PC)                  | RESTORE CURSOR AND RETURN
         MOVE.L  4(SP),A0                        | A0 = arg pointer (skip return addr)
         MOVE.L  (SP)+,(SP)                      | pop return addr, overwrite arg slot
         JMP     (A0)                            | RTS
 | ----------------------------------------------------------
 | PROCEDURE StuffHex(thingPtr: Ptr; hexStr: Str255);
 | Convert a hex string to bytes and stuff into thingPtr. No
-| range-checking. Plus equivalent: Util.s 602.
+| range-checking.
 StuffHex:
         MOVE.L  4(SP),A0                        | A0:=ADDR OF STRING
         MOVE.L  8(SP),A1                        | A1:=THINGPTR
@@ -493,3 +481,52 @@ SLABMODE_TBL:
         ORI     #0x54,D0                        | (data: dispatch entry encoded as opcode)
 SLABMODE_HANDLERS:
         AND     D3,D1                           | COMBINE RIGHT AND LEFT MASK
+SLAB_NEXT8:
+        MOVE    D6,D0                           | GET PATTERN DATA
+        AND     (A2)+,D1                        | mask pattern with edge mask
+        AND     D1,D0                           | isolate src bits inside mask
+        NOT     D1                              | invert mask for dst-keep
+        AND     (A1),D1                         | keep dst bits outside mask
+        OR      D0,D1                           | merge src and kept dst
+        MOVE    D1,(A1)+                        | UPDATE DST
+        MOVEQ.L #-0x1,D1                        | reset mask for next word
+        SUBQ.W  #0x1,D2                         | decrement word count
+        BGT.B   SLAB_NEXT8                      | more words -> loop
+        BEQ.B   SLABMODE_HANDLERS               | last word -> apply edge mask
+        RTS                                     | done
+SLAB_END9:
+        AND     D3,D1                           | srcOr last word: apply edge mask
+SLAB_NEXT9:
+        AND     D6,D1                           | srcOr: AND mask with pattern
+        AND     (A2)+,D1                        | AND with bg pattern lookup
+        OR      D1,(A1)+                        | OR result into dst (srcOr)
+        MOVEQ.L #-0x1,D1                        | reset mask for next word
+        SUBQ.W  #0x1,D2                         | decrement word count
+        BGT.B   SLAB_NEXT9                      | more words -> loop
+        BEQ.B   SLAB_END9                       | last word -> apply edge mask
+        RTS                                     | done
+SLAB_END10:
+        AND     D3,D1                           | srcXor last word: apply edge mask
+SLAB_NEXT10:
+        AND     D6,D1                           | srcXor: AND mask with pattern
+        AND     (A2)+,D1                        | AND with bg pattern lookup
+        EOR     D1,(A1)+                        | XOR into dst (srcXor)
+        MOVEQ.L #-0x1,D1                        | reset mask for next word
+        SUBQ.W  #0x1,D2                         | decrement word count
+        BGT.B   SLAB_NEXT10                     | more words -> loop
+        BEQ.B   SLAB_END10                      | last word -> apply edge mask
+        RTS                                     | done
+SLAB_END11:
+        AND     D3,D1                           | srcBic last word: apply edge mask
+SLAB_NEXT11:
+        AND     D6,D1                           | srcBic: AND mask with pattern
+        AND     (A2)+,D1                        | AND with bg pattern lookup
+        NOT     D1                              | invert for bit-clear
+        AND     D1,(A1)+                        | clear bits in dst (srcBic)
+        MOVEQ.L #-0x1,D1                        | reset mask for next word
+        SUBQ.W  #0x1,D2                         | decrement word count
+        BGT.B   SLAB_NEXT11                     | more words -> loop
+        BEQ.B   SLAB_END11                      | last word -> apply edge mask
+        RTS                                     | done
+
+

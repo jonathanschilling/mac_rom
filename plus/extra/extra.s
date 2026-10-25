@@ -4,7 +4,6 @@
 | (easter egg), and the ROM build date "Wed, Nov 6, 1985".
 
 | SCSI patch, easter egg, date string
-| ROM section: src/extra/extra.asm
 | Called during boot (v3 only; see ROM-variant notes below).
 |
 | --- ROM-variant difference @ $1FFC0-$1FFCF (first 16 bytes of area) ---

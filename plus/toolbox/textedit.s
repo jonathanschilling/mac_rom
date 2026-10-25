@@ -1,9 +1,13 @@
 | TextEdit
 |
-| Provides basic text editing capabilities: TENew, TEDispose,
-| TESetText, TEGetText, TEKey, TEClick, TEInsert, TEDelete,
-| TEActivate, TEDeactivate, TEIdle, TECopy, TECut, TEPaste,
-| TEScroll, TECalText, TEUpdate, and styled text support.
+| Apple source: TextEdit.a (MacSEROM.lst module TEXTEDIT). Basic text
+| editing: TEGetText, TEInit, TEDispose, TextBox, TESetText, TECalText,
+| TESetSelect, TENew, TEUpdate, TEClick, TECopy, TECut, TEDelete,
+| TEActivate, TEDeactivate, TEIdle, TEPaste, TEInsert, TEKey, TESetJust,
+| TEScroll, and the Mac Plus additions TEPinScroll, TESelView, TEAutoView
+| (automatic scrolling, see the section comment there), with the internal
+| measuring/line-breaking routines (XTrimMeasure, TEFindWord, TEFindLine,
+| vectored through the low-memory TE hooks).
 |
 | TERec (MPW 1.0 TextEdit.h):
 | Offset 0: destRect Rect destination rectangle (8 bytes)
@@ -24,7 +28,7 @@
 | Offset 58: just INTEGER justification (0=left, 1=center, -1=right)
 | Offset 60: teLength INTEGER length of text
 | Offset 62: hText Handle handle to text
-| Offset 66: recalBack INTEGER reserved
+| Offset 66: recalBack INTEGER TEFlags; bit 6 = auto-view (TEAutoView)
 | Offset 68: recalLines INTEGER reserved
 | Offset 70: clikStuff INTEGER reserved
 | Offset 72: crOnly INTEGER carriage return only flag
@@ -40,686 +44,6 @@
 |
 | References:
 | Inside Macintosh Vol I, Ch 12: TextEdit
-
-| ----------------------------------------------------------
-|
-| _SystemEvent ($A9B2) - handle system events (desk accessories)
-|
-| FUNCTION SystemEvent(theEvent: EventRecord): BOOLEAN
-|
-| Determines if a system event (mouse/key/etc.) should be handled
-| by a desk accessory rather than the application. Dispatches by
-| event code through jump table SYSEVT_DISPATCH.
-| Returns TRUE (1) in result word if the system handled the event.
-|
-| Called during boot.
-SystemEvent:
-        MOVE.L  A3,-(SP)                        | save A3
-        MOVE.L  0x8(SP),A3                      | A3 -> EventRecord parameter
-        CLR     0xC(SP)                         | clear result (assume FALSE)
-        SUBQ.W  #0x4,SP                         | allocate space for saved port
-        MOVE.L  A7,-(SP)                        | push ptr to saved port variable
-        _GetPort                                | save current grafport
-        MOVE    (A3),D0                         | D0 = event code (what field)
-        CMPI    #0xC,D0                         | event code >= 12?
-        BCC.B   SYSEVT_RESTORE                  | out of range: ignore event
-        ADD     D0,D0                           | word offset into dispatch table
-        LEA.L   SYSEVT_DISPATCH(PC),A0          | A0 -> event dispatch table
-        ADDA    0x0(A0,D0.W),A0                 | add relative offset for this event
-        JMP     (A0)                            | dispatch to event handler
-
-| ----------------------------------------------------------
-|
-| SYSEVT_DISPATCH - SystemEvent dispatch table (word offsets from SYSEVT_DISPATCH)
-|
-| Entries for event codes 0-11:
-| 0 (null): -> SYSEVT_HANDLED (not handled)
-| 1 (mouseDown): -> SYSEVT_HANDLED (not handled by system)
-| 2 (mouseUp): -> handler
-| 3 (keyDown): -> handler
-| 4 (keyUp): -> handler
-| 5 (autoKey): -> handler
-| 6 (update): -> desk accessory update handler
-| 7 (disk): -> disk-inserted handler
-| 8 (activate): -> desk accessory activate handler
-| 9 (abort): -> SYSEVT_HANDLED (not handled)
-| 10 (network): -> handler
-| 11 (driver): -> handler
-|
-SYSEVT_DISPATCH:
-  .byte 0x00,0x1C,0x00,0x1C,0x00,0x24
-  .byte 0x00,0x24,0x00,0x24,0x00,0x24
-  .byte 0x00,0x78,0x00,0x84,0x00,0x78
-  .byte 0x00,0x1C,0x00,0x24,0x00,0x24
-SYSEVT_HANDLED:
-        ADDQ.B  #0x1,0x10(SP)                   | set result to TRUE (system handled)
-SYSEVT_RESTORE:
-        _SetPort                                | restore saved grafport
-        MOVE.L  (SP)+,A3                        | restore A3
-        MOVE.L  (SP)+,(SP)                      | collapse stack frame
-        RTS                                     | return from desk accessory event handler
-
-TEXTEDIT_CONT:
-        SUBQ.W  #0x4,SP                         | space for FrontWindow result
-        _FrontWindow                            | get frontmost window
-        MOVE.L  (SP)+,A0                        | A0 = front window ptr
-        BSR.B   TEXTEDIT_CONT_2                 | look up desk accessory DCE -> A1
-        BNE.B   SYSEVT_RESTORE                  | not a DA window, bail
-        MOVE    (A3),D0                         | D0 = event code (from caller)
-        MOVE    0x24(A1),D1                     | D1 = DCE event mask
-        BTST    D0,D1                           | DA interested in this event?
-        BEQ.B   SYSEVT_RESTORE                  | no, bail
-        BSR.B   TEXTEDIT_CONT_3                 | send accEvent control call to DA
-        BRA.B   SYSEVT_HANDLED                  | -> return
-
-| ----------------------------------------------------------
-|
-| TEXTEDIT_CONT_2
-|
-| Called during boot (3,697 times in 30s trace).
-TEXTEDIT_CONT_2:
-        MOVE    0x6C(A0),D0                     | D0 = windowKind from WindowRecord
-        BPL.B   TEXTEDIT_ERR                    | positive = not a DA, return error
-        NOT     D0                              | convert DA refNum to unit number
-        ASL     #0x2,D0                         | multiply by 4 for table index
-        MOVE.L  (UTableBase).w,A0               | A0 = unit table base
-        MOVE.L  0x0(A0,D0.W),A0                 | A0 = handle to DCE
-        MOVE.L  (A0),A1                         | A1 = dereferenced DCE pointer
-        MOVEQ.L #0x0,D0                         | return 0 = success (Z flag set)
-        RTS                                     | return success code (0)
-
-| ----------------------------------------------------------
-|
-| TEXTEDIT_ERR
-|
-| Called during boot (3,697 times in 30s trace).
-TEXTEDIT_ERR:
-        MOVEQ.L #-0x1,D0                        | return -1 = not a DA (NE flag set)
-        RTS                                     | return failure code (-1)
-
-| TEXTEDIT_CONT_3 -- send accEvent control call to DA.
-| ----------------------------------------------------------
-|
-| TEXTEDIT_CONT_3
-|
-TEXTEDIT_CONT_3:
-        MOVEQ.L #0x40,D0                        | csCode = accEvent (64)
-| TEXTEDIT_CONT_4 -- send accCursor to front DA.
-TEXTEDIT_CONT_4:
-        LINK    A6,#-0x20                       | allocate param block on stack
-        LEA.L   -0x8(A6),A0                     | A0 = csParam area in param block
-        MOVE    0x18(A1),(A0)+                  | csParam[0] = DCE refNum
-        MOVE    D0,(A0)+                        | csParam[1] = csCode
-        MOVE.L  A3,(A0)                         | csParam[2] = event/menu ptr
-        LEA.L   -0x20(A6),A0                    | A0 = param block base
-        _ControlImmed                           | issue synchronous Control call to DA
-        UNLK    A6                              | tear down frame
-        RTS                                     | return from synchronous Control call
-
-| TEXTEDIT_CONT_5 -- send accRun to this DA.
-| ----------------------------------------------------------
-|
-| TEXTEDIT_CONT_5
-|
-TEXTEDIT_CONT_5:
-        MOVEQ.L #0x41,D0                        | csCode = accRun (65)
-        BRA.B   TEXTEDIT_CONT_4                 | -> send Control call to DA
-
-| ----------------------------------------------------------
-|
-| TEXTEDIT_CONT_6
-|
-| Called during boot.
-TEXTEDIT_CONT_6:
-        MOVE.L  PORTBITS(A3),A0                 | A0 = window ptr from event record
-        BSR.B   TEXTEDIT_CONT_2                 | look up DA's DCE -> A1
-        BNE.B   SYSEVT_RESTORE                  | not a DA, bail
-        BSR.B   TEXTEDIT_CONT_3                 | send accEvent control call
-        BRA.B   SYSEVT_HANDLED                  | -> return
-
-| ----------------------------------------------------------
-|
-| TEXTEDIT_CONT_7
-|
-TEXTEDIT_CONT_7:
-        SUBA    #0x18,SP                        | allocate VolumeParam block on stack
-        MOVE.L  A7,A0                           | A0 = param block ptr
-        MOVE    0x4(A3),0x16(A0)                | ioVRefNum = drive number from caller
-        _MountVol                               | mount the volume
-        ADDA    #0x18,SP                        | discard param block
-        MOVE    D0,PORTBITS(A3)                 | store result code
-  .short 0x6080                                 | Bra.B SYSEVT_RESTORE
-
-| SystemClick -- _SystemClick ($A9B3): PROCEDURE SystemClick (theEvent: EventRecord; theWindow:
-SystemClick:
-        MOVEM.L D0/D3-D4/A3-A4,-(SP)            | save registers
-        MOVE.L  A7,-(SP)                        | push ptr for GetPort result
-        _GetPort                                | save current port
-        MOVE.L  0x18(SP),A4                     | A4 = window ptr (param)
-        MOVE.L  0x7E(A4),A3                     | A3 = window defProc handle
-        MOVE.L  0x1C(SP),D4                     | D4 = event record ptr (param)
-        MOVE.L  A4,D0                           | test window ptr
-        BEQ     SYSTEMCLICK_EMPTY               | nil -> desktop click
-        MOVE.L  A4,A0                           | A0 = window ptr
-        BSR.B   TEXTEDIT_CONT_2                 | look up DA's DCE -> A1
-        BNE.B   SYSTEMCLICK_EXIT                | not a DA -> restore and return
-        MOVE.L  A1,D3                           | D3 = saved DCE ptr
-        MOVEQ.L #0x0,D0                         | clear high bytes
-        MOVE.B  0x7E(A4),D0                     | D0 = WDEF resource ID (low byte of handle)
-        CLR.L   -(SP)                           | space for FindWindow result
-        MOVE    D0,-(SP)                        | push part code
-        MOVE.L  A4,-(SP)                        | push window ptr
-        MOVE    #0x1,-(SP)                      | msg = wHit (find part)
-        MOVE.L  D4,A0                           | A0 = event record
-        MOVE.L  0xA(A0),-(SP)                   | push event.where (mouse point)
-        MOVE.L  A3,-(SP)                        | push defProc handle
-        _LoadResource                           | ensure defProc is loaded
-        MOVE.L  (A3),A0                         | dereference defProc handle
-        BSET    #0x7,(A3)                       | lock defProc handle
-        JSR     (A0)                            | call WDEF: returns part code
-        BCLR    #0x7,(A3)                       | unlock defProc handle
-        MOVE.L  (SP)+,D0                        | D0 = part code from WDEF
-        BEQ.B   SYSTEMCLICK_EXIT                | 0 = no hit -> done
-        SUBQ.W  #0x2,D0                         | test for inDrag (2)
-        BEQ.B   SYSTEMCLICK_OK                  | yes -> drag window
-        SUBQ.W  #0x2,D0                         | test for inGoAway (4)
-        BEQ.B   SYSTEMCLICK_OK_2                | yes -> track close box
-        CLR.L   -(SP)                           | space for FrontWindow result
-        _FrontWindow                            | get frontmost window
-        MOVE.L  (SP)+,D0                        | D0 = front window
-        CMP.L   A4,D0                           | is clicked window frontmost?
-        BNE.B   SYSTEMCLICK_NO                  | no -> bring it to front
-        MOVE.L  D4,A3                           | A3 = event record for accEvent
-        MOVE.L  D3,A1                           | A1 = DCE ptr
-        BSR     TEXTEDIT_CONT_3                 | send accEvent to DA
-| Called by: SYSTEMCLICK_EMPTY, SYSTEMCLICK_NO, SYSTEMCLICK_OK, SYSTEMCLICK_OK_2, SYSTEMCLICK_OK_3
-SYSTEMCLICK_EXIT:
-        _SetPort                                | restore saved port
-        MOVEM.L (SP)+,D3-D4/A3-A4               | restore registers
-        MOVE.L  (SP)+,A0                        | A0 = return address
-        ADDQ.W  #0x8,SP                         | pop 2 params (window, event)
-        JMP     (A0)                            | return to caller
-
-| ----------------------------------------------------------
-|
-| SYSTEMCLICK_EMPTY
-|
-| Called during boot.
-SYSTEMCLICK_EMPTY:
-        TST.L   (DeskHook).w                    | custom desktop hook installed?
-        BEQ.B   SYSTEMCLICK_EXIT                | no -> done
-        MOVE.L  (WMgrPort).w,-(SP)              | set port to Window Manager port
-        _SetPort                                | switch to WMgr port
-        MOVE.L  (GrayRgn).w,-(SP)               | clip to gray region (desktop area)
-        _SetClip                                | restrict drawing to desktop
-        CLR.L   -(SP)                           | no window to clip above
-        _ClipAbove                              | clip to behind all windows
-        MOVE.L  D4,A0                           | A0 = event record
-        MOVE.L  (DeskHook).w,A1                 | A1 = desk hook procedure
-        MOVEQ.L #-0x1,D0                        | D0 = -1 (click in desktop)
-        JSR     (A1)                            | call desk hook
-        BRA.B   SYSTEMCLICK_EXIT                | -> restore and return
-
-| ----------------------------------------------------------
-|
-| SYSTEMCLICK_NO
-|
-SYSTEMCLICK_NO:
-        MOVE.L  A4,-(SP)                        | push DA window to bring to front
-        _SelectWindow                           | activate and bring window forward
-        BRA.B   SYSTEMCLICK_EXIT                | -> restore and return
-
-| ----------------------------------------------------------
-|
-| SYSTEMCLICK_OK
-|
-SYSTEMCLICK_OK:
-        MOVE.L  A4,-(SP)                        | push window ptr
-        MOVE.L  D4,A0                           | A0 = event record
-        MOVE.L  0xA(A0),-(SP)                   | push event.where (start point)
-        MOVE.L  (A5),A0                         | A0 = app globals ptr
-        PEA.L   -0x74(A0)                       | push drag boundary rect
-        _DragWindow                             | let user drag DA title bar
-        BRA.B   SYSTEMCLICK_EXIT                | -> restore and return
-
-| ----------------------------------------------------------
-|
-| SYSTEMCLICK_OK_2
-|
-SYSTEMCLICK_OK_2:
-        CLR     -(SP)                           | space for TrackGoAway result
-        MOVE.L  A4,-(SP)                        | push window ptr
-        MOVE.L  D4,A0                           | A0 = event record
-        MOVE.L  0xA(A0),-(SP)                   | push event.where (mouse point)
-        _TrackGoAway                            | track close box click
-        TST.B   (SP)+                           | user confirmed close?
-        BEQ.B   SYSTEMCLICK_EXIT                | no -> done
-        MOVE.L  D3,A1                           | A1 = DCE ptr
-        MOVE.L  (CloseOrnHook).w,D0             | custom close hook installed?
-        BNE.B   SYSTEMCLICK_OK_3                | yes -> call custom hook
-        MOVE    0x18(A1),-(SP)                  | push DA refNum from DCE
-        _CloseDeskAcc                           | close the desk accessory
-        BRA.B   SYSTEMCLICK_EXIT                | -> restore and return
-
-| ----------------------------------------------------------
-|
-| SYSTEMCLICK_OK_3
-|
-SYSTEMCLICK_OK_3:
-        MOVE.L  D0,A0                           | A0 = close ornament hook
-        JSR     (A0)                            | call custom close handler
-        BRA.B   SYSTEMCLICK_EXIT                | -> restore and return
-
-| ----------------------------------------------------------
-|
-| _SystemTask ($A9B4)
-|
-| Called during boot (3,694 times in 30s trace).
-SystemTask:
-        MOVEM.L D3/A3,-(SP)                     | save registers
-        BSET    #0x7,(TaskLock).w               | test-and-set task lock (reentrance guard)
-        BNE     SYSTEMTASK_CONT                 | already locked -> bail
-        SUBQ.W  #0x4,SP                         | space for saved port
-        MOVE.L  A7,-(SP)                        | push ptr for GetPort result
-        _GetPort                                | save current port
-        CLR.L   -(SP)                           | space for FrontWindow result
-        _FrontWindow                            | get frontmost window
-        MOVE.L  (SP)+,D0                        | D0 = front window ptr
-        BEQ.B   SYSTEMTASK_SKIP                 | no front window -> skip DA idle
-        MOVE.L  D0,A0                           | A0 = front window
-        BSR     TEXTEDIT_CONT_2                 | look up DCE -> A1
-        BNE.B   SYSTEMTASK_SKIP                 | not a DA -> skip
-        BTST    #0x7,0x5(A1)                    | DCE flags: dNeedTime set?
-        BNE.B   SYSTEMTASK_SKIP                 | yes -> handled below in loop
-        MOVEQ.L #0x42,D0                        | csCode = accCursor (66)
-        BSR     TEXTEDIT_CONT_4                 | send accCursor to front DA
-SYSTEMTASK_SKIP:
-        MOVE.L  (UTableBase).w,A3               | A3 = unit table base
-        MOVE    (UnitTableEntryCount).w,D3      | D3 = number of unit table entries
-SYSTEMTASK_LOOP:
-        MOVE.L  (A3)+,D0                        | D0 = next DCE handle
-        BEQ.B   SYSTEMTASK_SKIP_2               | nil -> skip this slot
-        MOVE.L  D0,A0                           | A0 = DCE handle
-        MOVE.L  (A0),A1                         | A1 = dereferenced DCE
-        MOVE    0x4(A1),D0                      | D0 = dCtlFlags
-        ANDI    #0x20A0,D0                      | mask dNeedTime + dOpened + dRAMBased
-        CMPI    #0x2020,D0                      | dNeedTime and dOpened both set?
-        BNE.B   SYSTEMTASK_SKIP_2               | no -> skip
-        MOVEQ.L #0x0,D0                         | clear high word
-        MOVE    0x22(A1),D0                     | D0 = dCtlDelay (tick interval)
-        BEQ.B   SYSTEMTASK_EMPTY                | zero delay -> always run
-        ADD.L   0x1A(A1),D0                     | D0 = last run time + delay
-        CMP.L   (Ticks).w,D0                    | time to run yet?
-        BGT.B   SYSTEMTASK_SKIP_2               | not yet -> skip
-        MOVE.L  (Ticks).w,0x1A(A1)              | update last run time to now
-SYSTEMTASK_EMPTY:
-        BSR     TEXTEDIT_CONT_5                 | send accRun to this DA
-SYSTEMTASK_SKIP_2:
-        SUBQ.W  #0x1,D3                         | decrement unit counter
-        BGT.B   SYSTEMTASK_LOOP                 | more entries -> loop
-        _SetPort                                | restore saved port
-        CLR.B   (TaskLock).w                    | release task lock
-SYSTEMTASK_CONT:
-        MOVEM.L (SP)+,D3/A3                     | restore registers
-        RTS                                     | return from accRun loop
-
-| SystemMenu -- _SystemMenu ($A9B5): PROCEDURE SystemMenu (menuResult: LONGINT);
-| ----------------------------------------------------------
-|
-| _SystemMenu ($A9B5)
-|
-SystemMenu:
-        MOVEM.L A2-A3,-(SP)                     | save registers
-        MOVE.L  0xC(SP),D1                      | D1 = menu result (menuID | item)
-        SWAP    D1                              | D1.W = menuID
-        MOVE    (MBarEnable).w,D0               | D0 = menu bar enable word
-        BEQ.B   SYSTEMMENU_EMPTY                | zero -> use menuID from param
-        MOVE    D0,D1                           | override with MBarEnable menuID
-SYSTEMMENU_EMPTY:
-        MOVE.L  (UTableBase).w,A2               | A2 = unit table base
-        MOVE    (UnitTableEntryCount).w,D2      | D2 = unit count
-SYSTEMMENU_LOOP:
-        MOVE.L  (A2)+,D0                        | D0 = next DCE handle
-        BEQ.B   SYSTEMMENU_SKIP                 | nil -> skip slot
-        MOVE.L  D0,A0                           | A0 = DCE handle
-        MOVE.L  (A0),A1                         | A1 = dereferenced DCE
-        BTST    #0x5,0x5(A1)                    | dCtlFlags: dNeedTime set? (has menu)
-        BEQ.B   SYSTEMMENU_SKIP                 | no -> skip
-        CMP     0x26(A1),D1                     | DCE menuID matches selected menu?
-        BNE.B   SYSTEMMENU_SKIP                 | no -> try next
-        MOVE.L  0xC(SP),A3                      | A3 = menu result for accMenu
-        MOVEQ.L #0x43,D0                        | csCode = accMenu (67)
-        BSR     TEXTEDIT_CONT_4                 | send accMenu control call
-        BRA.B   SYSTEMMENU_DONE                 | -> done
-
-| ----------------------------------------------------------
-|
-| SYSTEMMENU_SKIP
-|
-SYSTEMMENU_SKIP:
-        SUBQ.W  #0x1,D2                         | decrement unit counter
-        BGT.B   SYSTEMMENU_LOOP                 | more entries -> loop
-SYSTEMMENU_DONE:
-        MOVEM.L (SP)+,A2-A3                     | restore registers
-        MOVE.L  (SP)+,(SP)                      | pop return addr over param
-        RTS                                     | return from unit counter loop
-
-| SysEdit -- trap handler for _SysEdit ($A9C2).
-| ----------------------------------------------------------
-|
-| _SysEdit ($A9C2)
-|
-SysEdit:
-        CLR     0x6(SP)                         | clear result (FALSE by default)
-        SUBQ.W  #0x8,SP                         | allocate saved port + window
-        PEA.L   0x4(SP)                         | push ptr for GetPort result
-        _GetPort                                | save current port
-        _FrontWindow                            | get frontmost window
-        MOVE.L  (SP)+,D0                        | D0 = front window ptr
-        BEQ.B   SYSEDIT_SKIP                    | no window -> skip
-        MOVE.L  D0,A0                           | A0 = front window
-        BSR     TEXTEDIT_CONT_2                 | look up DA's DCE -> A1
-        BNE.B   SYSEDIT_SKIP                    | not a DA -> skip
-        MOVE    0x8(SP),D0                      | D0 = editCmd parameter (0-3)
-        ADDI    #0x44,D0                        | convert to csCode (accUndo=68..accPaste=71)
-        BSR     TEXTEDIT_CONT_4                 | send edit command to DA
-        ADDQ.B  #0x1,0xA(SP)                    | set result = TRUE (DA handled it)
-SYSEDIT_SKIP:
-        _SetPort                                | restore saved port
-        BRA.B   CLOSEDESKACC_EXIT               | -> clean up and return
-
-| ----------------------------------------------------------
-|
-| _OpenDeskAcc ($A9B6)
-|
-OpenDeskAcc:
-        CLR     0x8(SP)                         | clear result (refNum = 0)
-        SUBA    #0x20,SP                        | allocate IOParam block on stack
-        MOVE.L  0x24(SP),0x12(SP)               | ioNamePtr = DA name (from param)
-        CLR     0x16(SP)                        | ioVRefNum = 0
-        MOVE    #0x40,0x1A(SP)                  | ioPermssn = fsRdPerm (read-only)
-        CLR.L   0x1C(SP)                        | ioMisc = nil
-        MOVE.L  A7,A0                           | A0 = param block
-        _Open                                   | open the desk accessory driver
-        BNE.B   OPENDESKACC_ERR                 | error -> bail
-        MOVE    0x18(SP),D0                     | D0 = ioRefNum (DA refNum)
-        MOVE    D0,0x28(SP)                     | store as return value
-        NOT     D0                              | convert refNum to unit number
-        ASL     #0x2,D0                         | multiply by 4 for table index
-        MOVE.L  (UTableBase).w,A1               | A1 = unit table base
-        MOVE.L  0x0(A1,D0.W),A1                 | A1 = DCE handle
-        MOVE.L  (A1),A1                         | A1 = dereferenced DCE
-        MOVE.L  0x1E(A1),D0                     | D0 = dCtlWindow (DA's window)
-        BEQ.B   OPENDESKACC_ERR                 | nil -> no window to show
-        MOVE.L  D0,-(SP)                        | push window ptr
-        MOVE.L  D0,-(SP)                        | push window ptr again
-        _SelectWindow                           | bring DA window to front
-        _ShowWindow                             | make DA window visible
-OPENDESKACC_ERR:
-        ADDA    #0x20,SP                        | discard param block
-        MOVE.L  (SP)+,(SP)                      | pop return addr over name param
-        RTS                                     | return from DA window activation
-
-| ----------------------------------------------------------
-|
-| _CloseDeskAcc ($A9B7)
-|
-CloseDeskAcc:
-        MOVE    0x4(SP),D0                      | D0 = DA refNum (param)
-        SUBA    #0x1E,SP                        | allocate IOParam block
-        MOVE    D0,0x18(SP)                     | ioRefNum = DA refNum
-        MOVE.L  A7,A0                           | A0 = param block
-        _Close                                  | close the DA driver
-        ADDA    #0x1E,SP                        | discard param block
-CLOSEDESKACC_EXIT:
-        MOVE.L  (SP)+,A0                        | A0 = return address
-        ADDQ.W  #0x2,SP                         | pop parameter word
-        JMP     (A0)                            | return to caller
-
-| ----------------------------------------------------------
-|
-| _GetPattern ($A9B8)
-|
-| Called during boot.
-GetPattern:
-        MOVE.L  #0x50415420,D0                  | D0 = 'PAT ' resource type
-GETPATTERN_EXIT:
-        SUBQ.W  #0x4,SP                         | space for GetResource result
-        MOVE.L  D0,-(SP)                        | push resource type
-        MOVE    0xC(SP),-(SP)                   | push resource ID (param)
-        _GetResource                            | load resource -> handle on stack
-        MOVE.L  (SP)+,D0                        | D0 = resource handle
-        MOVE.L  (SP)+,A0                        | A0 = return address
-        ADDQ.W  #0x2,SP                         | pop resID parameter
-        MOVE.L  D0,(SP)                         | store handle as return value
-        JMP     (A0)                            | return to caller
-
-| ----------------------------------------------------------
-|
-| _GetCursor ($A9B9)
-|
-| Called during boot.
-GetCursor:
-        MOVE.L  #0x43555253,D0                  | D0 = 'CURS' resource type
-        BRA.B   GETPATTERN_EXIT                 | -> get and return resource
-
-| GetString -- _GetString ($A9BA): FUNCTION GetString (stringID: INTEGER) : StringHandle;
-| ----------------------------------------------------------
-|
-| _GetString ($A9BA)
-|
-GetString:
-        MOVE.L  #0x53545220,D0                  | D0 = 'STR ' resource type
-        BRA.B   GETPATTERN_EXIT                 | -> get and return resource
-
-| GetIcon -- trap handler for _GetIcon ($A9BB).
-| ----------------------------------------------------------
-|
-| _GetIcon ($A9BB)
-|
-GetIcon:
-        MOVE.L  #0x49434F4E,D0                  | D0 = 'ICON' resource type
-        BRA.B   GETPATTERN_EXIT                 | -> get and return resource
-
-| GetPicture -- _GetPicture ($A9BC): FUNCTION GetPicture (picID: INTEGER) : PicHandle;
-| ----------------------------------------------------------
-|
-| _GetPicture ($A9BC)
-|
-GetPicture:
-        MOVE.L  #0x50494354,D0                  | D0 = 'PICT' resource type
-        BRA.B   GETPATTERN_EXIT                 | -> get and return resource
-
-| ----------------------------------------------------------
-|
-| _GetNewWindow ($A9BD)
-|
-GetNewWindow:
-        LINK    A6,#0x0                         | set up stack frame
-        MOVE.L  A3,-(SP)                        | save A3
-        CLR.L   0x12(A6)                        | clear return value (window ptr)
-        SUBQ.W  #0x4,SP                         | space for GetResource result
-        MOVE.L  #0x57494E44,-(SP)               | push 'WIND' resource type
-        MOVE    0x10(A6),-(SP)                  | push resource ID (param)
-        _GetResource                            | load WIND template
-        MOVE.L  (SP)+,A3                        | A3 = WIND resource handle
-        MOVE.L  A3,D0                           | test for nil
-        BEQ.B   GETNEWWINDOW_FOUND              | not found -> bail
-        MOVE.L  (A3),A0                         | A0 = dereferenced WIND data
-        SUBQ.W  #0x4,SP                         | space for NewWindow result
-        MOVE.L  0xC(A6),-(SP)                   | push wStorage (behind param)
-        MOVE.L  A0,-(SP)                        | push boundsRect from template
-        PEA.L   0x12(A0)                        | push title string from template
-        MOVE.L  0x8(A0),-(SP)                   | push visible + procID from template
-        MOVE.L  0x8(A6),-(SP)                   | push behind window (param)
-        MOVE    0xC(A0),-(SP)                   | push goAwayFlag from template
-        MOVE.L  0xE(A0),-(SP)                   | push refCon from template
-        BSET    #0x7,(A3)                       | lock WIND handle during NewWindow
-        _NewWindow                              | create the window
-        MOVE.L  (SP)+,0x12(A6)                  | store window ptr as return value
-        MOVE.L  A3,-(SP)                        | push WIND handle
-        _ReleaseResource                        | release the WIND template
-GETNEWWINDOW_FOUND:
-        MOVE.L  (SP)+,A3                        | restore A3
-        UNLK    A6                              | tear down frame
-        MOVE.L  (SP)+,A0                        | A0 = return address
-        ADDA    #0xA,SP                         | pop parameters (10 bytes)
-        JMP     (A0)                            | return to caller
-
-| ----------------------------------------------------------
-|
-| _GetNewControl ($A9BE)
-|
-GetNewControl:
-        LINK    A6,#0x0                         | set up stack frame
-        MOVE.L  A3,-(SP)                        | save A3
-        CLR.L   0xE(A6)                         | clear return value (ControlHandle)
-        SUBQ.W  #0x4,SP                         | space for GetResource result
-        MOVE.L  #0x434E544C,-(SP)               | push 'CNTL' resource type
-        MOVE    0xC(A6),-(SP)                   | push resource ID (param)
-        _GetResource                            | load CNTL template
-        MOVE.L  (SP)+,A3                        | A3 = CNTL resource handle
-        MOVE.L  A3,D0                           | test for nil
-        BEQ.B   GETNEWCONTROL_FOUND             | not found -> bail
-        MOVE.L  (A3),A0                         | A0 = dereferenced CNTL data
-        SUBQ.W  #0x4,SP                         | space for NewControl result
-        MOVE.L  0x8(A6),-(SP)                   | push owning window (param)
-        MOVE.L  A0,-(SP)                        | push boundsRect from template
-        PEA.L   0x16(A0)                        | push title string from template
-        LEA.L   0x8(A0),A1                      | A1 = pointer past boundsRect
-        MOVE.L  (A1)+,-(SP)                     | push visible + initial value
-        MOVE.L  (A1)+,-(SP)                     | push min + max
-        MOVE    (A1)+,-(SP)                     | push procID
-        MOVE.L  (A1)+,-(SP)                     | push refCon
-        BSET    #0x7,(A3)                       | lock CNTL handle during NewControl
-        _NewControl                             | create the control
-        MOVE.L  (SP)+,0xE(A6)                   | store ControlHandle as return value
-        MOVE.L  A3,-(SP)                        | push CNTL handle
-        _ReleaseResource                        | release the CNTL template
-GETNEWCONTROL_FOUND:
-        MOVE.L  (SP)+,A3                        | restore A3
-        UNLK    A6                              | tear down frame
-        MOVE.L  (SP)+,A0                        | A0 = return address
-        ADDQ.W  #0x6,SP                         | pop parameters (6 bytes)
-        JMP     (A0)                            | return to caller
-
-| ----------------------------------------------------------
-|
-| _GetRMenu ($A9BF)
-|
-| Called during boot.
-GetRMenu:
-        LINK    A6,#0x0                         | set up stack frame
-        MOVE.L  A3,-(SP)                        | save A3
-        MOVE    (ResLoad).w,-(SP)               | save current ResLoad state
-        MOVEQ.L #0x0,D0                         | ResLoad = false (don't auto-load)
-        BSR.B   GETRMENU_CONT                   | get MENU resource -> A3
-        BEQ.B   GETRMENU_DONE                   | nil -> bail
-        MOVE.L  (A3),D0                         | is MENU already loaded?
-        BEQ.B   GETRMENU_NO                     | no -> try loading with ResLoad
-        CLR.L   -(SP)                           | space for GetResInfo result
-        MOVE.L  (A3),A0                         | dereference MENU handle
-        MOVE.L  0x6(A0),-(SP)                   | push menuProc handle
-        CLR.L   -(SP)                           | ID placeholder (not needed)
-        PEA.L   0x8(SP)                         | push ptr for type result
-        CLR.L   -(SP)                           | name placeholder (nil)
-        _GetResInfo                             | get resource type of menuProc
-        MOVE.L  (SP)+,D0                        | D0 = resource type
-        CMPI.L  #0x4D444546,D0                  | is it 'MDEF'?
-        BEQ.B   GETRMENU_DONE                   | yes -> already set up, done
-        BRA.B   GETRMENU_NO_2                   | no -> need to find MDEF
-
-| ----------------------------------------------------------
-|
-| GETRMENU_NO
-|
-GETRMENU_NO:
-        MOVEQ.L #0x1,D0                         | ResLoad = true (auto-load)
-        BSR.B   GETRMENU_CONT                   | reload MENU resource -> A3
-        BEQ.B   GETRMENU_DONE                   | nil -> bail
-GETRMENU_NO_2:
-        SUBQ.W  #0x4,SP                         | space for GetResource result
-        MOVE.L  #0x4D444546,-(SP)               | push 'MDEF' resource type
-        MOVE.L  (A3),A0                         | dereference MENU handle
-        MOVE    0x6(A0),-(SP)                   | push menuProc ID from MENU data
-        MOVE    #-0x1,(ROMMapInsert).w          | include ROM map in search
-        _GetResource                            | load MDEF resource
-        MOVE.L  (A3),A0                         | dereference MENU handle
-        MOVE.L  (SP)+,0x6(A0)                   | store MDEF handle into MENU.menuProc
-        MOVE.L  A3,-(SP)                        | push MENU handle
-        _CalcMenuSize                           | compute menu dimensions
-GETRMENU_DONE:
-        _SetResLoad                             | restore saved ResLoad state
-        MOVE.L  (SP)+,A3                        | restore A3
-        UNLK    A6                              | tear down frame
-        MOVE.L  (SP)+,A0                        | A0 = return address
-        ADDQ.W  #0x2,SP                         | pop menuID parameter
-        JMP     (A0)                            | return to caller
-
-| ----------------------------------------------------------
-|
-| GETRMENU_CONT
-|
-| Called during boot.
-GETRMENU_CONT:
-        MOVE.B  D0,-(SP)                        | push ResLoad flag (0 or 1)
-        _SetResLoad                             | set auto-load mode
-        SUBQ.W  #0x4,SP                         | space for GetResource result
-        MOVE.L  #0x4D454E55,-(SP)               | push 'MENU' resource type
-        MOVE    0x8(A6),-(SP)                   | push menu ID (param)
-        _GetResource                            | load MENU resource
-        MOVE.L  (SP)+,A3                        | A3 = MENU handle
-        MOVE.L  A3,0xA(A6)                      | store as return value
-        RTS                                     | return newly loaded MENU handle
-
-| GetNewMBar -- _GetNewMBar ($A9C0): FUNCTION GetNewMBar (menuBarID: Integer): Handle;
-| ----------------------------------------------------------
-|
-| _GetNewMBar ($A9C0)
-|
-GetNewMBar:
-        LINK    A6,#0x0                         | set up stack frame
-        MOVEM.L D3/A3,-(SP)                     | save registers
-        CLR.L   0xA(A6)                         | clear return value (menu bar handle)
-        SUBQ.W  #0x4,SP                         | space for GetMenuBar result
-        _GetMenuBar                             | save current menu bar
-        _ClearMenuBar                           | clear menu list
-        SUBQ.W  #0x4,SP                         | space for GetResource result
-        MOVE.L  #0x4D424152,-(SP)               | push 'MBAR' resource type
-        MOVE    0x8(A6),-(SP)                   | push resource ID (param)
-        _GetResource                            | load MBAR resource
-        MOVE.L  (SP)+,A3                        | A3 = MBAR handle
-        MOVE.L  A3,D0                           | test for nil
-        BEQ.B   GETNEWMBAR_FOUND                | not found -> restore old bar
-        MOVEQ.L #0x0,D3                         | D3 = menu index counter
-GETNEWMBAR_LOOP:
-        SUBQ.W  #0x4,SP                         | space for GetRMenu result
-        MOVE.L  (A3),A0                         | dereference MBAR
-        MOVE    D3,D0                           | D0 = index
-        ADD     D0,D0                           | word offset
-        MOVE    0x2(A0,D0.W),-(SP)              | push menu ID from MBAR list
-        BSR     GetRMenu                        | load MENU resource -> handle on stack
-        CLR     -(SP)                           | beforeID = 0 (append)
-        _InsertMenu                             | add menu to menu bar
-        MOVE.L  (A3),A0                         | dereference MBAR (may have moved)
-        ADDQ.W  #0x1,D3                         | next index
-        CMP     (A0),D3                         | processed all menus?
-        BLT.B   GETNEWMBAR_LOOP                 | no -> continue loop
-        SUBQ.W  #0x4,SP                         | space for GetMenuBar result
-        _GetMenuBar                             | get newly built menu bar
-        MOVE.L  (SP)+,0xA(A6)                   | store as return value
-        MOVE.L  A3,-(SP)                        | push MBAR handle
-        _ReleaseResource                        | release MBAR template
-GETNEWMBAR_FOUND:
-        MOVE.L  (SP),-(SP)                      | dup saved menu bar handle on stack
-        _SetMenuBar                             | restore original menu bar
-        MOVE.L  (SP)+,A0                        | A0 = old menu bar handle
-        _DisposeHandle                          | dispose old menu bar copy
-        MOVEM.L (SP)+,D3/A3                     | restore registers
-        UNLK    A6                              | tear down frame
-        MOVE.L  (SP)+,A0                        | A0 = return address
-        ADDQ.W  #0x2,SP                         | pop resource ID parameter
-        JMP     (A0)                            | return to caller
 
 | TEGetText -- _TEGetText ($A9CB): FUNCTION TEGetText (hTE: TEHandle) : CharsHandle;
 | ----------------------------------------------------------
@@ -767,31 +91,43 @@ TEDispose:
         MOVE.L  A4,A0                           | A0 = TEHandle
         _DisposeHandle                          | free the TERec itself
         MOVEQ.L #0x4,D0                         | param size = 4 (TEHandle)
-        BRA     TETEXTBOX_EXIT_2                | -> clean up and return
+        BRA     TEXTBOX_EXIT_2                  | -> clean up and return
 
 | ----------------------------------------------------------
 |
-| _TETextBox ($A9CE)
+| _TextBox ($A9CE): draw text in a box with the given justification
+| Pascal: PROCEDURE TextBox(text: Ptr; length: LONGINT; box: Rect;
+|                           just: INTEGER);
+| Entry: 8(A6) = just, $A(A6) = @box, $E(A6) = length, $12(A6) = text
+|        (14 bytes of parameters, popped on exit)
+| Exits without drawing if length < 0 or if the memory preflight
+| (TEPASTE_CONT_3) for 232+length bytes fails. Fast path: if the text
+| has no CR and its TextWidth is less than the box width - 2, erases
+| the box and draws one line (pen at left+1, top+ascent, shifted for
+| center/right). Otherwise (TEXTBOX_FOUND) creates a temporary edit
+| record with TENew(box, box), sets teJust, draws via TESetText and
+| TEUpdate, and disposes it.
+| _TETextBox (traps.inc) is the later name of the same trap.
 |
 | Called during boot.
-TETextBox:
+TextBox:
         LINK    A6,#0x0                         | set up stack frame
         MOVEM.L D2-D7/A2-A4,-(SP)               | save registers
         MOVEQ.L #0x68,D0                        | base TERec size
         ADDI.L  #0x80,D0                        | plus overhead
         ADD.L   0xE(A6),D0                      | plus text length
         BSR     TEPASTE_CONT_3                  | check if enough memory available
-        BNE     TETEXTBOX_NO                    | not enough -> bail
+        BNE     TEXTBOX_NO                      | not enough -> bail
         MOVE.L  0x12(A6),A0                     | A0 = text pointer (param)
         MOVE.L  0xE(A6),D0                      | D0 = text length (param)
-        BLT     TETEXTBOX_NO                    | negative length -> bail
-        BEQ.B   TETEXTBOX_EMPTY                 | empty text -> try single-line path
-TETEXTBOX_CONT:
+        BLT     TEXTBOX_NO                      | negative length -> bail
+        BEQ.B   TEXTBOX_EMPTY                   | empty text -> try single-line path
+TEXTBOX_CONT:
         CMPI.B  #0xD,(A0)+                      | scan for carriage return
-        BEQ.B   TETEXTBOX_FOUND                 | found CR -> use multi-line TENew path
+        BEQ.B   TEXTBOX_FOUND                   | found CR -> use multi-line TENew path
         SUBQ.L  #0x1,D0                         | decrement scan counter
-        BNE.B   TETEXTBOX_CONT                  | more chars -> keep scanning
-TETEXTBOX_EMPTY:
+        BNE.B   TEXTBOX_CONT                    | more chars -> keep scanning
+TEXTBOX_EMPTY:
         SUBQ.W  #0x2,SP                         | space for TextWidth result
         MOVE.L  0x12(A6),-(SP)                  | push text pointer
         CLR     -(SP)                           | firstByte = 0
@@ -803,7 +139,7 @@ TETEXTBOX_EMPTY:
         SUB     0x2(A0),D0                      | D0 = box width
         SUBQ.W  #0x2,D0                         | subtract 2 pixel margin
         CMP     D3,D0                           | text fits in one line?
-        BLE.B   TETEXTBOX_FOUND                 | no -> use multi-line path
+        BLE.B   TEXTBOX_FOUND                   | no -> use multi-line path
         MOVE.L  A0,-(SP)                        | push box rect
         _EraseRect                              | clear the box
         SUBQ.W  #0x8,SP                         | space for FontInfo (4 words)
@@ -817,33 +153,34 @@ TETEXTBOX_EMPTY:
         ADDQ.W  #0x1,0x2(SP)                    | indent 1 pixel from left edge
         _MoveTo                                 | position pen at first baseline
         TST     0x8(A6)                         | justification param (0=left)
-        BEQ.B   TETEXTBOX_CONT_3                | left-justified -> draw directly
+        BEQ.B   TEXTBOX_CONT_3                  | left-justified -> draw directly
         MOVE.L  0xA(A6),A0                      | A0 = box rect
         MOVE    0x6(A0),D0                      | D0 = rect.right
         SUB     0x2(A0),D0                      | D0 = box width
         SUB     D3,D0                           | D0 = extra space after text
         SUBQ.W  #0x1,D0                         | account for margin
         TST     0x8(A6)                         | check justification sign
-        BMI.B   TETEXTBOX_CONT_2                | negative (-1) = right-justify
+        BMI.B   TEXTBOX_CONT_2                  | negative (-1) = right-justify
         ASR     #0x1,D0                         | center: divide slack by 2
-TETEXTBOX_CONT_2:
+TEXTBOX_CONT_2:
         MOVE    D0,-(SP)                        | push horizontal offset
         CLR     -(SP)                           | vertical offset = 0
         _Move                                   | adjust pen position
-TETEXTBOX_CONT_3:
+TEXTBOX_CONT_3:
         MOVE.L  0x12(A6),-(SP)                  | push text pointer
         CLR     -(SP)                           | firstByte = 0
         MOVE    0x10(A6),-(SP)                  | push byte count
         _DrawText                               | draw the text
-TETEXTBOX_NO:
-        BRA.B   TETEXTBOX_EXIT                  | -> clean up and return
+TEXTBOX_NO:
+        BRA.B   TEXTBOX_EXIT                    | -> clean up and return
 
 | ----------------------------------------------------------
 |
-| TETEXTBOX_FOUND
+| TEXTBOX_FOUND - TextBox slow path: text has a CR or is too wide; draw
+| it with a temporary edit record (TENew/TESetText/TEUpdate/TEDispose)
 |
 | Called during boot.
-TETEXTBOX_FOUND:
+TEXTBOX_FOUND:
         SUBQ.W  #0x4,SP                         | space for TENew result
         MOVE.L  0xA(A6),-(SP)                   | push destRect = box rect
         MOVE.L  (SP),-(SP)                      | push viewRect = same box rect
@@ -854,7 +191,7 @@ TETEXTBOX_FOUND:
         MOVE.L  (A4),A0                         | A0 = dereferenced TERec
         MOVE    0x8(A6),0x3A(A0)                | set teJust from param
         MOVE.L  0xE(A6),D0                      | D0 = text length
-        BEQ.B   TETEXTBOX_SKIP                  | empty -> skip text setup
+        BEQ.B   TEXTBOX_SKIP                    | empty -> skip text setup
         MOVE.L  0x12(A6),-(SP)                  | push text pointer
         MOVE.L  D0,-(SP)                        | push text length
         MOVE.L  A4,-(SP)                        | push TEHandle
@@ -862,12 +199,12 @@ TETEXTBOX_FOUND:
         MOVE.L  0xA(A6),-(SP)                   | push update rect = box rect
         MOVE.L  A4,-(SP)                        | push TEHandle
         _TEUpdate                               | draw all text lines
-TETEXTBOX_SKIP:
+TEXTBOX_SKIP:
         MOVE.L  A4,-(SP)                        | push TEHandle
         _TEDispose                              | dispose temporary TERec
-TETEXTBOX_EXIT:
+TEXTBOX_EXIT:
         MOVEQ.L #0xE,D0                         | param size = 14 bytes
-TETEXTBOX_EXIT_2:
+TEXTBOX_EXIT_2:
         BRA     TECALTEXT_EXIT_3                | -> TE exit with cleanup
 
 | ----------------------------------------------------------
@@ -879,7 +216,7 @@ TETEXTBOX_EXIT_2:
 TESetText:
         BSR     XTRIMMEASURE_CONT_8             | set up TE state (A3, A2=params)
         MOVE.L  (A2)+,D0                        | D0 = text length
-        MOVE    D0,BKPAT(A3)                    | selStart = length (cursor at end)
+        MOVE    D0,teSelStart(A3)               | selStart = length (cursor at end)
         MOVE    D0,teSelEnd(A3)                 | selEnd = length
         MOVE    D0,teLength(A3)                 | teLength = new length
         MOVE.L  (A2)+,A0                        | A0 = text pointer
@@ -898,12 +235,12 @@ TESETTEXT_EXIT:
 | Clears selection, calls TERecal, then redraws
 |
 TESETTEXT_CONT:
-        MOVE.L  BKPAT(A3),-(SP)                 | save selStart/selEnd
-        CLR     BKPAT(A3)                       | clear selStart (for full recalc)
+        MOVE.L  teSelStart(A3),-(SP)            | save selStart/selEnd
+        CLR     teSelStart(A3)                  | clear selStart (for full recalc)
         MOVE    #-0x7FFE,D7                     | flag: full recalculation needed
-        CLR.L   RGNSAVE(A3)                     | clear line cache
+        CLR.L   teLines(A3)                     | clear line cache
         BSR     P_doTERecal                     | recalculate all line breaks
-        MOVE.L  (SP)+,BKPAT(A3)                 | restore selStart/selEnd
+        MOVE.L  (SP)+,teSelStart(A3)            | restore selStart/selEnd
         RTS                                     | return from full recalculation
 
 | TECalText -- _TECalText ($A9D0): PROCEDURE TECalText (hTE: TEHandle);
@@ -923,7 +260,7 @@ TECALTEXT_EXIT_2:
         MOVE.L  teTextH(A3),A0                  | A0 = text handle
         MOVE.B  -0xC(A6),(A0)                   | restore text handle lock state
         MOVE.L  -0xA(A6),-(SP)                  | push saved clip region handle
-        MOVE.L  (SP),-(SP)                      | dup for DisposeRgn
+        MOVE.L  (SP),-(SP)                      | dup for DisposRgn
         _SetClip                                | restore original clip region
         _DisposeRgn                             | free temp clip region
         MOVE.B  -0x2(A6),(A4)                   | restore TEHandle lock state
@@ -946,11 +283,11 @@ TESetSelect:
         BSR     P_TERECAL_CONT_3                | hide caret if visible
         BSR     TEUPDATE_CONT_2                 | unhighlight old selection
         MOVE    0xE(A6),teSelEnd(A3)            | teSelEnd = new selEnd param
-        MOVE    0x12(A6),BKPAT(A3)              | teSelStart = new selStart param
+        MOVE    0x12(A6),teSelStart(A3)         | teSelStart = new selStart param
         BSR     XTRIMMEASURE_CONT_14            | clamp selection to text length
         BSR     P_TERECAL_NO_3                  | set up caret state if no selection
         BSR     TEUPDATE_CONT_2                 | highlight new selection
-        BSR     FILLCARC_CONT                   | auto-scroll selection into view
+        BSR     SelView                         | auto-scroll selection into view
         BRA     TESETTEXT_EXIT                  | -> TE exit
 
 | ----------------------------------------------------------
@@ -991,14 +328,14 @@ TENew:
         ADD     (SP)+,D0                        | add descent
         ADDQ.W  #0x2,SP                         | skip widMax
         ADD     (SP)+,D0                        | add leading
-        MOVE    D0,VISRGN(A3)                   | teLineHite = ascent+descent+leading
+        MOVE    D0,teLineHite(A3)               | teLineHite = ascent+descent+leading
         MOVE.L  (A5),A2                         | A2 = app globals handle
         MOVE.L  (A2),A2                         | A2 = dereferenced (current GrafPort)
         MOVE.L  A2,teInPort(A3)                 | teGrafPort = current port
-        MOVE.L  0x44(A2),TXSIZE(A3)             | copy port txFont+txFace to TERec
+        MOVE.L  0x44(A2),teFontStuff(A3)        | copy port txFont+txFace to TERec
         MOVE.L  0x48(A2),teMode(A3)             | copy port txMode+txSize to TERec
         MOVE.L  (TEWdBreak).w,teWordBreak(A3)   | set default word break routine
-        LEA.L   CPOLY_DO_FILL_LOOP(PC),A0       | A0 = default click loop proc
+        LEA.L   DefClikProc(PC),A0              | A0 = default click loop proc
         MOVE.L  A0,teClikProc(A3)               | teClikProc = default
         BCLR    #0x7,(A4)                       | unlock TEHandle
         MOVE.L  A4,0x10(A6)                     | store TEHandle as return value
@@ -1014,7 +351,7 @@ TENEW_ERR:
 TEUpdate:
         BSR     XTRIMMEASURE_CONT_10            | set up TE state (8 bytes params)
         MOVE.L  (A2)+,A0                        | A0 = update rect ptr (param)
-        BSR     TESETALIGNMENT_CONT             | redraw text within update rect
+        BSR     TESETJUST_CONT                  | redraw text within update rect
         BRA     TESCROLL_EXIT                   | -> TE exit (8 bytes)
 
 | TEUPDATE_CONT -- get word bounds if double-click.
@@ -1039,7 +376,7 @@ TEUPDATE_EXIT:
 TEUPDATE_CONT_2:
         TST.B   teActive(A3)                    | is TE record active?
         BEQ.B   TEUPDATE_EXIT                   | no -> nothing to highlight
-        MOVEM   BKPAT(A3),D3-D4                 | D3=teSelStart, D4=teSelEnd
+        MOVEM   teSelStart(A3),D3-D4            | D3=teSelStart, D4=teSelEnd
         MOVEQ.L #0x1,D7                         | D7=1: highlight/unhighlight mode
         BRA     P_doTEDoText                    | -> draw/erase selection hilite
 
@@ -1052,7 +389,7 @@ TEUPDATE_CONT_2:
 | Sets selection, handles double-click word selection, tracks drag
 TEClick:
         BSR     XTRIMMEASURE_CONT_9             | set up TE state (A3, A6 frame)
-        MOVE.L  0xE(A6),CLIPRGN(A3)             | save click point
+        MOVE.L  0xE(A6),teSelPoint(A3)          | save click point
         BSR     TECLICK_CONT_5                  | convert point to char offset -> D6
         BSR     P_TERECAL_CONT_3                | hide caret if visible
 | detect double-click: compare click time with previous
@@ -1070,7 +407,7 @@ TEClick:
         MOVE.L  (SP)+,teClikTime(A3)            | save click time
         TST.B   0xC(A6)                         | extend flag (shift-click)?
         BEQ.B   TECLICK_NO_2                    | no -> start fresh selection
-        MOVEM   BKPAT(A3),D0-D1                 | D0=teSelStart, D1=teSelEnd
+        MOVEM   teSelStart(A3),D0-D1            | D0=teSelStart, D1=teSelEnd
         CMP     D6,D0                           | click before selStart?
         BCC.B   TECLICK_NO                      | no -> extend from selEnd
         MOVE    D0,A2                           | A2 = anchor at selStart
@@ -1096,11 +433,11 @@ TECLICK_NO_2:
         BSR.B   TEUPDATE_CONT_2                 | unhighlight current selection
         MOVEQ.L #0x4,D2                         | D2=4: findWord mode (initial click)
         BSR.B   TEUPDATE_CONT                   | get word bounds if double-click
-        MOVEM   D0-D1,BKPAT(A3)                 | set teSelStart/teSelEnd
+        MOVEM   D0-D1,teSelStart(A3)            | set teSelStart/teSelEnd
         MOVE    D0,A2                           | A2 = selection anchor start
         MOVE    D1,A4                           | A4 = selection anchor end
         MOVE    D6,D5                           | D5 = current tracking position
-        MOVE.B  TXFACE(A3),0x47(A3)             | save teLftClick to teLftCaret
+        MOVE.B  teLftClick(A3),0x47(A3)         | save teLftClick to teLftCaret
         BSR     P_TERECAL_NO_3                  | set caret state if insertion point
         BSR     TEUPDATE_CONT_2                 | highlight new selection
 TECLICK_LOOP:
@@ -1114,7 +451,7 @@ TECLICK_EMPTY:
         _WaitMouseUp                            | wait for mouse movement or release
         TST     (SP)+                           | still tracking?
         BEQ.B   TECLICK_CONT_4                  | mouse released -> end tracking
-        PEA.L   CLIPRGN(A3)                     | push ptr to teSelPoint for GetMouse
+        PEA.L   teSelPoint(A3)                  | push ptr to teSelPoint for GetMouse
         _GetMouse                               | read current mouse position
         BSR.B   TECLICK_CONT_5                  | convert point to char offset -> D6
         CMP     D6,D5                           | position changed?
@@ -1177,7 +514,7 @@ TECLICK_CONT_4:
 | TECLICK_CONT_5
 |
 TECLICK_CONT_5:
-        MOVE    CLIPRGN(A3),D0                  | D0 = click vertical coord (teSelPoint.v)
+        MOVE    teSelPoint(A3),D0               | D0 = click vertical coord (teSelPoint.v)
         BSR     XTRIMMEASURE_CONT_6             | convert to line number -> D0
         BGE.B   TECLICK_CONT_6                  | beyond last line -> selEnd
         ADD     D0,D0                           | word offset into lineStarts array
@@ -1221,8 +558,8 @@ TECLICK_FOUND:
 TECLICK_NO_3:
         BSR     XTRIMMEASURE_CONT_2             | compute rect for chars D3..D4 on line
         SUBQ.W  #0x2,SP                         | space for PtInRect result
-        MOVE.L  CLIPRGN(A3),-(SP)               | push click point (teSelPoint)
-        PEA.L   PORTRECT(A3)                    | push computed char rect
+        MOVE.L  teSelPoint(A3),-(SP)            | push click point (teSelPoint)
+        PEA.L   teSelRect(A3)                   | push computed char rect
         _PtInRect                               | is click in this char's rect?
         TST.B   (SP)+                           | test result
         BNE.B   TECLICK_FOUND_2                 | yes -> found the character
@@ -1238,7 +575,7 @@ TECLICK_NO_3:
 | TECLICK_FOUND_2
 |
 TECLICK_FOUND_2:
-        SF.B    TXFACE(A3)                      | teLftClick = false (right side of char)
+        SF.B    teLftClick(A3)                  | teLftClick = false (right side of char)
         CMPI    #0x7FFE,0x16(A3)                | special line-end flag?
         BNE.B   TECLICK_NO_4                    | no -> check horizontal position
         MOVE.L  teTextH(A3),A0                  | A0 = text handle
@@ -1253,7 +590,7 @@ TECLICK_NO_4:
         BLT.B   TECLICK_CONT_8                  | click in right half -> after char
 TECLICK_EXIT:
         SUBQ.W  #0x1,D4                         | click in left half -> before char
-        ST.B    TXFACE(A3)                      | teLftClick = true (left side)
+        ST.B    teLftClick(A3)                  | teLftClick = true (left side)
 TECLICK_CONT_8:
         MOVE    D4,D0                           | D0 = char offset result
         BRA.B   TECLICK_EXIT_2                  | -> clean up and return
@@ -1269,7 +606,7 @@ TECLICK_OK_3:
 TECLICK_NEXT:
         BSR.B   TECLICK_CONT_9                  | set up line rect; test if more lines
         BLS.B   TECLICK_EXIT_2                  | no more visible lines -> done
-        PEA.L   PORTRECT(A3)                    | push line rect
+        PEA.L   teSelRect(A3)                   | push line rect
         _EraseRect                              | clear line background
         MOVE.L  -0x10(A6),-(SP)                 | push line top-left position
         MOVE    0x1A(A3),D0                     | D0 = teAscent
@@ -1332,7 +669,7 @@ TECLICK_CONT_11:
         BCS.B   TECLICK_OK_5                    | no -> OK
         MOVE    teLength(A3),D4                 | clamp D4 to teLength
 TECLICK_OK_5:
-        LEA.L   RGNSAVE(A3),A2                  | A2 -> lineStarts[0] (teLines at 0x60)
+        LEA.L   teLines(A3),A2                  | A2 -> lineStarts[0] (teLines at 0x60)
   .short 0xC8BA,0x03A0                          | And.L (PCrel $168A4 ), D4
         MOVE    D4,D5                           | D5 = clamped end offset
   .short 0xC6BA,0x039A                          | And.L (PCrel $168A4 ), D3
@@ -1438,27 +775,27 @@ P_TEDOTEXT_EXIT:
 |
 | Called during boot.
 P_TEDOTEXT_CONT_2:
-        LEA.L   RGNSAVE(A3),A0                  | A0 -> lineStarts[0] (teLines base)
+        LEA.L   teLines(A3),A0                  | A0 -> lineStarts[0] (teLines base)
         MOVE.L  A2,D0                           | D0 = current lineStarts ptr
         SUB.L   A0,D0                           | D0 = byte offset from lineStarts[0]
         ASR.L   #0x1,D0                         | D0 = line index (word entries)
-        MOVE    VISRGN(A3),D1                   | D1 = teLineHite (line height)
+        MOVE    teLineHite(A3),D1               | D1 = teLineHite (line height)
         MULU    D1,D0                           | D0 = pixel y offset for this line
-        LEA.L   PORTBOUNDS(A3),A0               | A0 -> destRect.botRight+2
+        LEA.L   teDestRect+8(A3),A0             | A0 -> end of teDestRect (copied backwards)
         LEA.L   (A6),A1                         | A1 -> local rect on stack frame
         MOVE.L  -(A0),-(A1)                     | copy destRect.botRight to local rect
         MOVE.L  -(A0),-(A1)                     | copy destRect.topLeft to local rect
         ADD     D0,(A1)                         | rect.top += line y offset
         MOVE    (A1),0x4(A1)                    | rect.bottom = rect.top
         ADD     D1,0x4(A1)                      | rect.bottom += lineHeight
-        TST     PNPAT(A3)                       | teJust = 0 (left justified)?
+        TST     teJust(A3)                      | teJust = 0 (left justified)?
         BEQ.B   P_TEDOTEXT_OK                   | yes -> no horizontal adjustment
         BSR.B   P_TEDOTEXT_CONT_4               | measure text width -> D0
         MOVE    0x6(A3),D1                      | D1 = destRect.right
-        SUB     PORTBITS(A3),D1                 | subtract destRect.left = box width
+        SUB     teDestRect+LEFT(A3),D1          | subtract destRect.left = box width
         SUB     D0,D1                           | D1 = slack (box width - text width)
         SUBQ.W  #0x1,D1                         | adjust for margin
-        TST     PNPAT(A3)                       | check justification
+        TST     teJust(A3)                      | check justification
         BMI.B   P_TEDOTEXT_CONT_3               | negative = right-justify (full slack)
         ASR     #0x1,D1                         | center: half the slack
 P_TEDOTEXT_CONT_3:
@@ -1547,7 +884,7 @@ XTRIMMEASURE_CONT_2:
         BSR.B   XTRIMMEASURE_CONT               | measure width from lineStart to D4
         ADD     D0,-0xA(A6)                     | rect.right = rect.left + range width
         LEA.L   -0x8(A6),A0                     | A0 -> computed char rect
-        LEA.L   VISRGN(A3),A1                   | A1 -> teSelRect (reused as temp rect)
+        LEA.L   teSelRect+8(A3),A1              | A1 -> end of teSelRect (filled backwards)
         MOVE.L  -(A0),-(A1)                     | copy to teSelRect.botRight
         MOVE.L  -(A0),-(A1)                     | copy to teSelRect.topLeft
         MOVE    0x2(A1),(scratch8).w            | save pen x to scratch
@@ -1569,7 +906,7 @@ XTRIMMEASURE_NO_2:
 |
 | Called during boot.
 XTRIMMEASURE_CONT_3:
-        LEA.L   PORTBOUNDS(A3),A0               | A0 -> viewRect (teViewRect at 0x08)
+        LEA.L   teViewRect(A3),A0               | A0 -> viewRect (teViewRect at 0x08)
 | XTRIMMEASURE_CONT_4 -- clip to visible lines in update rect.
 XTRIMMEASURE_CONT_4:
         MOVE    (A0),D0                         | D0 = viewRect.top
@@ -1586,7 +923,7 @@ XTRIMMEASURE_NO_3:
         MOVE    0x60(A3,D0.W),D4                | clamp D4 to first visible line start
 XTRIMMEASURE_SKIP:
         MOVE    0x4(A0),D0                      | D0 = viewRect.bottom
-        ADD     VISRGN(A3),D0                   | add one lineHeight
+        ADD     teLineHite(A3),D0               | add one lineHeight
         SUBQ.W  #0x1,D0                         | pixel before next line below view
         BSR.B   XTRIMMEASURE_CONT_6             | convert to line number -> D0
         BGE.B   XTRIMMEASURE_DONE               | past last line -> no bottom clip
@@ -1617,7 +954,7 @@ XTRIMMEASURE_CONT_5:
 XTRIMMEASURE_CONT_6:
         SUB     (A3),D0                         | D0 = pixel y - destRect.top
         EXT.L   D0                              | sign extend for division
-        DIVS    VISRGN(A3),D0                   | D0 = line number (y / lineHeight)
+        DIVS    teLineHite(A3),D0               | D0 = line number (y / lineHeight)
         CMP     teNLines(A3),D0                 | compare with total lines (sets CC)
         RTS                                     | caller checks GE for past-end
 
@@ -1627,8 +964,8 @@ XTRIMMEASURE_CONT_6:
 |
 | Called during boot.
 XTRIMMEASURE_CONT_7:
-        PEA.L   PORTRECT(A3)                    | push selection rect for hilite
-        BEQ.B   XTRIMMEASURE_NO_5               | D0=0 (no hook) -> use InvertRect
+        PEA.L   teSelRect(A3)                   | push selection rect for hilite
+        BEQ.B   XTRIMMEASURE_NO_5               | D0=0 (no hook) -> use InverRect
         MOVE.L  D0,A0                           | A0 = custom highlight hook
         JMP     (A0)                            | call hook with rect on stack
 
@@ -1715,14 +1052,14 @@ XTRIMMEASURE_OK_3:
         MOVE.L  (SP),-0xA(A6)                   | save temp region handle
         MOVE.L  (SP),-(SP)                      | dup for GetClip
         _GetClip                                | save current clip into temp region
-        PEA.L   PORTBOUNDS(A3)                  | push viewRect for ClipRect
+        PEA.L   teViewRect(A3)                  | push viewRect for ClipRect
         _ClipRect                               | clip to TE view rectangle
-        MOVE.L  0x1C(A2),-(SP)                  | push port's visRgn handle
+        MOVE.L  0x1C(A2),-(SP)                  | push port's clipRgn (now = viewRect)
         MOVE.L  (SP),-(SP)                      | dup for SectRgn
-        _SectRgn                                | intersect visRgn with new clip
+        _SectRgn                                | clipRgn := user's clip (temp rgn) * viewRect
         MOVE.L  (A5),A0                         | A0 = app globals handle
         MOVE.L  (A0),A0                         | A0 = current port
-        MOVE.L  TXSIZE(A3),0x44(A0)             | set port txFont/txFace from TERec
+        MOVE.L  teFontStuff(A3),0x44(A0)        | set port txFont/txFace from TERec
         MOVE.L  teMode(A3),0x48(A0)             | set port txMode/txSize from TERec
         MOVE.L  teTextH(A3),A0                  | A0 = text handle
         MOVE.B  (A0),-0xC(A6)                   | save text handle lock byte
@@ -1737,10 +1074,10 @@ XTRIMMEASURE_CONT_14:
         BLS.B   XTRIMMEASURE_OK_4               | selEnd <= length -> OK
         MOVE    D0,teSelEnd(A3)                 | clamp selEnd to text length
 XTRIMMEASURE_OK_4:
-        MOVE    BKPAT(A3),D1                    | D1 = selStart
+        MOVE    teSelStart(A3),D1               | D1 = selStart
         SUB     teSelEnd(A3),D1                 | D1 = selStart - selEnd
         BLS.B   XTRIMMEASURE_OK_5               | selStart <= selEnd -> OK
-        SUB     D1,BKPAT(A3)                    | clamp selStart to selEnd
+        SUB     D1,teSelStart(A3)               | clamp selStart to selEnd
 XTRIMMEASURE_OK_5:
         BSR.B   XTRIMMEASURE_CONT_15            | normalize: ensure selStart <= selEnd
         LEA.L   0xC(A6),A2                      | A2 -> first param on stack
@@ -1752,7 +1089,7 @@ XTRIMMEASURE_OK_5:
 |
 | Called during boot (2,779 times in 30s trace).
 XTRIMMEASURE_CONT_15:
-        LEA.L   BKPAT(A3),A2                    | A2 -> teSelStart (offset 0x20)
+        LEA.L   teSelStart(A3),A2               | A2 -> teSelStart (offset 0x20)
         MOVE.L  (A2),D0                         | D0 = selStart.W | selEnd.W
         CMP     (A2),D0                         | compare selEnd (D0.W) with selStart
         BCC.B   XTRIMMEASURE_OK_6               | selEnd >= selStart -> OK
@@ -1806,7 +1143,7 @@ TEDelete:
         BSR.B   TEDELETE_CONT                   | remove selected text from buffer
         BSR.B   TEDELETE_CONT_2                 | recalculate line starts
         BSR     P_TERECAL_NO_3                  | redraw affected lines
-        BSR     FILLCARC_CONT                   | auto-scroll selection into view
+        BSR     SelView                         | auto-scroll selection into view
         BRA.B   TECOPY_EXIT                     | -> TE exit
 
 | TEDELETE_CONT -- remove selected text from buffer.
@@ -1841,13 +1178,13 @@ TEDELETE_CONT_2:
         BSR     P_doTERecal                     | recalculate line breaks
         MOVE    D2,D3                           | D3 = first changed line start offset
         MOVE    (SP)+,D0                        | D0 = old line count
-        MULU    VISRGN(A3),D0                   | D0 = old bottom y (old nLines * lineHeight)
+        MULU    teLineHite(A3),D0               | D0 = old bottom y (old nLines * lineHeight)
         ADD     (A3),D0                         | add destRect.top
-        LEA.L   VISRGN(A3),A0                   | A0 -> teSelRect area (reused as erase rect)
+        LEA.L   teSelRect+8(A3),A0              | A0 -> end of teSelRect (erase rect built backwards)
         MOVE    #0x7FF0,-(A0)                   | rect.right = large value
         MOVE    D0,-(A0)                        | rect.bottom = old bottom y
         MOVE    teNLines(A3),D0                 | D0 = new line count
-        MULU    VISRGN(A3),D0                   | D0 = new bottom y
+        MULU    teLineHite(A3),D0               | D0 = new bottom y
         ADD     (A3),D0                         | add destRect.top
         MOVE    #-0x7FFE,-(A0)                  | rect.left = large negative value
         MOVE    D0,-(A0)                        | rect.top = new bottom y
@@ -1944,7 +1281,6 @@ TEFINDWORD_CONT_4:
 | Inside Macintosh Vol II, Ch 15: FP Arithmetic and Transcendental Packages
 
 | Package Manager & packages
-| ROM section: src/toolbox/packages.asm
         MOVE.L  0x3E(A3),A0                     | A0 = teTextH (text handle)
         MOVE.L  (A0),A0                         | A0 = dereferenced text ptr
         MOVE.L  0x26(A3),A1                     | A1 = teWordBreak proc ptr
@@ -1992,7 +1328,7 @@ P_TEWDBREAK_NEXT:
 TEFindLine:
         MOVEM.L D1-D7/A1-A2,-(SP)               | save registers
         MOVE    0x6(A3),D4                      | D4 = destRect.right
-        SUB     PORTBITS(A3),D4                 | D4 = dest width (right - left)
+        SUB     teDestRect+LEFT(A3),D4          | D4 = dest width (right - left)
         SUBQ.W  #0x1,D4                         | subtract 1 pixel margin
         SUBA.L  A2,A2                           | A2 = 0 (word-wrap counter)
         MOVE    D6,D7                           | D7 = current scan position
@@ -2001,7 +1337,7 @@ TEFINDLINE_CONT:
         MOVEQ.L #0xC,D2                         | D2=12: find next word boundary
         BSR     TEDELETE_CONT_3                 | find word end -> D1
         MOVE    D1,D7                           | D7 = word end position
-        TST.B   TXMODE(A3)                      | teCROnly set?
+        TST.B   teCROnly(A3)                    | teCROnly set?
         BNE.B   TEFINDLINE_SKIP                 | yes -> no word wrap, skip width check
         BSR.B   P_TEWDBREAK_CONT                | measure text width to D7 -> D0
         CMP     D4,D0                           | wider than dest rect?
@@ -2069,7 +1405,7 @@ P_TERecal:
         CLR     (A2)+                           | reset nLines = 0; A2 -> lineStarts[0]
         MOVE    0x3C(A3),-0xE(A6)               | save teLength in local
         MOVEQ.L #0x10,D2                        | D2 = reserved (recal state)
-        MOVE    BKPAT(A3),D0                    | D0 = teSelStart (change point)
+        MOVE    teSelStart(A3),D0               | D0 = teSelStart (change point)
         BSR     TEDELETE_CONT_3                 | find word boundary at change point
         MOVE    D0,D3                           | D3 = word-aligned change point
 P_TERECAL_NEXT:
@@ -2093,9 +1429,9 @@ P_TERECAL_CONT:
         TST.B   (WordRedraw).w                  | word redraw mode flag
         BGT.B   P_TERECAL_DONE                  | positive -> use D3 as start
         BLT.B   P_TERECAL_SKIP                  | negative -> skip to line calc
-        MOVE    BKPAT(A3),D3                    | zero -> redraw from selStart
+        MOVE    teSelStart(A3),D3               | zero -> redraw from selStart
 P_TERECAL_DONE:
-        TST     PNPAT(A3)                       | teJust != 0 (center/right)?
+        TST     teJust(A3)                      | teJust != 0 (center/right)?
         BNE.B   P_TERECAL_SKIP                  | yes -> no optimization possible
         MOVE    D3,-0x16(A6)                    | update first redraw line start
         BEQ.B   P_TERECAL_SKIP                  | at start of text -> skip
@@ -2194,13 +1530,13 @@ P_TERECAL_DONE_4:
 P_TERECAL_NO_3:
         TST.B   0x24(A3)                        | teActive?
         BEQ.B   P_TERECAL_DONE_4                | no -> done
-        MOVE    BKPAT(A3),D0                    | D0 = teSelStart
+        MOVE    teSelStart(A3),D0               | D0 = teSelStart
         CMP     0x22(A3),D0                     | selStart == selEnd? (insertion point)
         BNE.B   P_TERECAL_DONE_4                | no -> has selection, no caret
         ST.B    0x39(A3)                        | teCarAct = true (caret active)
-        TST.B   PNMODE(A3)                      | teCarOn already on?
+        TST.B   teCarOn(A3)                     | teCarOn already on?
         BNE.B   P_TERECAL_DONE_4                | yes -> done
-        ST.B    PNMODE(A3)                      | teCarOn = true
+        ST.B    teCarOn(A3)                     | teCarOn = true
 P_TERECAL_OK_3:
         BRA.B   P_TERECAL_CONT_4                | -> draw caret
 
@@ -2213,17 +1549,17 @@ P_TERECAL_CONT_3:
         TST.B   0x24(A3)                        | teActive?
         BEQ.B   P_TERECAL_DONE_4                | no -> done
         SF.B    0x39(A3)                        | teCarAct = false (deactivate caret)
-        TST.B   PNMODE(A3)                      | teCarOn? (caret currently visible)
+        TST.B   teCarOn(A3)                     | teCarOn? (caret currently visible)
         BEQ.B   P_TERECAL_DONE_4                | no -> nothing to erase
-        SF.B    PNMODE(A3)                      | teCarOn = false
+        SF.B    teCarOn(A3)                     | teCarOn = false
 | P_TERECAL_CONT_4 -- draw/erase caret (XOR).
 P_TERECAL_CONT_4:
         MOVEM.L D0-D7,-(SP)                     | save all data registers
-        MOVE    BKPAT(A3),D3                    | D3 = teSelStart (caret position)
+        MOVE    teSelStart(A3),D3               | D3 = teSelStart (caret position)
         MOVE    D3,D4                           | D4 = same (zero-width range)
         MOVEQ.L #-0x2,D7                        | D7=-2: caret drawing mode
         BSR     P_doTEDoText                    | compute caret rect
-        MOVE.L  PATSTRETCH(A3),D0               | D0 = teCarHook (caret draw hook)
+        MOVE.L  teCarHook(A3),D0                | D0 = teCarHook (caret draw hook)
         BSR     XTRIMMEASURE_CONT_7             | XOR the caret (invert rect)
         MOVEM.L (SP)+,D0-D7                     | restore registers
         RTS                                     | return from caret drawing routine
@@ -2237,7 +1573,7 @@ TEActivate:
         BSR     XTRIMMEASURE_CONT_12            | set up TE state
         TST.B   0x24(A3)                        | already active?
         BNE.B   TEACTIVATE_OK                   | yes -> nothing to do
-        MOVE    BKPAT(A3),D0                    | D0 = teSelStart
+        MOVE    teSelStart(A3),D0               | D0 = teSelStart
         CMP     0x22(A3),D0                     | insertion point? (selStart == selEnd)
         BNE.B   TEACTIVATE_NO                   | no -> has selection
         ST.B    0x39(A3)                        | teCarAct = true (enable caret)
@@ -2269,17 +1605,17 @@ TEDeactivate:
 | Called repeatedly from event loop; toggles caret at CaretTime rate
 TEIdle:
         BSR     XTRIMMEASURE_CONT_12            | set up TE state (A3=TERec)
-        TST.B   0x39(A3)                        | TE active? (teActive)
+        TST.B   teCarAct(A3)                    | caret active? (teCarAct)
         BEQ.B   TEIDLE_EXIT                     | no ->
         SUBQ.W  #0x4,SP                         | room for tick count result
         _TickCount                              | get current tick count
         MOVE.L  (SP)+,A0                        | A0 = current ticks
-        CMPA.L  PNSIZE(A3),A0                   | time for next blink? (teCaretTime)
+        CMPA.L  teCarTime(A3),A0                | time for next blink? (teCaretTime)
         BCS.B   TEIDLE_EXIT                     | not yet ->
         ADDA.L  (CaretTime).w,A0                | schedule next blink
-        MOVE.L  A0,PNSIZE(A3)                   | save next blink time
+        MOVE.L  A0,teCarTime(A3)                | save next blink time
         BSR.B   P_TERECAL_CONT_4                | draw/erase caret (XOR)
-        NOT.B   PNMODE(A3)                      | toggle caret state
+        NOT.B   teCarOn(A3)                     | toggle caret state
 TEIDLE_EXIT:
         BRA     TECALTEXT_EXIT                  | -> TE exit (4 bytes params)
 
@@ -2329,11 +1665,11 @@ TEPASTE_CONT:
         ADD     D5,0x3C(A3)                     | teLength += inserted chars
         SUB     D5,D7                           | D7 = net chars removed
         BSR     TEDELETE_CONT_2                 | recalculate lines and redraw
-        LEA.L   BKPAT(A3),A0                    | A0 -> teSelStart
+        LEA.L   teSelStart(A3),A0               | A0 -> teSelStart
         ADD     D5,(A0)                         | selStart += inserted length
         MOVE    (A0)+,(A0)                      | selEnd = selStart (collapse)
         BSR     P_TERECAL_NO_3                  | set caret state
-        BSR     FILLCARC_CONT                   | auto-scroll into view
+        BSR     SelView                         | auto-scroll into view
 TEPASTE_NO:
         RTS                                     | return from text insertion and redraw
 
@@ -2348,7 +1684,7 @@ TEPASTE_CONT_2:
         _HUnlock                                | unlock text for Munger
         SUBQ.L  #0x4,SP                         | space for Munger result
         MOVE.L  A0,-(SP)                        | push text handle
-        MOVE    BKPAT(A3),-(SP)                 | push offset (teSelStart)
+        MOVE    teSelStart(A3),-(SP)            | push offset (teSelStart)
         CLR     -(SP)                           | push search length = 0
         CLR.L   -(SP)                           | push search ptr = nil
         JMP     (A1)                            | return (caller adds replace params)
@@ -2407,7 +1743,7 @@ TEInsert:
         MOVEM.L (A2)+,D5-D6                     | D5=text length, D6=text ptr (params)
         BSR.B   TEPASTE_CONT_4                  | insert text at selection
         BSR     TEDELETE_CONT_2                 | recalculate lines and redraw
-        ADD     D5,BKPAT(A3)                    | teSelStart += inserted length
+        ADD     D5,teSelStart(A3)               | teSelStart += inserted length
         ADD     D5,0x22(A3)                     | teSelEnd += inserted length
         BSR     P_TERECAL_NO_3                  | set caret state
         BSR     TEUPDATE_CONT_2                 | highlight selection
@@ -2424,7 +1760,7 @@ TEINSERT_EXIT:
 | Inserts character at selection, or handles backspace/arrows
 TEKey:
         BSR     XTRIMMEASURE_CONT_11            | set up TE state (A3=TERec, A2=params)
-        ST.B    0x47(A3)                        | set teJust flag (caret active)
+        ST.B    teLftCaret(A3)                  | teLftCaret := TRUE (no caret pull-back to previous line)
         _ObscureCursor                          | hide cursor during typing
         MOVE    (A2),D1                         | D1 = key character
         CMPI.B  #0x8,D1                         | backspace?
@@ -2437,13 +1773,13 @@ TEKey:
         BRA.B   TEKEY_DONE                      | -> done
 | backspace: delete character before selection
 TEKEY_OK:
-        MOVE    BKPAT(A3),D0                    | D0 = selStart
+        MOVE    teSelStart(A3),D0               | D0 = selStart
         CMP     0x22(A3),D0                     | selStart == selEnd? (no selection)
         BNE.B   TEKEY_CONT                      | has selection, delete it ->
         TST     D0                              | at beginning of text?
         BEQ.B   TEKEY_DONE                      | yes -> nothing to delete
         BSR     P_TERECAL_CONT_3                | hide caret
-        SUBQ.W  #0x1,BKPAT(A3)                  | selStart-- (select char before cursor)
+        SUBQ.W  #0x1,teSelStart(A3)             | selStart-- (select char before cursor)
 TEKEY_CONT:
         MOVE.L  A4,-(SP)                        | push TEHandle
         _TEDelete                               | delete the selected text
@@ -2453,26 +1789,36 @@ TEKEY_DONE:
 
 | ----------------------------------------------------------
 |
-| _TESetAlignment ($A9DF)
+| _TESetJust ($A9DF): set the justification of an edit record
+| Pascal: PROCEDURE TESetJust(just: INTEGER; hTE: TEHandle);
+| Entry: 8(A6) = hTE, $C(A6) = just (6 bytes, popped on exit)
+| Stores just (teJustLeft 0, teJustCenter 1, teJustRight -1) in teJust.
+| Does not redraw; IM I says to call InvalRect afterwards.
+| _TESetAlignment is the later name of the same trap.
 |
-TESetAlignment:
+TESetJust:
         BSR     XTRIMMEASURE_CONT_11            | set up TE state (6 bytes params)
-        MOVE    (A2),PNPAT(A3)                  | teJust = alignment param
+        MOVE    (A2),teJust(A3)                 | teJust = just
         BRA.B   TEKEY_DONE                      | -> TE exit
 
 | ----------------------------------------------------------
 |
-| TESETALIGNMENT_CONT
+| TESETJUST_CONT - redraw the text lines that intersect the rect at A0
+| Entry: A0 -> rect (local coordinates), A3 = TERec (StdEntry state)
+| Draws the visible lines within the rect (TEDoText mode -1), redraws
+| the selection highlighting, and redraws the caret if teCarOn is set.
+| Used by TEUpdate and TESCROLL_CONT; not part of TESetJust.
+| Apple source name: Refresh (System 7.1 TextEdit.a)
 |
 | Called during boot.
-TESETALIGNMENT_CONT:
+TESETJUST_CONT:
         MOVEQ.L #0x0,D3                         | D3 = 0 (draw from start of text)
         MOVEQ.L #-0x1,D4                        | D4 = -1 (draw all text)
         BSR     XTRIMMEASURE_CONT_4             | clip to visible lines in update rect
         MOVEQ.L #-0x1,D7                        | D7=-1: draw text mode
         BSR     P_doTEDoText                    | draw all visible text lines
         BSR     TEUPDATE_CONT_2                 | redraw selection highlighting
-        TST.B   PNMODE(A3)                      | caret visible?
+        TST.B   teCarOn(A3)                     | caret on (teCarOn)?
         BEQ.B   TESCROLL_DONE                   | no -> done
         BRA     P_TERECAL_OK_3                  | yes -> redraw caret
 
@@ -2504,7 +1850,7 @@ TESCROLL_CONT:
         SUBQ.W  #0x4,SP                         | space for NewRgn result
         _NewRgn                                 | allocate update region
         MOVE.L  (SP)+,A2                        | A2 = update region handle
-        PEA.L   PORTBOUNDS(A3)                  | push viewRect for scrolling
+        PEA.L   teViewRect(A3)                  | push viewRect for scrolling
         MOVE.L  D3,-(SP)                        | push scroll delta
         MOVE.L  A2,-(SP)                        | push update region
         _ScrollRect                             | scroll pixels, get uncovered region
@@ -2513,8 +1859,264 @@ TESCROLL_CONT:
         _SetClip                                | clip to uncovered area only
         MOVE.L  (A2),A0                         | dereference update region
         LEA.L   0x2(A0),A0                      | A0 -> region's bounding rect
-        BSR.B   TESETALIGNMENT_CONT             | redraw text in uncovered area
+        BSR.B   TESETJUST_CONT                  | redraw text in uncovered area
         MOVE.L  A2,-(SP)                        | push update region
         _DisposeRgn                             | free update region
 TESCROLL_DONE:
         RTS                                     | return from update region redraw
+
+| --------------------------------------------------------------------------
+| TextEdit automatic scrolling (Mac Plus additions, Inside Macintosh IV)
+|
+| TextEdit code that follows TEScroll directly:
+|
+|   TEPinScroll ($A812)  TEScroll with the scroll amount pinned to the text
+|   TESelView ($A811)    scroll the selection into view if auto-view is on
+|     SelView     local SelView, also called (BSR) by TESetSelect,
+|                        TEDelete and TEPASTE_CONT
+|   TEAutoView ($A813)   turn automatic scrolling on/off (TEFlags bit 6)
+|   DefClikProc   DefClikProc, the default click loop installed by
+|                        TENew; auto-scrolls while TEClick tracks the mouse
+| All routines use the TextEdit register conventions set up by StdEntry
+| (XTRIMMEASURE_CONT_10..13): A4 = TEHandle, A3 = locked TERec, A2 -> the
+| parameters after hTE. If StdEntry's memory preflight fails, the trap
+| returns at once. The CFILL_*/CPOLY_* label names are left over from an
+| earlier wrong identification of this code as Color QuickDraw fills.
+|
+
+| ----------------------------------------------------------
+|
+| _TEPinScroll ($A812): scroll the text, but not past its ends
+| Pascal: PROCEDURE TEPinScroll(dh, dv: INTEGER; hTE: TEHandle);
+| Entry: 8(A6) = hTE, $C(A6) = dv, $E(A6) = dh (8 bytes, popped on exit)
+| Like TEScroll: hides the caret, limits dv/dh in their stack slots,
+| scrolls (TESCROLL_CONT) and shows the caret again. dv > 0 / dh > 0 are
+| cut so that destRect.top/left stop at viewRect.top/left; dv < 0 / dh < 0
+| are meant to stop when the text bottom (destRect.top + nLines*lineHeight)
+| reaches viewRect.bottom, resp. destRect.right reaches viewRect.right.
+| A component is set to 0 if that edge is already inside the view.
+| Caution: if dv < 0 or dh < 0 overshoots, the excess is ADDed to the
+| parameter, enlarging the scroll instead of pinning it; later Apple
+| sources subtract here (dv: "should be subtracted because it's
+| negative"; dh: "bug found in MacDTS <12/19/88smb>", 7.1 TextEdit.a).
+| Also called directly (BSR) by SelView and DefClikProc.
+|
+TEPinScroll:
+        BSR     XTRIMMEASURE_CONT_10            | StdEntry, 8 param bytes: A3 = TERec, A2 -> dv
+        BSR     P_TERECAL_CONT_3                | hide the caret
+        MOVE    (A2),D0                         | D0 = dv
+        BPL.B   PINSCROLL_VPOS                  | dv >= 0 -> pin against viewRect.top
+| dv < 0 (text moves up): pin the text bottom against viewRect.bottom
+        MOVE    teLineHite(A3),D1               | D1 = teLineHite
+        MULU    0x5E(A3),D1                     | * teNLines = height of all lines
+        ADD     (A3),D1                         | + destRect.top = bottom of the text
+        SUB     0xC(A3),D1                      | D1 = text bottom - viewRect.bottom
+        BLE.B   PINSCROLL_DV0                   | bottom already in view -> dv = 0
+        ADD     D1,D0                           | D0 = dv + room below view
+        BPL.B   PINSCROLL_DH                    | no overshoot -> keep dv
+        ADD     D0,(A2)                         | overshoot: dv += D0 (enlarges, see header)
+        BRA.B   PINSCROLL_DH                    | -> pin dh
+
+| ----------------------------------------------------------
+|
+| PINSCROLL_VPOS - TEPinScroll, dv >= 0: stop destRect.top at viewRect.top
+|
+PINSCROLL_VPOS:
+        MOVE    (A3),D1                         | D1 = destRect.top
+        SUB     teViewRect(A3),D1               | D1 = destRect.top - viewRect.top
+        BPL.B   PINSCROLL_DV0                   | text top already in view -> dv = 0
+        ADD     D1,D0                           | D0 = dv + top difference
+        BMI.B   PINSCROLL_DH                    | no overshoot -> keep dv
+PINSCROLL_DV0:
+        SUB     D0,(A2)                         | dv -= D0: cancel, or stop at viewRect.top
+PINSCROLL_DH:
+        MOVE    0x2(A2),D0                      | D0 = horizontal scroll delta (dh)
+        BPL.B   PINSCROLL_HPOS                  | dh >= 0 -> pin against viewRect.left
+        MOVE    0x6(A3),D1                      | D1 = destRect.right
+        SUB     0xE(A3),D1                      | D1 = destRect.right - viewRect.right
+        BLE.B   PINSCROLL_DH0                   | right edge already in view -> dh = 0
+        ADD     D1,D0                           | D0 = dh + right difference
+        BPL.B   PINSCROLL_SCROLL                | no overshoot -> keep dh
+        ADD     D0,0x2(A2)                      | overshoot: dh += D0 (enlarges, see header)
+        BRA.B   PINSCROLL_SCROLL                | -> scroll
+
+| ----------------------------------------------------------
+|
+| PINSCROLL_HPOS - TEPinScroll, dh >= 0: stop destRect.left at viewRect.left
+|
+PINSCROLL_HPOS:
+        MOVE    0x2(A3),D1                      | D1 = destRect.left
+        SUB     0xA(A3),D1                      | D1 = destRect.left - viewRect.left
+        BPL.B   PINSCROLL_DH0                   | left edge already in view -> dh = 0
+        ADD     D1,D0                           | D0 = dh + left difference
+        BMI.B   PINSCROLL_SCROLL                | no overshoot -> keep dh
+PINSCROLL_DH0:
+        SUB     D0,0x2(A2)                      | dh -= D0: cancel, or stop at viewRect.left
+PINSCROLL_SCROLL:
+        MOVE.L  (A2)+,D3                        | D3 = dv (high word) : dh (low word)
+        BSR     TESCROLL_CONT                   | Scroll: offset destRect, ScrollRect, redraw
+        BSR     P_TERECAL_NO_3                  | show the caret again
+        BRA     TESCROLL_EXIT                   | -> TE exit, pop 8 bytes
+
+| ----------------------------------------------------------
+|
+| _TESelView ($A811): make sure the selection is visible
+| Pascal: PROCEDURE TESelView(hTE: TEHandle);
+| If automatic scrolling is on (TEAutoView), scrolls the text so that the
+| start of the selection is inside the viewRect; otherwise does nothing.
+| StdEntry (4 param bytes), local SelView (SelView), 4-byte exit.
+|
+TESelView:
+        BSR     XTRIMMEASURE_CONT_12            | StdEntry, 4 param bytes: A4 = hTE, A3 = TERec
+        BSR.B   SelView                         | SelView: scroll selection into view
+        BRA     TECALTEXT_EXIT                  | -> TE exit, pop 4 bytes
+
+| ----------------------------------------------------------
+|
+| SelView - local SelView: scroll the selection start into view
+| Entry: A3 = locked TERec, A4 = TEHandle (caller's StdEntry state)
+| Returns at once unless TEFlags bit 6 (auto-view, TEAutoView) is set.
+| Otherwise sorts selStart/selEnd, lets TEDoText (mode -2) compute the
+| caret rect for selStart in teSelRect, and tests teSelRect.topLeft
+| against the viewRect shrunk by one lineHeight at the bottom and 1
+| pixel at the right (built in TempRect). If outside, calls TEPinScroll
+| with (dv,dh) = TempRect.botRight - caret topLeft, i.e. scrolls the
+| caret towards the bottom-right corner of the view (then pinned).
+| Apple source name: SelView (System 7.1 TextEdit.a)
+| Also called (BSR) by TESetSelect, TEDelete and TEPASTE_CONT.
+|
+SelView:
+        BTST    #0x6,TEFlags(A3)                | auto-view (teFAutoPos) enabled?
+        BEQ.B   SELVIEW_RTS                     | no -> return
+        BSR     XTRIMMEASURE_CONT_15            | sort selection (selStart <= selEnd)
+        MOVE    teSelStart(A3),D3               | D3 = selStart (range start)
+        MOVE    D3,D4                           | D4 = selStart (range end)
+        MOVEQ.L #-0x2,D7                        | D7 = -2: TEDoText caret mode
+        BSR     P_doTEDoText                    | calculate caret position into selRect
+        MOVE.L  teSelRect(A3),D7                | D7 = teSelRect.topLeft (caret position)
+        LEA.L   (OneOne).w,A2                   | A2 = TempRect+8 ($A02; equ OneOne)
+        LEA.L   0x10(A3),A0                     | A0 = end of teViewRect ($08+8)
+| TempRect = viewRect less one line at the bottom, 1 pixel at the right
+        MOVE.L  -(A0),-(A2)                     | TempRect.botRight = viewRect.botRight
+        MOVE.L  -(A0),-(A2)                     | TempRect.topLeft = viewRect.topLeft
+        MOVE    teLineHite(A3),D0               | D0 = teLineHite
+        SUB     D0,0x4(A2)                      | TempRect.bottom -= lineHeight
+        SUBQ.W  #0x1,0x6(A2)                    | TempRect.right -= 1 (room for the caret)
+| is the caret position inside TempRect?
+        SUBQ.W  #0x2,SP                         | space for PtInRect result
+        MOVE.L  D7,-(SP)                        | push caret position
+        MOVE.L  A2,-(SP)                        | push @TempRect
+        _PtInRect                               | point inside?
+        TST.B   (SP)+                           | check result
+        BNE.B   SELVIEW_RTS                     | visible -> nothing to do
+| not visible: (dv,dh) = TempRect.botRight - caret position
+        MOVE.L  (A2)+,-(SP)                     | push TempRect.topLeft (T1)
+        MOVE.L  (A2),-(SP)                      | push TempRect.botRight (B)
+        MOVE.L  -(A2),-(SP)                     | push TempRect.topLeft again (T2)
+        PEA.L   0x4(SP)                         | push @B
+        _SubPt                                  | B := B - T2 (size of TempRect)
+        PEA.L   0x4(SP)                         | push @T1 (src = size)
+        _AddPt                                  | T1 := T1 + size = TempRect.botRight
+        MOVE.L  D7,-(SP)                        | push caret position (src)
+        PEA.L   0x4(SP)                         | push @T1
+        _SubPt                                  | T1 := botRight - caret = (dv,dh)
+        MOVE.L  A4,-(SP)                        | push hTE
+        BSR     TEPinScroll                     | TEPinScroll(dh, dv, hTE) (direct BSR)
+SELVIEW_RTS:
+        RTS                                     | return from SelView
+
+| ----------------------------------------------------------
+|
+| _TEAutoView ($A813): enable or disable automatic scrolling
+| Pascal: PROCEDURE TEAutoView(auto: BOOLEAN; hTE: TEHandle);
+| Entry: 8(A6) = hTE, $C(A6) = auto (6 bytes, popped on exit)
+| Sets (auto = TRUE) or clears (FALSE) bit 6 of TEFlags (the teRecBack
+| byte, equ teFAutoPos). The bit enables SelView (SelView) and
+| the default click loop (DefClikProc). Nothing is redrawn.
+|
+TEAutoView:
+        BSR     XTRIMMEASURE_CONT_11            | StdEntry, 6 param bytes: A2 -> auto
+        TST.B   (A2)+                           | auto = TRUE?
+        BEQ.B   AUTOVIEW_OFF                    | FALSE -> clear the bit
+        BSET    #0x6,TEFlags(A3)                | enable automatic scrolling
+        BRA.B   AUTOVIEW_EXIT                   | -> exit
+AUTOVIEW_OFF:
+        BClr    #0x6,TEFlags(A3)                | disable automatic scrolling
+AUTOVIEW_EXIT:
+        BRA     TEKEY_DONE                      | -> TE exit, pop 6 bytes
+
+| ----------------------------------------------------------
+|
+| DefClikProc - default click loop routine (DefClikProc)
+| TENew stores its address in teClikProc; TEClick calls it (JSR) while
+| the mouse button is down, with A3 = TERec and A6 = TEClick's frame
+| (8(A6) = hTE). Does nothing unless TEFlags bit 6 (auto-view) is set.
+| Otherwise grows the viewRect by 8 pixels horizontally and lineHeight/2
+| vertically (in TempRect) and tests the mouse (GetMouse, local coords)
+| in this order: above it -> dv = +lineHeight, left -> dh = +lineHeight,
+| below -> dv = -lineHeight, right -> dh = -lineHeight; then calls
+| TEPinScroll (direct BSR) for one scroll step. Saves/restores
+| D0-D7/A0-A4 and returns with CCR "not equal" (MOVEQ #1,D0), so
+| TEClick keeps tracking.
+| Apple source name: DefClikProc (System 7.1 TextEdit.a)
+|
+DefClikProc:
+        MOVEM.L D0-D7/A0-A4,-(SP)               | save all regs
+        BTST    #0x6,TEFlags(A3)                | auto-view (teFAutoPos) enabled?
+        BEQ.B   AUTOSCROLL_NONE                 | no -> return, keep tracking
+| TempRect = viewRect grown by 8 pixels (h) and lineHeight/2 (v)
+        MOVE    teLineHite(A3),D5               | D5 = teLineHite (scroll amount)
+        MOVEQ.L #0x0,D4                         | D4 = 0 (no horizontal scroll yet)
+        LEA.L   0x10(A3),A0                     | A0 = end of teViewRect ($08+8)
+        LEA.L   (OneOne).w,A2                   | A2 = TempRect+8 ($A02; equ OneOne)
+        MOVE.L  -(A0),-(A2)                     | TempRect.botRight = viewRect.botRight
+        MOVE.L  -(A0),-(A2)                     | TempRect.topLeft = viewRect.topLeft
+| InsetRect(TempRect, -8, -(lineHeight/2))
+        MOVE.L  A2,-(SP)                        | push @TempRect
+        MOVE    #-0x8,-(SP)                     | dh = -8: grow left and right by 8
+        MOVE    D5,D0                           | D0 = lineHeight
+        ASR     #0x1,D0                         | / 2
+        NEG     D0                              | negate (grow)
+        MOVE    D0,-(SP)                        | dv = -(lineHeight/2)
+        _InsetRect                              | grow TempRect
+| get current mouse position
+        SUBQ.W  #0x4,SP                         | space for Point
+        MOVE.L  A7,-(SP)                        | push ptr to Point on stack
+        _GetMouse                               | get mouse in local coords
+        MOVE    (SP)+,D6                        | D6 = mouse.v
+        MOVE    (SP)+,D7                        | D7 = mouse.h
+| compare the mouse with TempRect: top, left, bottom, right
+        CMP     (A2)+,D6                        | above top?
+        BLT.B   AUTOSCROLL_UP                   | yes -> dv = +lineHeight
+        CMP     (A2)+,D7                        | left of left edge?
+        BLT.B   AUTOSCROLL_LEFT                 | yes -> dh = +lineHeight
+        CMP     (A2)+,D6                        | below bottom?
+        BGT.B   AUTOSCROLL_DOWN                 | yes -> dv = -lineHeight
+        CMP     (A2)+,D7                        | right of right edge?
+        BGT.B   AUTOSCROLL_RIGHT                | yes -> dh = -lineHeight
+| mouse inside TempRect: no scroll
+AUTOSCROLL_NONE:
+        MOVEQ.L #0x1,D0                         | CCR = NE: TEClick keeps tracking
+        MOVEM.L (SP)+,D0-D7/A0-A4               | restore all regs (CCR unchanged)
+        RTS                                     | return to TEClick
+
+| mouse below: dv = -lineHeight (text moves up)
+AUTOSCROLL_DOWN:
+        NEG     D5                              | D5 = -lineHeight
+| mouse above: dv = +lineHeight (text moves down)
+AUTOSCROLL_UP:
+        BRA.B   AUTOSCROLL_APPLY                | -> push dh = D4 = 0, dv = D5
+
+| mouse right of the view: dh = -lineHeight
+AUTOSCROLL_RIGHT:
+        NEG     D5                              | D5 = -lineHeight
+| mouse left of the view: dh = +lineHeight
+AUTOSCROLL_LEFT:
+        exg     D4,D5                           | swap axes: D4 = dh = +-lineHeight, D5 = 0
+| TEPinScroll(dh = D4, dv = D5, hTE)
+AUTOSCROLL_APPLY:
+        MOVE    D4,-(SP)                        | push dh
+        MOVE    D5,-(SP)                        | push dv
+        MOVE.L  0x8(A6),-(SP)                   | push hTE (TEClick's parameter)
+        BSR     TEPinScroll                     | scroll and redraw (direct BSR)
+        BRA.B   AUTOSCROLL_NONE                 | -> restore regs, return NE

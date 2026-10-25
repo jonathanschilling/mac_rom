@@ -1,4 +1,4 @@
-| Scrap Manager - InfoScrap, UnloadScrap, LoadScrap, ZeroScrap, GetScrap, PutScrap
+| Scrap Manager - InfoScrap, UnloadScrap, LodeScrap, ZeroScrap, GetScrap, PutScrap
 |
 | Manages the desk scrap (clipboard) for cut/copy/paste between
 | applications. The scrap lives either in memory (ScrapState > 0)
@@ -89,11 +89,11 @@ SCRAP_OPEN_FILE:
         _Create                                 | create the file
         BNE.B   SCRAP_RTS                       | creation failed: return error
         _GetFileInfo                            | get file info to set type/creator
-        MOVE.L  #0x434C4950,ioBuffer(A0)        | fdType = 'CLIP'
+        MOVE.L  #0x434C4950,ioFlUsrWds(A0)      | fdType = 'CLIP'
 
-        MOVE.L  #0x4D414353,ioByteCount(A0)     | fdCreator = 'MACS'
+        MOVE.L  #0x4D414353,ioFlUsrWds+4(A0)    | fdCreator = 'MACS'
 
-        BSET    #0x4,ioNumDone(A0)              | set inited bit in Finder flags
+        BSET    #0x4,ioFlUsrWds+8(A0)           | set bit 12 of fdFlags (Apple: system bit)
         _SetFileInfo                            | apply file type/creator/flags
         BNE.B   SCRAP_RTS                       | SetFileInfo failed: return error
         BRA.B   SCRAP_OPEN_FILE                 | retry Open now that file exists
@@ -129,7 +129,7 @@ SCRAP_NOERR:
 |
 | Stores D0 (result code) into stack frame result, restores
 | registers, unlinks frame. D0 = byte count to strip from
-| stack for parameters (0 for UnloadScrap/LoadScrap/ZeroScrap,
+| stack for parameters (0 for UnloadScrap/LodeScrap/ZeroScrap,
 | 0xC for GetScrap, varies for PutScrap).
 |
 SCRAP_EXIT:
@@ -162,7 +162,7 @@ SCRAP_RTS:
 | does nothing. After loading, sets ScrapHandle and ScrapState=1.
 |
 | Called during boot.
-LoadScrap:
+LodeScrap:
         BSR     SCRAP_SETUP                     | set up: open Clipboard File, load globals
         BNE.B   SCRAP_EXIT                      | error: return error code
         TST     D6                              | check ScrapState
@@ -190,7 +190,7 @@ SCRAP_IOPARAM_HDL:
         MOVE.L  D5,A0                           | A0 = ScrapHandle
 | SCRAP_IOPARAM_A0 -- set up IOParam: buffer=*handle, count=D0.
 SCRAP_IOPARAM_A0:
-        MOVE.L  (A0),BKPAT(A3)                  | ioBuffer = *handle (BKPAT offset = 0x20 = ioBuffer)
+        MOVE.L  (A0),ioBuffer(A3)               | ioBuffer = *handle (scrap data)
         MOVE.L  D0,ioByteCount(A3)              | ioByteCount = requested byte count
         MOVE    #0x1,ioPosMode(A3)              | ioPosMode = fsFromStart (read/write from BOF)
         CLR.L   ioPosOffset(A3)                 | ioPosOffset = 0 (start of file)
@@ -425,7 +425,7 @@ SCRAP_APPEND:
 | SCRAP_WRITE_FILE - write to Clipboard File at offset D4 (scrap on disk)
 |
 SCRAP_WRITE_FILE:
-        MOVE.L  A0,BKPAT(A3)                    | ioBuffer = source pointer (0x20 = ioBuffer)
+        MOVE.L  A0,ioBuffer(A3)                 | ioBuffer = source pointer
         MOVE.L  D0,ioByteCount(A3)              | ioByteCount = byte count
         MOVE.L  A3,A0                           | A0 = IOParam block
         _Write                                  | write data to Clipboard File

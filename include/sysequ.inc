@@ -527,7 +527,7 @@
 
 | Hardware addresses and constants
 
-.equ sndBufWLen, 0x0172                         | sound/disk buffer word length
+.equ sndBufWLen, 0x0172                         | sound/disk buffer word length (370 words: high byte sound, low byte disk-speed PWM)
 
 
 | VIA (6522) interface chip
@@ -552,18 +552,19 @@
 .equ vIER, 0x1C00                               | INT. ENABLE REG.
 .equ vBufA, 0x1E00                              | BUFFER A
 
-.equ vBufD, 0x1E00                              | disk head select buffer
+.equ vBufD, 0x1E00                              | disk head select buffer (= vBufA, port A with vHeadSel)
 
 | Buffer A:
 
 .equ vAOut, 0x7F                                | VBufA output bits
 .equ vAInit, 0x7B                               | VBufA initial values med. volume
 .equ vSound, 0x7                                | sound volume bits
-.equ vSndPg2, 3                                 | select sound page 2 if 0
+.equ vSndPg2, 3                                 | select sound page 2 if 0 (also the disk-speed PWM bytes)
 .equ vOverlay, 4                                | overlay bit (overlay when 1)
-.equ vHeadSel, 5
+.equ vDriveSel, 4                               | SE only: internal drive select, 1 = lower drive (HardwareEqu.a; PA4 is vOverlay on the 128K/512K/Plus)
+.equ vHeadSel, 5                                | SEL line of the floppy drives (head select for Sony)
 .equ vPage2, 6                                  | select video page 2 if 0
-.equ vSCCWrReq, 7                               | SCC write/request line
+.equ vSCCWrReq, 7                               | SCC write/request line (input; 0 = channel A has a received byte)
 
 | Buffer B:
 
@@ -593,24 +594,29 @@
 .equ txBE, 2                                    | SCC transmit buffer empty
 
 | Disk Address
+| Offsets of the 16 IWM state locations from the IWM base (low-memory IWM;
+| DBase = $DFE1FF on the 128K/512K/Plus/SE; see hwregs.inc for the register
+| selection). An access to an "L" location clears, to an "H" location sets
+| the state bit named; registers are read at "L" and written at "H"
+| locations. The phase lines PH0-PH3 are the drive's CA0, CA1, CA2 and
+| LSTRB lines.
 
-
-.equ ph0L, 0                                    | disk address offsets from base
-.equ ph0H, 0x200
-.equ ph1L, 0x400
-.equ ph1h, 0x600
-.equ ph2L, 0x800
-.equ ph2H, 0xA00
-.equ ph3L, 0xC00
-.equ ph3H, 0xE00
-.equ mtrOff, 0x1000
-.equ mtrOn, 0x1200
-.equ intDrive, 0x1400                           | enable internal drive address
-.equ extDrive, 0x1600                           | enable external drive address
-.equ q6L, 0x1800
-.equ q6H, 0x1A00
-.equ q7L, 0x1C00
-.equ q7H, 0x1E00
+.equ ph0L, 0                                    | disk address offsets from base: PH0 (CA0) low
+.equ ph0H, 0x200                                | PH0 (CA0) high
+.equ ph1L, 0x400                                | PH1 (CA1) low
+.equ ph1H, 0x600                                | PH1 (CA1) high (MPW 1.0 SysEqu.a: ph1h)
+.equ ph2L, 0x800                                | PH2 (CA2) low
+.equ ph2H, 0xA00                                | PH2 (CA2) high
+.equ ph3L, 0xC00                                | PH3 (LSTRB) low
+.equ ph3H, 0xE00                                | PH3 (LSTRB) high: strobe the addressed control register
+.equ mtrOff, 0x1000                             | Motor-On = 0: drive enable /ENBLx off
+.equ mtrOn, 0x1200                              | Motor-On = 1: enable the selected drive
+.equ intDrive, 0x1400                           | enable internal drive address (Drive-Sel = 0: /ENBL1)
+.equ extDrive, 0x1600                           | enable external drive address (Drive-Sel = 1: /ENBL2)
+.equ q6L, 0x1800                                | L6 = 0: read data (L7 = 0, motor on) or write handshake (L7 = 1)
+.equ q6H, 0x1A00                                | L6 = 1: read status (L7 = 0) or write mode/data (L7 = 1)
+.equ q7L, 0x1C00                                | L7 = 0: read states
+.equ q7H, 0x1E00                                | L7 = 1: write states
 
 
 | Interrupt secondary vectors

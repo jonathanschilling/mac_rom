@@ -2,6 +2,7 @@
 |
 | --> STRETCH.TEXT
 |
+| StretchBits, with XorSlab (1983 Util.a) linked after it in the 64K ROM.
 
 | .PROC StretchBits,8
 | .REF RgnBlt,RSect,ShieldCursor,ShowCursor
@@ -82,7 +83,7 @@ STRETCHBITS_CONT:
         PEA.L     -20(A6)                       | push intersection rect
 STRETCHBITS_CONT_2:
         MOVE.L  6(A3),-(SP)                     | push dstBits.bounds.topLeft
-        JSR     DrawControls(PC)                | GROW POINT BUFFER
+        JSR     ShieldCursor(PC)                | ShieldCursor(minRect, dstBits.bounds.topLeft)
         MOVE.L  22(A6),A0                       | GET RGNA MASTER
         MOVE    6(A0),D0                        | dstRect.right
         SUB     2(A0),D0                        | dstWidth
@@ -313,7 +314,7 @@ NEXTDST_SKIP:
         BGE.B   STRETCHBITS_NXTMASK             | IF VERROR >= 0 THEN DRAW MORE
         BRA.W   NEXTSRC                         | GO TO LOOP START
 STRETCHBITS_DONE:
-        JSR     FMQD_ShowCursor(PC)             | CALL RGNBLT
+        JSR     ShowCursor(PC)                  | RESTORE CURSOR
 STRETCHBITS_GOHOME:
         MOVE.L  -0x6C(A6),SP                    | SP := saveSP
         MOVEM.L (SP)+,D0-D7/A1-A4               | restore scratch regs from stack
@@ -334,22 +335,22 @@ STRETCHBITS_GOHOME_CONT_2:                      | 8-entry jump-offset table
         .short  0x0084                          | mode 5
         .short  0x00BA                          | mode 6
         .short  0x00F0                          | mode 7
-        RTS                                     | return to caller
+        RTS                                     | return from STRETCHBITS_GOHOME_CONT_2
         MOVE    -0x8C(A6),D0                    | D0 := rgnBufLen
         LEA.L     -0x38(A6),A1                  | A1 = &rgnA
         MOVE.L  -0x72(A6),8(A1)                 | 8(A1) := scanLineBuf
         JSR     SeekRgn(PC)                     | CALC CASEJUMP AND HORIZ FRACT
-        RTS                                     | return to caller
+        RTS                                     | return from STRETCHBITS_GOHOME_CONT_2
         MOVE    -0x8C(A6),D0                    | D0 := rgnBufLen
         LEA.L     -0x50(A6),A1                  | A1 = &rgnB
         MOVE.L  -0x72(A6),8(A1)                 | 8(A1) := scanLineBuf
         JSR     SeekRgn(PC)                     | ALTER FOR COLOR SEPARATION
-        RTS                                     | return to caller
+        RTS                                     | return from STRETCHBITS_GOHOME_CONT_2
         MOVE    -0x8C(A6),D0                    | D0 := rgnBufLen
         LEA.L     -0x68(A6),A1                  | A1 = &rgnC
         MOVE.L  -0x72(A6),8(A1)                 | 8(A1) := scanLineBuf
         JSR     SeekRgn(PC)                     | INTERSECT ALL RECTS
-        RTS                                     | return to caller
+        RTS                                     | return from STRETCHBITS_GOHOME_CONT_2
         MOVE    -0x8C(A6),D0                    | D0 := rgnBufLen
         LEA.L     -0x38(A6),A1                  | A1 = &rgnA
         JSR     SeekRgn(PC)                     | REMOVE CURSOR IF INTERSECT
@@ -368,7 +369,7 @@ RGN_AND_AB:
         MOVE.L  D0,(A2)+                        | (A2)+ := D0
         DBRA    D1,RGN_AND_AB                   | LOOP FOR ALL LONGS
 RGN_AND_AB_DONE:
-        RTS                                     | return to caller
+        RTS                                     | return from RGN_AND_AB_DONE
         MOVE    -0x8C(A6),D0                    | D0 := rgnBufLen
         LEA.L     -0x38(A6),A1                  | A1 = &rgnA
         JSR     SeekRgn(PC)                     | advance region to current scan row
@@ -387,7 +388,7 @@ RGN_AND_AC:
         MOVE.L  D0,(A2)+                        | (A2)+ := D0
         DBRA    D1,RGN_AND_AC                   | loop D1 -> RGN_AND_AC
 RGN_AND_AC_DONE:
-        RTS                                     | return to caller
+        RTS                                     | return from RGN_AND_AC_DONE
         MOVE    -0x8C(A6),D0                    | D0 := rgnBufLen
         LEA.L     -0x50(A6),A1                  | A1 = &rgnB
         JSR     SeekRgn(PC)                     | advance region to current scan row
@@ -430,7 +431,7 @@ RGN_AND_ABC:
         MOVE.L  D0,(A3)+                        | (A3)+ := D0
         DBRA    D1,RGN_AND_ABC                  | loop D1 -> RGN_AND_ABC
 RGN_AND_ABC_DONE:
-        RTS                                     | return to caller
+        RTS                                     | return from RGN_AND_ABC_DONE
 STRETCH_RGN_TBL:                                | 4-entry word-offset jump table
         .short  0x0008                          | entry 0 -> handler @ $A32E (fall-through)
         .short  0x002C                          | entry 1 -> handler @ $A352
@@ -511,7 +512,7 @@ XorSlab:
         BGT.B   XORSLAB_NOTIN1                  | if signed > -> XORSLAB_NOTIN1
         AND     D5,D6                           | D6 := D6 AND D5
         EOR     D6,(A0)                         | (A0) ^= D6
-        RTS                                     | return to caller
+        RTS                                     | return from XorSlab
 XORSLAB_NOTIN1:
         EOR     D5,(A0)+                        | (A0)+ ^= D5
         BRA.B   XORSLAB_INVLONG_CONT            | LOOP FOR NEXT ROW
@@ -524,7 +525,7 @@ XORSLAB_INVLONG_CONT:
         NOT     (A0)+                           | (A0)+ = ~(A0)+
 XORSLAB_ENDWORD:
         EOR     D6,(A0)                         | (A0) ^= D6
-        RTS                                     | return to caller
+        RTS                                     | return from XORSLAB_ENDWORD
 STRETCH_ROW:
         LINK    A6,#0x0                         | set up stack frame, reserve 0x0 locals
         MOVEM.L D0-D7/A1-A4,-(SP)               | save scratch regs to stack

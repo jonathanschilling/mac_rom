@@ -1,29 +1,38 @@
-| Resource Map (type list, reference list, name list)
-| ROM Resource Fork
+| =========================================================================
+| ROM resource map
+| =========================================================================
+| ROM offsets +0x176F8..+0x17843: two words for InitResources (the long at
+| +0x1A of the ROM header points to them), then the Resource Manager map
+| of the ROM resources in the layout of Inside Macintosh I-128 (copy of the
+| resource header, next-map handle, file reference, attributes, type list
+| offset, name list offset; type list, reference lists, name list).
+| InitResources copies the map into a locked handle (ROMMapHandle) with
+| file reference 1; the Resource Manager searches it when ROMMapInsert is
+| set (Inside Macintosh: More Macintosh Toolbox, "ROM Resources", 1-134).
 |
-| Contains the ROM's built-in resources at offset $176F8:
-| DRVR 2 '.Print' - Print Driver
-| DRVR 3 '.Sound' - Sound Driver
-| DRVR 4 '.Sony' - Disk Driver (Sony 3.5" floppy)
-| DRVR 9 '.MPP' - AppleTalk MPP driver
-| DRVR 10 '.ATP' - AppleTalk ATP driver
-| SERD 0 - Serial Driver
-| MDEF 0 - Standard Menu Definition
-| WDEF 0 - Standard Window Definition
-| PACK 4,5,7 - SANE floating-point packages
-| CURS 1-4 - Standard cursors (iBeam, cross, plus, watch)
-| FONT 0 'Chicago' - System font (12pt)
-| FONT 12 - Additional font
+| The 17 resources, in ROM order (the files after this one):
+|   DRVR 2 .Print, DRVR 3 .Sound, DRVR 4 .Sony, DRVR 10 .ATP, DRVR 9 .MPP,
+|   SERD 0 (the serial drivers), MDEF 0, WDEF 0, PACK 7 (binary-decimal
+|   conversion), PACK 5 (SANE elementary functions), PACK 4 (SANE
+|   arithmetic), CURS 2, 3, 1, 4, FONT 0 'Chicago' (the family's name
+|   entry, no data) and FONT 12 (Chicago 12).
 |
-| References:
-| Inside Macintosh Vol I, Ch 5: Resource Manager - Resource File Format
+| The ROM resource header: the data of every resource is preceded by 8
+| bytes in the form of a Memory Manager block header -- tag $C0 with the
+| physical size (8 + data size), then the relative handle: the offset of
+| the resource's master pointer from the start of the "ROM zone".
+| InitResources (INITRESOURCES_CONT_2) creates that zone in the system
+| heap: the zone header ($34 bytes) and its first master pointer block (4
+| masters), then a nonrelocatable block with one master pointer per ROM
+| resource (the count word below), whose data starts at zone + $54; then
+| the handle of the map copy. So the relative handles run $54, $58, ... in
+| ROM order. LoadROMResource (RESMGR_OK_4) takes zone + relative handle as
+| the resource's handle and points its master pointer at the data in ROM.
 
-| ROM resource fork (DRVR, FONT, CURS, etc.)
-| ROM section: src/resources/resources.asm
-
-| Resources in ROM
-  .short 0x0011                                 | ?
-  .short 0x0148                                 | resource map size
+| InitResources: number of ROM resources (one master pointer each) and the
+| size of the map that follows
+  .short 0x0011                                 | 17 ROM resources
+  .short 0x0148                                 | resource map size: $148 bytes
 
 | Resource map
   .long 0x00000100                              | reserved for Offset to resource data
@@ -184,8 +193,4 @@
 | end of Resource map
 
 | Resources data
-
-| resource header
-  .long 0xC0000174                              | Length
-  .long 0x00000054                              | ?
 

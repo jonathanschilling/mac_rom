@@ -2,179 +2,10 @@
 |
 | --> GRAFASM.TEXT
 |
-| Miscellaneous unclassified routines.
-|
-| The 1984 ROM places its handful of fixed-point math primitives
-| (LongMul, FixMul, FixRatio, HiWord/LoWord/FixRound) inside the
-| QuickDraw GrafAsm region for ROM-layout reasons. They are not part
-| of QuickDraw proper -- they are general-purpose Toolbox utilities
-| later split out into dialog_mgr.s + toolbox_utils.s in the Plus ROM.
-|
-| Routines:
-|   LongMul  - 64-bit signed multiply of two 32-bit Fixed values
-|   FixMul   - 16.16 fixed-point multiply (dest = a * b)
-|   FixRatio - Fix(numer / denom) without intermediate overflow
-|   HiWord, LoWord, FixRound - bitfield helpers for Fixed values
-|
-| Note: classic's file layout starts with tail-end fragments of other
-| QuickDraw routines (SLAB_NEXT8 et al., pattern-fill continuations
-| that physically sit here in the 1984 ROM). The real InitGraf entry
-| is further down in this file (labeled).
-
-SLAB_NEXT8:
-        MOVE    D6,D0                           | GET PATTERN DATA
-        AND     (A2)+,D1                        | mask pattern with edge mask
-        AND     D1,D0                           | isolate src bits inside mask
-        NOT     D1                              | invert mask for dst-keep
-        AND     (A1),D1                         | keep dst bits outside mask
-        OR      D0,D1                           | merge src and kept dst
-        MOVE    D1,(A1)+                        | UPDATE DST
-        MOVEQ.L #-0x1,D1                        | reset mask for next word
-        SUBQ.W  #0x1,D2                         | decrement word count
-        BGT.B   SLAB_NEXT8                      | more words -> loop
-        BEQ.B   SLABMODE_HANDLERS               | last word -> apply edge mask
-        RTS                                     | done
-SLAB_END9:
-        AND     D3,D1                           | srcOr last word: apply edge mask
-SLAB_NEXT9:
-        AND     D6,D1                           | srcOr: AND mask with pattern
-        AND     (A2)+,D1                        | AND with bg pattern lookup
-        OR      D1,(A1)+                        | OR result into dst (srcOr)
-        MOVEQ.L #-0x1,D1                        | reset mask for next word
-        SUBQ.W  #0x1,D2                         | decrement word count
-        BGT.B   SLAB_NEXT9                      | more words -> loop
-        BEQ.B   SLAB_END9                       | last word -> apply edge mask
-        RTS                                     | done
-SLAB_END10:
-        AND     D3,D1                           | srcXor last word: apply edge mask
-SLAB_NEXT10:
-        AND     D6,D1                           | srcXor: AND mask with pattern
-        AND     (A2)+,D1                        | AND with bg pattern lookup
-        EOR     D1,(A1)+                        | XOR into dst (srcXor)
-        MOVEQ.L #-0x1,D1                        | reset mask for next word
-        SUBQ.W  #0x1,D2                         | decrement word count
-        BGT.B   SLAB_NEXT10                     | more words -> loop
-        BEQ.B   SLAB_END10                      | last word -> apply edge mask
-        RTS                                     | done
-SLAB_END11:
-        AND     D3,D1                           | srcBic last word: apply edge mask
-SLAB_NEXT11:
-        AND     D6,D1                           | srcBic: AND mask with pattern
-        AND     (A2)+,D1                        | AND with bg pattern lookup
-        NOT     D1                              | invert for bit-clear
-        AND     D1,(A1)+                        | clear bits in dst (srcBic)
-        MOVEQ.L #-0x1,D1                        | reset mask for next word
-        SUBQ.W  #0x1,D2                         | decrement word count
-        BGT.B   SLAB_NEXT11                     | more words -> loop
-        BEQ.B   SLAB_END11                      | last word -> apply edge mask
-        RTS                                     | done
-
-
-LongMul:
-        LINK    A6,#0x0                         | no locals
-        MOVEM.L D0-D1/A1-A2,-(SP)               | save scratch regs
-        MOVE.L  8(A6),A0                        | A0 = result ptr (4-byte product)
-        LEA.L     16(A6),A1                     | A1 = end of operand A (4 bytes)
-        LEA      12(FP),A2                      | A2 = end of operand B
-| LONGMUL_ABS_A -- take absolute values, track sign in D6.
-LONGMUL_ABS_A:
-        TST.L   (A2)+                           | peek operand B sign
-        SMI     D1                              | D1 := (N == 1)
-        BPL.B   LONGMUL_ABS_B                   | positive -> skip negate
-        NEG.L    -4(A2)                         | negate operand B in place
-LONGMUL_ABS_B:
-        TST.L   (A1)+                           | peek operand A sign
-        BPL.B   LONGMUL_MUL                     | positive -> skip negate
-        NOT.B   D1                              | flip sign tracker
-        NEG.L   (A2)                            | (A2) = -(A2)
-LONGMUL_MUL:
-        MOVE    -(A1),D0                        | A.lo
-        MULU    -(A2),D0                        | D0 = D0 *u -(A2)
-        MOVE.L  D0,4(A0)                        | partial = A.lo * B.lo
-        MOVE    -(A1),D0                        | A.hi
-        MULU    -(A2),D0                        | D0 = D0 *u -(A2)
-        MOVE.L  D0,(A0)                         | partial = A.hi * B.hi
-        MOVE    (A1)+,D0                        | A.hi for cross product
-        MULU    2(A2),D0                        | D0 = D0 *u 2(A2)
-        ADD.L   D0,2(A0)                        | 2(A0) += D0
-        BCC.B   LONGMUL_FOLD2                   | no carry -> skip
-        ADDQ.W  #0x1,(A0)                       | (A0) += 0x1
-LONGMUL_FOLD2:
-        MOVE    (A2),D0                         | B.hi for second cross
-        MULU    (A1),D0                         | D0 = D0 *u (A1)
-        ADD.L   D0,2(A0)                        | 2(A0) += D0
-        BCC.B   LONGMUL_FOLD3                   | no carry -> skip
-        ADDQ.W  #0x1,(A0)                       | (A0) += 0x1
-LONGMUL_FOLD3:
-        TST.B   D1                              | result negative?
-        BEQ.B   LONGMUL_EXIT                    | positive -> done
-        NEG.L   4(A0)                           | 4(A0) = -4(A0)
-        NEGX.L  (A0)                            | (A0) = -(A0) (with X bit)
-
-| ----------------------------------------------------------
-| LONGMUL_EXIT
-| Called during boot.
-LONGMUL_EXIT:
-        MOVEM.L (SP)+,D0-D1/A1-A2               | restore scratch regs
-        UNLK    A6                              | tear down frame
-        MOVE.L  (SP)+,A0                        | pop return addr
-        ADDA.W  #0xC,SP                         | strip 12 bytes of params
-        JMP     (A0)                            | RTS
-FixMul:
-        LINK    A6,#-0x8                        | allocate 8-byte result
-        MOVE.L  12(A6),-(SP)                    | push operand A
-        MOVE.L  8(A6),-(SP)                     | push operand B
-        PEA.L     -8(A6)                        | push result ptr
-        JSR     LongMul(PC)                     | compute 64-bit product
-        MOVE.L  -6(A6),16(A6)                   | return middle 32 bits (Fixed)
-        UNLK    A6                              | tear down frame
-        MOVE.L  (SP)+,A0                        | pop return addr
-        ADDQ.W  #0x8,SP                         | strip 8 bytes of params
-        JMP     (A0)                            | RTS
-| Called by: StdTxMeas, PTTOANGLE_NONHORIZ, SLANTED, NOSWAP, STOPOK (and 1 more)
-FixRatio:
-        MOVE    6(SP),D0                        | D0 = numer
-        EXT.L    D0                             | sign-extend numer to long
-        SMI     D1                              | D1 := (N == 1)
-        BPL.B   FIXRATIO_POSNUM                 | positive -> skip negate
-        NEG.L   D0                              | abs(numer)
-FIXRATIO_POSNUM:
-        TST     4(SP)                           | denom == 0?
-        BNE.B   FIXRATIO_DEN_NONZERO            | nonzero -> divide
-        MOVE.L  #0x7FFFFFFF,0x8(SP)             | denom=0 -> return INT_MAX
-        BRA.B   FIXRATIO_DONE                   | skip division
-FIXRATIO_DEN_NONZERO:
-        BPL.B   FIXRATIO_DENPOS                 | denom positive -> skip
-        NOT     D1                              | flip sign tracker
-        NEG     4(SP)                           | 4(SP) = -4(SP)
-FIXRATIO_DENPOS:
-        DIVS    4(SP),D0                        | D0 = D0 /s 4(SP)
-        MOVE    D0,8(SP)                        | integer part of result
-        CLR     D0                              | zero D0 for fractional divide
-        DIVU    4(SP),D0                        | D0 = D0 /u 4(SP)
-        MOVE    D0,10(SP)                       | fractional part of result
-FIXRATIO_DONE:
-        TST.B   D1                              | overall sign negative?
-        BEQ.B   FIXRATIO_EXIT                   | positive -> done
-        NEG.L   8(SP)                           | 8(SP) = -8(SP)
-FIXRATIO_EXIT:
-        MOVE.L  (SP)+,(SP)                      | COPY A LONG INTO GLOBALS
-        RTS                                     | return Fixed result
-        MOVE    4(SP),8(SP)                     | RESTORE REG
-        MOVE.L  (SP)+,(SP)                      | strip 4 bytes
-        RTS                                     | return
-        MOVE    6(SP),8(SP)                     | move numer over denom slot
-        MOVE.L  (SP)+,(SP)                      | strip 4 bytes
-        RTS                                     | return
-        MOVE.L  #0x8000,D0                      | half-word rounding bias
-        TST.L   4(SP)                           | test sign
-        BPL.B   FIXRATIO_OVFL                   | positive -> skip neg
-        NEG.L   D0                              | negate bias for negative
-FIXRATIO_OVFL:
-        ADD.L   D0,4(SP)                        | 4(SP) += D0
-        MOVE    4(SP),8(SP)                     | return high word as result
-        MOVE.L  (SP)+,(SP)                      | strip 4 bytes
-        RTS                                     | return
+| Miscellaneous unclassified routines: InitGraf, OpenPort, InitPort,
+| ClosePort, SetStdProcs, LocalToGlobal/GlobalToLocal, GrafDevice,
+| SetPort/GetPort, SetPBits, PortSize, MovePortTo, SetOrigin, SetClip,
+| GetClip, ClipRect, BackPat, AddPt, SubPt, SetPt, EqualPt.
 
 | --------------------------------------------------
 | PROCEDURE InitGraf(globalPtr: Ptr);
@@ -269,10 +100,8 @@ QDPATTERNS:
 | ----------------------------------------------------------
 | .PROC OpenPort,1
 | PROCEDURE OpenPort(port: GrafPtr);
-| Initialize a GrafPort to defaults: allocate clipRgn/visRgn, set
-| portBits = screenBits, install wide-open clipRgn, then fall
-| through to InitPort to initialize the rest of port state.
-| Plus equivalent: GrafAsm.s 153.
+| _OpenPort ($A86F): allocate the port's clipRgn and visRgn, then
+| fall through to InitPort, which initializes all other fields.
 | Called during boot.
 OpenPort:
         CLR.L   -(SP)                           | MAKE ROOM FOR FUNCTION RESULT
@@ -282,6 +111,17 @@ OpenPort:
         MOVE.L  12(SP),A0                       | POINT TO PORT
         MOVE.L  (SP)+,28(A0)                    | INSTALL NEW REGION INTO CLIPRGN
         MOVE.L  (SP)+,24(A0)                    | AND OTHER INTO VISRGN
+| FALL THRU TO InitPort
+
+| ----------------------------------------------------------
+| .PROC InitPort,1
+| PROCEDURE InitPort(port: GrafPtr);
+| _InitPort ($A86D): initialize all fields of an existing GrafPort:
+| SetPort(port), portBits := screenBits, portRect and visRgn :=
+| screenBits.bounds, wide-open clipRgn, then the pen, pattern, text
+| and procedure fields. Also reached as fall-through from OpenPort.
+| Called during boot.
+InitPort:
         MOVE.L  (A5),A0                         | POINT TO QUICKDRAW GLOBALS
         MOVE.L  4(SP),A1                        | GET PORT PARAM
         MOVE.L  A1,(A0)                         | SetPort(port)
@@ -301,15 +141,6 @@ OpenPort:
         MOVE.L  -0x82(A0),-(SP)                 | PUSH WIDE OPEN RGN
         MOVE.L  28(A1),-(SP)                    | PUSH CLIPRGN
         JSR     CopyRgn(PC)                     | SET TO WIDE OPEN
-
-| ----------------------------------------------------------
-| .PROC InitPort,1
-| PROCEDURE InitPort(port: GrafPtr);
-| Re-initialize port state to defaults. Reachable as trap
-| _InitPort entry, AND as fall-through from OpenPort.
-| Plus equivalent: GrafAsm.s 172.
-| Called during boot.
-InitPort:
         MOVE.L  4(SP),A1                        | GET PORT PARAM
         LEA.L     0x20(A1),A1                   | POINT TO BKPAT
         CLR.L   (A1)+                           | bkPat := white
@@ -341,17 +172,16 @@ InitPort:
 | .PROC ClosePort,1
 | PROCEDURE ClosePort(port: GrafPtr);
 | Disposes of clipRgn and visRgn handles. Plus uses inline
-| _DisposeHandle; classic uses NEWRGN_CONT (a Pascal-stack
+| _DisposeHandle; classic uses DisposRgn (a Pascal-stack
 | _DisposeHandle wrapper).
-| Plus equivalent: GrafAsm.s 228.
 | Called during boot.
 ClosePort:
         MOVE.L  4(SP),A0                        | GET PORT
-        MOVE.L  28(A0),-(SP)                    | PUSH VISRGN HANDLE
-        JSR     NEWRGN_CONT(PC)                 | DisposeHandle wrapper
+        MOVE.L  28(A0),-(SP)                    | PUSH CLIPRGN HANDLE
+        JSR     DisposRgn(PC)                   | DisposRgn(clipRgn)
         MOVE.L  4(SP),A0                        | GET PORT
-        MOVE.L  24(A0),-(SP)                    | PUSH CLIPRGN HANDLE
-        JSR     NEWRGN_CONT(PC)                 | DisposeHandle wrapper
+        MOVE.L  24(A0),-(SP)                    | PUSH VISRGN HANDLE
+        JSR     DisposRgn(PC)                   | DisposRgn(visRgn)
         MOVE.L  (SP)+,(SP)                      | STRIP PARAM
         RTS                                     | AND RETURN
 
@@ -360,7 +190,6 @@ ClosePort:
 | PROCEDURE SetStdProcs(VAR procs: QDProcs);
 | Fill a QDProcs record with standard QuickDraw procedure pointers.
 | Order matches QDProcs (GrafTypes.s).
-| Plus equivalent: GrafAsm.s 242.
 | Called during boot.
 SetStdProcs:
         MOVE.L  4(SP),A1                        | GET ADDRESS OF PROC RECORD
@@ -392,72 +221,75 @@ SetStdProcs:
         LEA     StdPutPic(PC),A0                | putPicProc = StdPutPic
         MOVE.L  A0,(A1)+                        | install putPicProc
         MOVE.L  (SP)+,(SP)                      | strip param
-        RTS                                     | return
-
-| ----------------------------------------------------------
-| .PROC GlobalToLocal,1
-| PROCEDURE GlobalToLocal(VAR pt: Point);
-| Convert a global-coord point to current grafport's local coords.
-| Plus equivalent: GrafAsm.s 280.
-| Called during boot.
-GlobalToLocal:
-        MOVEM.L D0/A0-A1,-(SP)                  | save regs
-        MOVE.L  (A5),A0                         | A0 = QD globals
-        MOVE.L  (A0),A0                         | A0 = thePort
-        MOVE.L  16(SP),A1                       | A1 = VAR pt addr
-        MOVE    8(A0),D0                        | D0 = portRect.top global
-        SUB     D0,(A1)+                        | pt.v -= portRect.top global
-        MOVE    10(A0),D0                       | D0 = portRect.left global
-        SUB     D0,(A1)+                        | pt.h -= portRect.left global
-        MOVEM.L (SP)+,D0/A0-A1                  | restore regs
-        MOVE.L  (SP)+,(SP)                      | strip param
-        RTS                                     | return
+        RTS                                     | return from SetStdProcs
 
 | ----------------------------------------------------------
 | .PROC LocalToGlobal,1
-| PROCEDURE LocalToGlobal(VAR pt: Point);
-| Convert a local-coord point to global coords.
-| Plus equivalent: GrafAsm.s 268. Trap: _LocalToGlobal ($A871).
+|
+| _LocalToGlobal ($A870): convert a point from local to global coordinates
+| Pascal: PROCEDURE LocalToGlobal(VAR pt: Point);
+| pt := pt - thePort^.portBits.bounds.topLeft (GrafPort offsets 8/10).
+| Preserves all registers. The 1983 GrafAsm.a shares one body with
+| GlobalToLocal (ADD or NEG+ADD); the 1984 ROM has two separate copies.
 | Called during boot.
 LocalToGlobal:
         MOVEM.L D0/A0-A1,-(SP)                  | save regs
         MOVE.L  (A5),A0                         | A0 = QD globals
         MOVE.L  (A0),A0                         | A0 = thePort
         MOVE.L  16(SP),A1                       | A1 = VAR pt addr
-        MOVE    8(A0),D0                        | D0 = portRect.top global
-        ADD     D0,(A1)+                        | pt.v += portRect.top global
-        MOVE    10(A0),D0                       | D0 = portRect.left global
-        ADD     D0,(A1)+                        | pt.h += portRect.left global
+        MOVE    8(A0),D0                        | D0 = portBits.bounds.top
+        SUB     D0,(A1)+                        | pt.v -= bounds.top
+        MOVE    10(A0),D0                       | D0 = portBits.bounds.left
+        SUB     D0,(A1)+                        | pt.h -= bounds.left
         MOVEM.L (SP)+,D0/A0-A1                  | restore regs
         MOVE.L  (SP)+,(SP)                      | strip param
-        RTS                                     | return
+        RTS                                     | return from LocalToGlobal
+
+| ----------------------------------------------------------
+| .DEF GlobalToLocal
+|
+| _GlobalToLocal ($A871): convert a point from global to local coordinates
+| Pascal: PROCEDURE GlobalToLocal(VAR pt: Point);
+| pt := pt + thePort^.portBits.bounds.topLeft. Preserves all registers.
+| Called during boot.
+GlobalToLocal:
+        MOVEM.L D0/A0-A1,-(SP)                  | save regs
+        MOVE.L  (A5),A0                         | A0 = QD globals
+        MOVE.L  (A0),A0                         | A0 = thePort
+        MOVE.L  16(SP),A1                       | A1 = VAR pt addr
+        MOVE    8(A0),D0                        | D0 = portBits.bounds.top
+        ADD     D0,(A1)+                        | pt.v += bounds.top
+        MOVE    10(A0),D0                       | D0 = portBits.bounds.left
+        ADD     D0,(A1)+                        | pt.h += bounds.left
+        MOVEM.L (SP)+,D0/A0-A1                  | restore regs
+        MOVE.L  (SP)+,(SP)                      | strip param
+        RTS                                     | return from GlobalToLocal
 
 | ----------------------------------------------------------
 | PROCEDURE GrafDevice(device: INTEGER);
-| Plus equivalent: GrafAsm.s 365.
 GrafDevice:
         MOVEQ.L #0x0,D0                         | port offset 0 = device
         JMP     L_mPortWord(PC)                 | install word into port
 
 | ----------------------------------------------------------
-| PROCEDURE SetPort(gp: GrafPtr); Plus equivalent: GrafAsm.s 341.
+| PROCEDURE SetPort(gp: GrafPtr).
 SetPort:
         MOVE.L  (A5),A0                         | A0 = QD globals
         MOVE.L  4(SP),(A0)                      | install new thePort
         MOVE.L  (SP)+,(SP)                      | strip param
-        RTS                                     | return
+        RTS                                     | return from SetPort
 
 | ----------------------------------------------------------
-| PROCEDURE GetPort(VAR gp: GrafPtr); Plus equivalent: GrafAsm.s 352.
+| PROCEDURE GetPort(VAR gp: GrafPtr).
 GetPort:
         MOVE.L  (A5),A0                         | A0 = QD globals
         MOVE.L  4(SP),A1                        | A1 = VAR addr
         MOVE.L  (A0),(A1)                       | copy thePort to VAR
         MOVE.L  (SP)+,(SP)                      | strip param
-        RTS                                     | return
+        RTS                                     | return from GetPort
 
 | ----------------------------------------------------------
-| PROCEDURE SetPortBits(bm: BitMap); Plus equivalent: GrafAsm.s 376.
+| PROCEDURE SetPortBits(bm: BitMap).
 SetPBits:
         MOVE.L  (A5),A0                         | POINT TO QUICKDRAW GLOBALS
         MOVE.L  (A0),A0                         | GET CURRENT GRAFPORT
@@ -489,7 +321,6 @@ PortSize:
 
 | ----------------------------------------------------------
 | PROCEDURE MovePortTo(leftGlobal, topGlobal: INTEGER);
-| Plus equivalent: GrafAsm.s 427.
 MovePortTo:
         MOVE.L  (A5),A0                         | POINT TO QUICKDRAW GLOBALS
         MOVE.L  (A0),A0                         | GET CURRENT GRAFPORT
@@ -508,7 +339,7 @@ MovePortTo:
 
 | ----------------------------------------------------------
 | PROCEDURE SetOrigin(h, v: INTEGER);
-| Adjust port origin and offset clipRgn. Plus equivalent: GrafAsm.s 455.
+| Adjust port origin and offset clipRgn.
 SetOrigin:
         MOVE.L  (A5),A0                         | A0 = QD globals
         MOVE.L  (A0),A0                         | A0 = thePort
@@ -528,16 +359,15 @@ SetOrigin:
         ADD     D1,16(A0)                       | 16(A0) += D1
         ADD     D1,20(A0)                       | 20(A0) += D1
         MOVE.L  24(A0),-(SP)                    | PUSH PARMS FOR LATER
-        MOVE    D0,-(SP)                        | push dh for OffsetRgn
-        MOVE    D1,-(SP)                        | push dv for OffsetRgn
-        JSR     OffsetRgn(PC)                   | slide clipRgn by (dh,dv)
+        MOVE    D0,-(SP)                        | push dh for OfsetRgn
+        MOVE    D1,-(SP)                        | push dv for OfsetRgn
+        JSR     OfsetRgn(PC)                    | slide clipRgn by (dh,dv)
 SETORIGIN_DONE:
         MOVE.L  (SP)+,(SP)                      | STRIP 4 BYTES
         RTS                                     | AND RETURN
 
 | ----------------------------------------------------------
 | PROCEDURE SetClip(rgn: RgnHandle); copy rgn into theport^.clipRgn.
-| Plus equivalent: GrafAsm.s 503.
 SetClip:
         MOVE.L  (SP)+,A0                        | POP RETURN ADDR
         MOVE.L  (A5),A1                         | A1 = QD globals
@@ -548,7 +378,6 @@ SetClip:
 
 | ----------------------------------------------------------
 | PROCEDURE GetClip(rgn: RgnHandle); copy theport^.clipRgn into rgn.
-| Plus equivalent: GrafAsm.s 517.
 GetClip:
         MOVE.L  (SP)+,A0                        | POP RETURN ADDR
         MOVE.L  (SP)+,D0                        | POP arg RGN HANDLE
@@ -561,7 +390,6 @@ GetClip:
 
 | ----------------------------------------------------------
 | PROCEDURE ClipRect(r: Rect); set thePort^.clipRgn to a rect.
-| Plus equivalent: GrafAsm.s 485.
 ClipRect:
         MOVE.L  (A5),A0                         | A0 = QD globals
         MOVE.L  (A0),A0                         | A0 = thePort
@@ -570,11 +398,10 @@ ClipRect:
         MOVE.L  A1,-(SP)                        | push rect
         JSR     RectRgn(PC)                     | RectRgn equivalent
         MOVE.L  (SP)+,(SP)                      | strip param
-        RTS                                     | return
+        RTS                                     | return from ClipRect
 
 | ----------------------------------------------------------
 | PROCEDURE BackPat(pat: Pattern); set thePort^.bkPat.
-| Plus equivalent: GrafAsm.s 393.
 BackPat:
         MOVE.L  (A5),A0                         | A0 = QD globals
         MOVE.L  (A0),A0                         | A0 = thePort
@@ -583,11 +410,10 @@ BackPat:
         MOVE.L  (A1)+,(A0)+                     | copy pat into bkPat
         MOVE.L  (A1)+,(A0)+                     | all 8 bytes
         MOVE.L  (SP)+,(SP)                      | strip param
-        RTS                                     | return
+        RTS                                     | return from BackPat
 
 | ----------------------------------------------------------
 | PROCEDURE AddPt(src: Point; VAR dst: Point);
-| Plus equivalent: GrafAsm.s 312.
 AddPt:
         MOVEM.L D0/A0,-(SP)                     | save regs
         MOVE.L  12(SP),A0                       | A0 = VAR dst
@@ -598,11 +424,10 @@ AddPt:
         MOVEM.L (SP)+,D0/A0                     | restore regs
         MOVE.L  (SP)+,(SP)                      | strip dst
         MOVE.L  (SP)+,(SP)                      | strip src
-        RTS                                     | return
+        RTS                                     | return from AddPt
 
 | ----------------------------------------------------------
 | PROCEDURE SubPt(src: Point; VAR dst: Point);
-| Plus equivalent: GrafAsm.s 322.
 SubPt:
         MOVEM.L D0/A0,-(SP)                     | save regs
         MOVE.L  12(SP),A0                       | A0 = VAR dst
@@ -613,7 +438,7 @@ SubPt:
         MOVEM.L (SP)+,D0/A0                     | restore regs
         MOVE.L  (SP)+,(SP)                      | strip dst
         MOVE.L  (SP)+,(SP)                      | strip src
-        RTS                                     | return
+        RTS                                     | return from SubPt
 
 | .PROC SetPt
 | -------------------------------------------------------------

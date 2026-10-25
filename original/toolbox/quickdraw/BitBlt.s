@@ -5,6 +5,105 @@
 | Low-level bit boundary block transfer.
 |
 
+| ---------------------------------------------------------------
+| --> BITBLT.TEXT
+| Low-level bit boundary block transfer.
+| .PROC BITBLT,7
+| .REF LEFTMASK,RIGHTMASK,PatExpand
+| --------------------------------------------------------------
+| PROCEDURE BitBlt(srcBits,dstBits: BitMap;
+| srcRect,dstRect: Rect;
+| mode: INTEGER; pat: Pattern);
+| TRANSFERS A RECTANGULAR BLOCK OF BITS WITH NO CLIPPING AT ALL.
+| MODE SPECIFIES THE COMBINATION MODE AND WHETHER THE SOURCE SHOULD COME
+| FROM THE SOURCE BITMAP OR FROM A REPEATING PATTERN.
+| COPYRIGHT APPLE COMPUTER INC.
+| WRITTEN BY BILL ATKINSON
+| POSITION INDEPENDENT AND RE-ENTRANT, CLOBBERS ONLY A0.
+| MODES: 0 SRC --> DST
+| 1 SRC OR DST --> DST
+| 2 SRC XOR DST --> DST
+| 3 SRC BIC DST --> DST
+| 4 (NOT SRC) --> DST
+| 5 (NOT SRC) OR DST --> DST
+| 6 (NOT SRC) XOR DST --> DST
+| 7 (NOT SRC) BIC DST --> DST
+| 8 PATTERN --> DST
+| 9 PATTERN OR DST --> DST
+| 10 PATTERN XOR DST --> DST
+| 11 PATTERN BIC DST --> DST
+| 12 (NOT PATTERN) --> DST
+| 13 (NOT PATTERN) OR DST --> DST
+| 14 (NOT PATTERN) XOR DST --> DST
+| 15 (NOT PATTERN) BIC DST --> DST
+| Called during boot.
+BitBlt:
+        LINK    A6,#-0x58                       | set up stack frame
+        MOVEM.L D0-D7/A1-A5,-(SP)               | save scratch registers
+        MOVE.L  A5,-0x58(A6)                    | save QD globals ptr in local
+        MOVE.L  18(A6),A2                       | GET SRCV
+        MOVE.L  14(A6),A3                       | GET HEIGHT
+        MOVE.L  26(A6),A4                       | A4 = srcBits ptr
+        MOVE.L  22(A6),A5                       | A5 = dstBits ptr
+        MOVE    4(A3),D0                        | D0 = dstRect.bottom
+        SUB     (A3),D0                         | D0 = height (bottom - top)
+        BLE.W   GOHOME                          | height <= 0 -> nothing to draw
+        MOVE    D0,-0x52(A6)                    | save height in local
+        MOVEQ.L #0x2,D3                         | bump = +2 (left-to-right)
+        MOVE    (A2),D0                         | D0 = srcRect.top
+        SUB     6(A4),D0                        | convert srcTop to global coords
+        MOVE    D0,-0x42(A6)                    | srcV = srcTop (global)
+        MOVE    (A3),D0                         | D0 = dstRect.top
+        SUB     6(A5),D0                        | convert dstTop to global coords
+        MOVE    D0,-0x44(A6)                    | dstV = dstTop (global)
+        MOVE    4(A4),-0x46(A6)                 | srcRow = srcBits.rowBytes
+        MOVE    4(A5),-0x48(A6)                 | dstRow = dstBits.rowBytes
+        CLR     D7                              | invertReg = 0 (not inverted)
+        MOVE    12(A6),D0                       | D0 = transfer mode
+        BTST    #0x2,D0                         | inverted-source mode bit?
+        BEQ.B   MODEOK                          | not inverted -> continue
+        NOT     D7                              | invertReg = -1 (inverted)
+MODEOK:
+        BTST    #0x3,D0                         | pattern mode bit?
+        BEQ.B   DIREC                           | no -> direct src copy
+        MOVE    8(A5),D2                        | D2 = dstLeft for pattern align
+        MOVE.L  8(A6),A0                        | A0 = pattern parameter
+        LEA.L     -0x40(A6),A1                  | A1 = expanded pattern slot (16 longs)
+        MOVE.L  -0x58(A6),A5                    | A5 = QD globals (PatExpand needs it)
+        JSR     PatExpand(PC)                   | expand 8-byte pattern -> 16 longs
+        MOVE.L  22(A6),A5                       | restore A5 = dstBits
+        MOVEQ.L #0xF,D7                         | treat coord mod 16
+        AND     (A3),D7                         | D7 = dstTop & 15
+        LSL     #0x2,D7                         | quad for longword indexing
+        MOVE.L  -0x40(A6,D7.W),D6               | D6 = pattern word from expanded table
+        BRA.B   GETSRC_CONT                     | skip src setup -> GETSRC_CONT
+
+| ----------------------------------------------------------
+| DIREC
+| Called during boot.
+DIREC:
+        MOVE.L  (A4),D0                         | D0 = src baseAddr
+        CMP.L   (A5),D0                         | same as dst baseAddr?
+        BNE.B   GETSRC                          | different bitmaps -> no overlap risk
+        MOVE    -0x42(A6),D0                    | D0 = srcV
+        CMP     -0x44(A6),D0                    | srcV vs dstV
+        BGT.B   GETSRC                          | srcV > dstV -> top-to-bottom OK
+        BLT.B   UPSIDE                          | srcV < dstV -> upside-down copy
+        MOVE    2(A2),D0                        | same V, get srcLeft
+        SUB     8(A4),D0                        | convert srcLeft to global
+        MOVE    2(A3),D1                        | get dstLeft
+        SUB     8(A5),D1                        | convert dstLeft to global
+        CMP     D1,D0                           | srcLeft vs dstLeft
+        BGE.B   GETSRC                          | srcLeft >= dstLeft -> left-to-right
+        NEG     D3                              | bump = -2 (right-to-left)
+        BRA.B   GETSRC                          | -> begin transfer
+UPSIDE:
+        MOVE    -0x52(A6),D0                    | D0 = height
+        SUBQ.W  #0x1,D0                         | height - 1
+        ADD     D0,-0x42(A6)                    | -0x42(A6) += D0
+        ADD     D0,-0x44(A6)                    | -0x44(A6) += D0
+        NEG     -0x46(A6)                       | -0x46(A6) = --0x46(A6)
+        NEG     -0x48(A6)                       | -0x48(A6) = --0x48(A6)
 | .PROC BITBLT,7
 | .REF LEFTMASK,RIGHTMASK,PatExpand
 | --------------------------------------------------------------

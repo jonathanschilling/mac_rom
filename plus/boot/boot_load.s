@@ -1,106 +1,17 @@
-| Boot-time System Load and Manager Initialization (Plus-specific)
+| Startup: boot from the startup disk (BootFromDisk)
 |
-| Continuation of the boot sequence AFTER InitIOMgr completes. This file
-| collects the Plus-specific boot-time system loader plus a handful of
-| manager-init routines that physically live in the boot-area of the ROM:
+| Corresponds to Apple's StartBoot.a (BOOTME in the SE link map).
+| BootFromDisk is the top of the system-loading sequence: heap sizing,
+| mounting the startup volume, opening the System file (resource map
+| reopened, DSAT loaded), font and buffer setup, boot-block patches, the
+| INIT resources, and the launch of the Finder (LAUNCH_APP); with the
+| helpers for reading files during startup (OPEN_AND_READ_FILE ...). It
+| ends with InitFS (_InitFS, File Manager startup: FCB/VCB setup) and
+| InitEvents (_InitEvents, event queue). The startup disk itself is
+| found by WaitForBootDisk in vectors.s.
 |
-| P_mGNEFilter - GetNextEvent filter (alarm-menu flash + ticks)
-| DT_INITZONE_PARAMS / INIT_SYS_ZONE / REINIT_SYS_ZONE
-| - SysZone (system heap) initialization
-| BootFromDisk - top of the system-loading state machine
-| (heap sizing, System file open, resource map reopen,
-| font-buffer reservation, LAUNCH_APP dispatch)
-| InitFS - File Manager boot-time init (FCB/VCB cache setup)
-| InitEvents - Event Manager boot-time init (event queue buffers)
-|
-| There is no direct equivalent in the 128K/512K (original) tree; the
-| classic ROM's boot path is simpler and lives entirely inside
-| src/original/boot/vectors.s. These routines are Plus-specific additions
-| that drive HFS-aware boot, System-file load, and the launch of the
-| Finder.
-|
-| References: Inside Macintosh Vol I (Boot), Vol II (File Manager),
-| Vol V (System-Launch changes).
-
-| ----------------------------------------------------------
-|
-| P_m GNE Filter
-|
-| Called during boot (3,695 times in 30s trace).
-P_mGNEFilter:
-        LEA.L   (AlarmState).w,A1               | A1 = AlarmState low-memory address
-        BSET    #0x5,(A1)                       | Set 'GNE filter ran' bit
-        BNE.B   GNE_FILTER_DONE                 | Already set: skip alarm check
-        MOVEQ.L #0x3,D0                         | D0 = alarm mask (bits 0-1)
-        AND.B   (A1),D0                         | Check if alarm is armed/active
-        BNE.B   GNE_FILTER_DONE                 | Alarm not ready: skip
-        TST.B   (WWExist).w                     | Window Manager initialized?
-        BNE.B   GNE_FILTER_DONE                 | Not yet: skip alarm display
-        MOVE.L  (MenuList).w,D0                 | D0 = MenuList handle
-        BEQ.B   GNE_FILTER_DONE                 | No menus: skip alarm display
-        MOVE.L  D0,A0                           | A0 = deref MenuList handle
-        MOVE.L  (A0),A0                         | A0 = deref again (master ptr)
-        TST     (A0)                            | Any menus in menu bar?
-        BLE.B   GNE_FILTER_DONE                 | No menus: skip
-        MOVE.L  0x6(A0),A0                      | A0 = first menu handle
-        MOVE.L  (A0),A0                         | A0 = deref menu handle
-        CMPI    #0x114,0xE(A0)                  | Apple menu width = 0x114 (276 pixels)?
-        BNE.B   GNE_FILTER_DONE                 | Wrong width: skip alarm flash
-        MOVE.L  #0x10011,-(SP)                  | Push shield rect top-left (1,17)
-        MOVE.L  #0x13001E,-(SP)                 | Push shield rect bot-right (19,30)
-| Flash the Apple menu bar area (alarm indicator) by XORing scanlines.
-| A1 = AlarmState low-memory address (set by caller).
-        MOVE.L  (JShieldCursor).w,A0            | Shield cursor from drawing
-        JSR     (A0)                            | Call JShieldCursor
-        MOVE.L  (ScrnBase).w,A0                 | A0 = screen base
-        MOVE    (ScreenRow).w,D0                | D0 = 64 (bytes per scanline)
-        MOVE.L  #0x7FFC,D1                      | XOR mask: flip bits 2-14 of first long
-        MOVEQ.L #0x11,D2                        | 18 scanlines (menu bar height)
-| XOR Apple menu area (alarm flash)
-ALARM_FLASH_LOOP:
-        ADDA    D0,A0                           | Advance to next scanline
-        EOR.L   D1,(A0)                         | XOR first 4 bytes (Apple logo area)
-        DBF     D2,ALARM_FLASH_LOOP             | Loop 18 scanlines
-        MOVE.L  (JShowCursor).w,A0              | Restore cursor
-        JSR     (A0)                            | Call JShowCursor
-        BCHG    #0x7,(A1)                       | Toggle alarm flash state
-        BCLR    #0x6,(A1)                       | Clear "alarm triggered" bit
-        BEQ.B   GNE_FILTER_DONE                 | Not triggered: return quietly
-        MOVE    #0x8,-(SP)                      | Push duration = 8
-        _SysBeep                                | Sound the alarm beep
-| Return from GNEFilter
-GNE_FILTER_DONE:
-        RTS                                     | Return from GNEFilter
-
-| DT_INITZONE_PARAMS - InitZone parameter block (28 bytes)
-| Configures the initial system heap zone: start, limit, grow proc, master count.
-| Fields: Lo3Bytes mask, startPtr, limitPtr, cMoreMasters, pGrowZone, etc.
-DT_INITZONE_PARAMS:
-  .byte 0x00,0xFF,0xFF,0xFF,0x00,0x00           | Lo3Bytes mask (0x00FFFFFF), startPtr hi
-  .byte 0x04,0x00,0x00,0x00,0x20,0x00           | startPtr=0x0400, limitPtr hi=0x0000, lo=0x2000
-  .byte 0x00,0x00,0x00,0x00,0x14,0x00           | cMoreMasters=0, pGrowZone=0, cbMasters=20
-  .byte 0x00,0x00,0x4E,0x00,0x00,0x20           | reserved, flags=0x4E00, heap ID=0x0020
-  .byte 0x00,0x00,0x00,0x00                     | reserved (28 bytes total)
-
-| INIT_SYS_ZONE - initialize system heap zone from DT_INITZONE_PARAMS parameters
-| Copies DT_INITZONE_PARAMS data to low-memory zone config area, then calls _InitZone.
-INIT_SYS_ZONE:
-        LEA.L   DT_INITZONE_PARAMS(PC),A0       | A0 = InitZone parameter template
-        LEA.L   (Lo3Bytes).w,A1                 | A1 = destination (low-mem config area)
-        MOVEQ.L #0x6,D0                         | Copy 7 words (14 bytes)
-| Copy InitZone parameter words
-COPY_ZONE_PARAMS:
-        MOVE    (A0)+,(A1)+                     | Copy parameter word
-        DBF     D0,COPY_ZONE_PARAMS             | Copy next parameter word
-        _InitZone                               | Create the system heap zone
-        MOVE.L  (TheZone).w,(SysZone).w         | SysZone = newly created system zone
-        RTS                                     | Return from INIT_SYS_ZONE (zone init)
-
-| REINIT_SYS_ZONE - alternate zone init entry (used during warm restart)
-REINIT_SYS_ZONE:
-        _InitZone                               | Re-create system heap zone
-        MOVE.L  (TheZone).w,(SysZone).w         | Update SysZone pointer
-        RTS                                     | Return from REINIT_SYS_ZONE (zone re-init)
+| References: Inside Macintosh Vol IV, Ch 29 (startup); Inside
+| Macintosh Vol II, Ch 4 (File Manager initialization).
 
 | === BootFromDisk: load and launch the System file ===
 | A6 = buffer containing boot blocks (1024 bytes read from disk sector 0).

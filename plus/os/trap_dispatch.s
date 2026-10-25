@@ -1,20 +1,23 @@
-| A-Line Trap Dispatcher and Device Manager Core
+| A-line trap dispatcher -- EMT1010, _GetTrapAddress, _SetTrapAddress
 |
-| The 68000 Line 1010 Emulator: dispatches A-line exceptions ($Axxx)
-| to OS or Toolbox trap handlers via RAM-resident dispatch tables.
+| Apple source: Dispatch.a (MacSEROM.lst module DSPATCH). The 68000 Line
+| 1010 Emulator exception handler dispatches A-line instructions ($Axxx)
+| to the OS or Toolbox trap handlers through the RAM dispatch tables that
+| startup fills from os/dispatch_table.s:
 | - OS traps ($A000-$A0FF): 256 entries at DispatchTab ($0400)
-| - Toolbox traps ($A800-$ABFF): 1024 entries at ToolDispTable ($0C00)
+| - Toolbox traps ($A800-$A9FF): 512 entries at ToolDispTable ($0C00)
 |
-| Trap word encoding (Inside Mac II, ch.8):
-| Bit 11: 0=OS trap, 1=Toolbox trap
-| OS: bits 8=save/restore A0, bits 0-7=trap number (256 entries)
-| Toolbox: bit 10=auto-pop, bits 0-9=trap number (1024 entries)
+| Trap word encoding (Inside Macintosh II, Ch 13):
+| Bit 11: 0 = OS trap, 1 = Toolbox trap
+| OS: bit 8 = do not preserve A0 (result in A0), bits 0-7 = trap number
+| Toolbox: bit 10 = auto-pop (discard the glue's return address),
+| bits 0-8 = trap number
 |
-| Also contains Device Manager dispatch (Fetch/Stash/IODone) and
-| _GetTrapAddress/$A146, _SetTrapAddress/$A047 implementations.
+| _GetTrapAddress ($A146) and _SetTrapAddress ($A047) read and write the
+| tables (the "N" forms, bit 9 set, take the table from bit 10).
 
 | 68020+ A-line entry: 68020 pushes format/vector word after SR+PC
-ATrap68020:
+Dispatch:
         MOVE.L  0x2(SP),0x4(SP)                 | shift PC down over format/vector word
         BRA.B   TRAP_COMMON                     | join common dispatcher path
 

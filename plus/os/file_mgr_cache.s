@@ -20,6 +20,36 @@
 
 | ----------------------------------------------------------
 |
+| Cache
+|
+| Called during boot.
+Cache:
+        MOVE.L  0x18(A1,D1.W),D0                | FLUSH_DIRTY: extract VCB from file refnum via FCB
+        BEQ.B   CACHE_DONE                      | D2 = disk block or file block to find
+        MOVE.L  D0,A4                           | A1 = volume cache queue (vcbBufAdr from VCB)
+        SUBA    #0x1C,A4                        | Subtract
+CACHE_DONE:
+        RTS                                     | A4 = next entry (follow FLink)
+
+| ----------------------------------------------------------
+|
+| FLUSH_DIRTY
+|
+| Called during boot.
+FLUSH_DIRTY:
+        BSR.B   Cache                           | A1 = FCB array
+        BEQ.B   FLUSHDIRTY_EXIT                 | A2 = VCB from FCB (at refnum offset + 0x14)
+        BTST    #0x5,BTCRoot(A4)                | Return
+        BNE.B   FLUSHDIRTY_EXIT                 | no ->
+        BCLR    #0x7,BTCRoot(A4)                | Clear bit
+        BEQ.B   FLUSHDIRTY_EXIT                 | yes ->
+        MOVE.L  (SP)+,-(A6)                     | Save return address to A6 stack
+        JSR     WriteOwnBuf(PC)                 | call
+        MOVE.L  (A6)+,-(SP)                     | put return address back on stack
+FLUSHDIRTY_EXIT:                                | D2 = block to search
+        RTS                                     | return from FLUSHDIRTY_EXIT
+| ----------------------------------------------------------
+|
 | P_m Flush Cache
 |
 | Called during boot.
@@ -470,7 +500,7 @@ P_mMarkBlock:
 | Called during boot.
 MarkBlock:
         BSET    #0x7,-0x2(A0)                   | A0 points to CBHData; CBHFlags is at A0-2: set dirty bit
-        RTS                                     | Return
+        RTS                                     | return from MarkBlock
 
 | ----------------------------------------------------------
 |
@@ -481,7 +511,7 @@ MarkA5Block:
         EXG     A0,A5                           | Swap A0 and A5 (A5 has the data ptr)
         BSR.B   P_mMarkBlock                    | Call MarkBlock via HFS vector
         EXG     A0,A5                           | Swap back (restore A0 and A5)
-        RTS                                     | Return
+        RTS                                     | return from MarkA5Block
 
 | ----------------------------------------------------------
 |
@@ -566,7 +596,7 @@ TV_SCAN_NEXT:
 |
 TV_EXIT:
         MOVEM.L (SP)+,A3-A4                     | Restore registers
-        RTS                                     | Return
+        RTS                                     | return from TV_EXIT
 
 | TrashFBlocks -- trash cached blocks for this file.
 | ----------------------------------------------------------
@@ -715,7 +745,7 @@ CACHEWRIP_EXIT:
         MOVE.L  (A6)+,D3                        | Restore D3
         MOVE.L  (A6)+,-(SP)                     | Restore return address
         TST     D0                              | Set Z flag
-        RTS                                     | Return
+        RTS                                     | return from CACHEWRIP_EXIT
 
 | ----------------------------------------------------------
 |
@@ -992,377 +1022,4 @@ TAGS_VOL_BLOCK:
 TAGS_MFS_DATE:
         MOVE.L  (Time).w,(BufTgDate).w          | use date for MFS (not write count)
         RTS                                     | return from SetUpTags (MFS path)
-
-| ----------------------------------------------------------
-|
-| Check SCSI
-|
-| Called during boot.
-CheckSCSI:
-        TST.B   (HWCfgFlags).w                  | check hardware config flags
-| --- ROM-variant difference @ $7D44 ---
-| v1: BEQ.B SCSI_EXIT -- branched when HWCfgFlags == 0.
-| v2/v3: BPL.B SCSI_EXIT -- branches when bit-7 (hasSCSI) is clear.
-| Reason: v1's BEQ tested the whole byte instead of the hasSCSI flag
-| bit, so a machine with SCSI present plus any other flag bit
-| set would incorrectly skip the probe. v2 fixed this with BPL.
-.if ROM_TARGET == MAC_PLUS_V1
-        BEQ.B   SCSI_EXIT                       | Plus v1: skip when HWCfgFlags==0 (buggy)
-.else
-        BPL.B   SCSI_EXIT                       | Plus v2/v3: skip when hasSCSI bit clear
-.endif
-        MOVEM.L D0-D7/A0-A6,-(SP)               | save all registers
-| --- ROM-variant difference @ $7D4A-$7D4D ---
-| v1/v2: inline SCSI reset here -- `CLR.W -(SP); _SCSIDispatch` pushes the
-| SCSIReset selector and calls the SCSI Manager.
-| v3: two NOPs -- the reset now happens only from the extra-area SCSI
-| patch (EXTRA_CONT in src/extra/extra.s), not here.
-| Reason: same factoring that redirected InitIOMgr at $08AC; avoids
-| doing the reset twice during boot.
-.if ROM_TARGET < MAC_PLUS_V3
-        CLR     -(SP)                           | Plus v1/v2: push selector 0 = SCSIReset
-        _SCSIDispatch                           | Plus v1/v2: reset SCSI bus
-.else
-        NOP                                     | Plus v3: (reset moved to extra-area patch)
-        NOP                                     | Plus v3: (reset moved to extra-area patch)
-.endif
-        MOVEQ.L #0x6,D5                         | D5 = 6: start from SCSI ID 6 (scan down to 0)
-SCSI_PROBE_LOOP:
-        BTst    D5,(SCSIDrvrs).w                | already found a driver at this ID?
-        BNE.B   SCSI_NEXT_ID                    | yes: skip (already installed)
-        BSR.B   SCSIProbeDevice                 | probe SCSI device at ID D5
-SCSI_NEXT_ID:
-        SUBQ.W  #0x1,D5                         | next lower SCSI ID
-        BGE.B   SCSI_PROBE_LOOP                 | loop until all IDs 6..0 checked
-        MOVEM.L (SP)+,D0-D7/A0-A6               | restore all registers
-SCSI_EXIT:
-        RTS                                     | return from CheckSCSI
-
-| ----------------------------------------------------------
-|
-| SCSIProbeDevice
-|
-| Called during boot.
-SCSIProbeDevice:                                | probe SCSI device at ID in D5
-        SUBA.L  #0x100,SP                       | allocate 256 bytes on stack for read buffer
-        MOVE.L  A7,A2                           | A2 = stack buffer (destination for reads)
-        MOVEQ.L #0x0,D3                         | D3 = block 0 (read device descriptor map)
-        MOVEQ.L #0x1,D2                         | D2 = 1 block to read
-        MOVE    #0x100,D4                       | D4 = 256 bytes per block
-        BSR.B   SCSIReadBlocks                  | Read block 0 from SCSI device
-        BNE.B   SCSI_PROBE_EXIT                 | Read failed: no SCSI disk
-        CMPI    #0x4552,(SP)                    | Check for Apple driver partition map signature 'ER'
-        BNE.B   SCSI_PROBE_EXIT                 | Not Apple partition: skip
-        MOVE    0x2(SP),D4                      | D4 = partition block size
-        MOVE    0x10(SP),D0                     | D0 = partition map entry count
-        LEA.L   0x12(SP),A0                     | A0 = partition map entries
-        MOVE.L  0xC(SP),D7                      | D7 = driver descriptor from partition map
-SCSI_FIND_DRVR:
-        CMPI    #0x1,0x6(A0)                    | Partition type = Apple_Driver (type 1)?
-        BEQ.B   SCSI_LOAD_DRVR                  | Yes: found SCSI driver partition
-        ADDQ.L  #0x8,A0                         | Next partition entry
-        SUBQ.W  #0x1,D0                         | More entries?
-        BNE.B   SCSI_FIND_DRVR                  | No: no bootable SCSI partition
-        BRA.B   SCSI_PROBE_EXIT                 | Done: no SCSI driver found
-
-| ----------------------------------------------------------
-|
-| SCSI_LOAD_DRVR
-|
-SCSI_LOAD_DRVR:
-        BSet    D5,(SCSIDrvrs).w                | Mark this SCSI ID as having a driver
-        MOVE.L  (A0),D3                         | D3 = driver physical block start on disk
-        MOVE    0x4(A0),D2                      | D2 = driver block count
-        MOVE.L  D4,D0                           | D4 = partition block size
-        MULU    D2,D0                           | D0 = total driver size in bytes
-        _NewPtrSys                              | Allocate memory for SCSI driver code
-        MOVE.L  A0,A3                           | A3 = driver code buffer
-        MOVE.L  A0,A2                           | A2 = buffer for reading driver
-        BSR.B   SCSIReadBlocks                  | Read SCSI driver from disk into buffer
-        BNE.B   SCSI_PROBE_EXIT                 | Read failed: abort
-        MOVEQ.L #0x1,D3                         | D3 = starting block 1 (for partition map)
-        MOVEQ.L #0x1,D2                         | D2 = 1 block
-        MOVE    #0x100,D4                       | D4 = 256 bytes
-        MOVE.L  A7,A2                           | A2 = stack buffer for re-reading partition map
-        BSR.B   SCSIReadBlocks                  | Re-read partition map
-        BNE.B   SCSI_PROBE_EXIT                 | Failed: abort
-        MOVE.L  A2,A0                           | A0 = partition data
-        JSR     (A3)                            | Execute loaded SCSI driver init routine (installs driver in Unit Table)
-SCSI_PROBE_EXIT:
-        ADDA    #0x100,SP                       | Clean up 256-byte stack allocation
-        RTS                                     | Return from CheckSCSI
-
-| ----------------------------------------------------------
-|
-| SCSIReadBlocks
-|
-| Called during boot.
-SCSIReadBlocks:
-        LEA.L   (scratch8).w,A0                 | A0 -> scratch8 (SCSI command block buffer)
-        MOVE.B  #0x8,(A0)+                      | SCSI opcode = 8 (READ)
-        SWAP    D3                              | Swap D3 to get high word (LUN + LBA high)
-        ANDI.B  #0x1F,D3                        | Mask LBA high bits (5 bits)
-        MOVE.B  D3,(A0)+                        | Store LUN + LBA high byte
-        SWAP    D3                              | Swap back, store LBA low word
-        MOVE    D3,(A0)+                        | Store LBA middle bytes
-        MOVE.B  D2,(A0)+                        | Store block count
-        CLR.B   (A0)+                           | Control byte = 0
-        MULU    D2,D4                           | D4 = total transfer size (blocks * block size)
-        SUBA    #0x14,SP                        | Allocate 20 bytes on stack for TIB (Transfer Instruction Block)
-        MOVE.L  A7,D6                           | D6 = TIB pointer (save for SCSIRead)
-        SUBQ.W  #0x2,SP                         | Make room for SCSIGet result
-        MOVE    #0x1,-(SP)                      | Push selector = 1
-        _SCSIDispatch                           | _SCSIDispatch(SCSIGet): arbitrate for SCSI bus
-        TST     (SP)                            | Check result
-        BNE.B   SCSI_READ_ERR                   | Error: clean up and return
-        MOVE    D5,-(SP)                        | Push SCSI target ID
-        MOVE    #0x2,-(SP)                      | Push selector = 2
-        _SCSIDispatch                           | _SCSIDispatch(SCSISelect): select target device by SCSI ID
-        TST     (SP)                            | Check result
-        BNE.B   SCSI_READ_ERR                   | Error: clean up and return
-        PEA.L   (scratch8).w                    | Push command block address (scratch8)
-        MOVE    #0x6,-(SP)                      | Push command length = 6
-        MOVE    #0x3,-(SP)                      | Push selector = 3
-        _SCSIDispatch                           | _SCSIDispatch(SCSICmd): send 6-byte SCSI READ command
-        TST     (SP)                            | Check result
-        BNE.B   SCSI_READ_ERR                   | Error: clean up and return
-        MOVE.L  D6,A0                           | A0 = TIB buffer on stack
-        MOVE    #0x1,(A0)+                      | TIB opcode 1 = scInc (transfer with auto-increment)
-        MOVE.L  A2,(A0)+                        | TIB buffer = read destination address
-        MOVE.L  D4,(A0)+                        | TIB count = total bytes to transfer
-        MOVE    #0x7,(A0)+                      | TIB terminator 7 = scStop (end of transfer list)
-        MOVE.L  D6,-(SP)                        | Push TIB pointer for SCSIRead
-        MOVE    #0x5,-(SP)                      | Push selector = 5
-        _SCSIDispatch                           | _SCSIDispatch(SCSIRead): execute TIB-based data transfer
-        PEA.L   (scratch8).w                    | Push status buffer address
-        PEA.L   (scratch8_2).w                  | Push message buffer address
-        MOVE.L  #0x3C,-(SP)                     | Push timeout = 60 ticks
-        MOVE    #0x4,-(SP)                      | Push selector = 4
-        _SCSIDispatch                           | _SCSIDispatch(SCSIComplete): get status/message, release bus
-        TST     (SP)                            | Check result
-        BNE.B   SCSI_READ_ERR                   | Error: clean up and return
-        ADDQ.L  #0x2,SP                         | Clean SCSIComplete result from stack
-        ADDA    #0x14,SP                        | Clean TIB from stack
-        MOVEQ.L #0x0,D0                         | D0 = noErr
-        RTS                                     | Return success
-
-| ----------------------------------------------------------
-|
-| SCSI_READ_ERR
-|
-| Called during boot.
-SCSI_READ_ERR:
-        ADDQ.L  #0x2,SP                         | Clean result from stack
-        ADDA    #0x14,SP                        | Clean TIB from stack
-        MOVEQ.L #-0x1,D0                        | D0 = -1 (error)
-        RTS                                     | Return error
-
-| ----------------------------------------------------------
-|
-| TrapDispatchTbl - Compressed trap dispatch table
-|
-| Delta-encoded ROM offsets for all implemented A-line traps.
-| Decoded at boot by vectors.s to fill ToolDispTable (512 Toolbox
-| traps at $800) and DispatchTab (256 OS traps at $400).
-|
-| Encoding per byte:
-| 0x80 = skip (trap is Unimplemented)
-| 0x81..0xFF = 1-byte signed delta * 2 from previous address
-| 0x01..0x7E = 1-byte signed delta * 2 from previous address
-| 0x00 = next 2 bytes are absolute ROM offset
-| 0x7F = next 2 bytes are absolute ROM offset
-| 0xFF,0x00 = next 2 bytes are 16-bit big-endian ROM offset
-|
-| Total: 1134 bytes covering 768 trap table entries.
-|
-TrapDispatchTbl:
-  .byte 0x80,0x80,0x80,0x80,0x80,0x80           | Toolbox traps $A800..$A805: skip
-  .byte 0x80,0x80,0x80,0x80,0x80,0x80           | Toolbox traps $A806..$A80B: skip
-  .byte 0x80,0xFF,0x00,0x01,0x3C,0x76           | $A80C skip; $A80D=abs; deltas...
-  .byte 0x95,0xF3,0x93,0x17,0x8A,0x7F           | Toolbox trap deltas (continued)
-  .byte 0xCA,0xEC,0x80,0x02,0x00,0x7F           | deltas; $A818 skip; deltas
-  .byte 0x8B,0xFF,0x00,0x00,0xCA,0xF0           | delta; abs offset; delta
-  .byte 0xFF,0x00,0x01,0x5A,0x56,0x7D           | abs offset; deltas
-  .byte 0xB0,0x54,0xF7,0x83,0x1E,0xC9           | Toolbox trap deltas (continued)
-  .byte 0x61,0x80,0xCD,0x1E,0x8A,0xA2           | delta; skip; deltas
-  .byte 0x05,0x2C,0x5C,0x64,0x91,0x96           | Toolbox trap deltas (continued)
-  .byte 0x7F,0xFA,0x14,0x49,0x12,0xB8           | Toolbox trap deltas (continued)
-  .byte 0xAF,0x59,0x20,0x85,0x37,0x05           | Toolbox trap deltas (continued)
-  .byte 0x81,0x81,0x81,0x81,0x81,0x81           | 6x small negative delta (-2)
-  .byte 0xFF,0x00,0x00,0x28,0x0A,0x7B           | abs offset; deltas
-  .byte 0x34,0xFF,0x00,0x00,0xF2,0x60           | delta; abs offset; delta
-  .byte 0x8A,0x48,0xCD,0x04,0xF4,0x1F           | Toolbox trap deltas (continued)
-  .byte 0xA1,0x7F,0xFC,0x26,0xF4,0xB7           | Toolbox trap deltas (continued)
-  .byte 0x80,0x80,0x80,0x20,0x23,0x7F           | 3 skips; deltas
-  .byte 0xF0,0x92,0x7F,0xF0,0x7F,0xB4           | Toolbox trap deltas (continued)
-  .byte 0x99,0x7F,0xEA,0x99,0x7F,0x2B           | Toolbox trap deltas (continued)
-  .byte 0x84,0x7F,0xA9,0x7F,0x6F,0xE9           | Toolbox trap deltas (continued)
-  .byte 0x53,0x87,0x2C,0x7C,0x80,0x80           | deltas; 2 skips
-  .byte 0xFF,0x00,0x00,0x82,0xC6,0x88           | abs offset; deltas
-  .byte 0x8E,0x83,0x3A,0xC0,0x45,0x43           | Toolbox trap deltas (continued)
-  .byte 0x98,0x80,0x87,0x84,0x7F,0xF8           | delta; skip; deltas
-  .byte 0x8D,0x84,0x8B,0x87,0x85,0x80           | deltas; skip
-  .byte 0x8C,0xA9,0x82,0x87,0x00,0xEA           | deltas; abs offset
-  .byte 0x9A,0xFF,0x00,0x01,0x57,0xB2           | delta; abs offset; delta
-  .byte 0x9A,0x00,0xAA,0xA1,0x7F,0xFC           | delta; abs offset; deltas
-  .byte 0x89,0xFF,0x00,0x00,0x88,0x84           | delta; abs offset; delta
-  .byte 0x7F,0x91,0xE3,0xF5,0x84,0xB2           | Toolbox trap deltas (continued)
-  .byte 0x7F,0xF7,0x84,0x88,0x93,0x90           | Toolbox trap deltas (continued)
-  .byte 0x96,0xA3,0x86,0x7F,0xF1,0x7F           | Toolbox trap deltas (continued)
-  .byte 0xB9,0x7F,0x92,0xC3,0x84,0x00           | deltas; abs offset
-  .byte 0x87,0x85,0x86,0x00,0xDC,0xA0           | deltas; abs offset; delta
-  .byte 0x89,0x94,0x7F,0xD6,0x7F,0xE7           | Toolbox trap deltas (continued)
-  .byte 0x9B,0x82,0x00,0xF4,0x7F,0x2A           | deltas; abs offset; delta
-  .byte 0x7F,0xD2,0x93,0x80,0x04,0xE3           | deltas; skip; deltas
-  .byte 0xC9,0x8B,0x8C,0x86,0x80,0xC6           | deltas; skip; delta
-  .byte 0x82,0x86,0x82,0x91,0x88,0x87           | Toolbox trap deltas (continued)
-  .byte 0x83,0x8A,0x80,0x03,0x28,0xD5           | deltas; skip; deltas
-  .byte 0x82,0x82,0x82,0x7F,0xEF,0x00           | deltas; abs offset
-  .byte 0xBF,0x7F,0xF9,0xA1,0x89,0x89           | Toolbox trap deltas (continued)
-  .byte 0xCE,0x9F,0x9B,0x7F,0x59,0x05           | Toolbox trap deltas (continued)
-  .byte 0xE3,0xC9,0x82,0x82,0x82,0x82           | Toolbox trap deltas (continued)
-  .byte 0x80,0x9D,0xC4,0x82,0x82,0x82           | skip; deltas
-  .byte 0x82,0x04,0xF5,0x7B,0xC5,0xBF           | Toolbox trap deltas (continued)
-  .byte 0x82,0x82,0x82,0x82,0x04,0x86           | Toolbox trap deltas (continued)
-  .byte 0x7F,0x4F,0x00,0xF9,0xBB,0x82           | deltas; abs offset; deltas
-  .byte 0x82,0x82,0x82,0x9B,0x9A,0xB7           | Toolbox trap deltas (continued)
-  .byte 0x84,0x0A,0x52,0xC8,0x75,0xED           | Toolbox trap deltas (continued)
-  .byte 0xB3,0x82,0x82,0x82,0x82,0x80           | deltas; skip
-  .byte 0xF1,0x92,0x84,0x97,0xAB,0xA7           | Toolbox trap deltas (continued)
-  .byte 0x86,0xAE,0x87,0x99,0xCE,0x88           | Toolbox trap deltas (continued)
-  .byte 0x9F,0x82,0x82,0x82,0xF5,0xB0           | Toolbox trap deltas (continued)
-  .byte 0x63,0xF4,0x1F,0xD8,0x00,0xBF           | deltas; abs offset; delta
-  .byte 0x61,0x83,0x25,0xF0,0x7A,0xAF           | Toolbox trap deltas (continued)
-  .byte 0x05,0x64,0x7F,0xBD,0x00,0x83           | deltas; abs offset; delta
-  .byte 0x8B,0xDE,0x9E,0x84,0x80,0x05           | deltas; skip; delta
-  .byte 0x13,0xAC,0xB1,0x6E,0x26,0x7C           | Toolbox trap deltas (continued)
-  .byte 0x76,0x80,0x15,0x70,0x05,0x6E           | deltas; skip; deltas
-  .byte 0xD3,0x7A,0xAD,0x05,0xA7,0x7F           | Toolbox trap deltas (continued)
-  .byte 0xE5,0x17,0xD1,0x7E,0x70,0x79           | Toolbox trap deltas (continued)
-  .byte 0xA9,0x8C,0x01,0x6C,0x7E,0xCE           | Toolbox trap deltas (continued)
-  .byte 0xAC,0xA2,0x92,0xD5,0xB6,0x97           | Toolbox trap deltas (continued)
-  .byte 0xD1,0x85,0xCA,0xE3,0x00,0xE1           | deltas; abs offset; delta
-  .byte 0x87,0x94,0x95,0x87,0x8E,0x8C           | Toolbox trap deltas (continued)
-  .byte 0xE7,0x00,0x88,0xA0,0xDD,0xBB           | delta; abs offset; deltas
-  .byte 0x98,0xCE,0xAB,0x9D,0x91,0x95           | Toolbox trap deltas (continued)
-  .byte 0xE5,0x00,0x94,0xA0,0x8F,0x82           | delta; abs offset; deltas
-  .byte 0x82,0x00,0x81,0x7B,0x40,0x00           | deltas; abs offsets
-  .byte 0x86,0x83,0x04,0x88,0x04,0x19           | Toolbox trap deltas (continued)
-  .byte 0x7E,0xFC,0x01,0x2C,0x7B,0xF2           | Toolbox trap deltas (continued)
-  .byte 0x88,0xD0,0xD1,0xC5,0x95,0x8E           | Toolbox trap deltas (continued)
-  .byte 0x01,0xBF,0x8A,0x7E,0x5E,0x02           | Toolbox trap deltas (continued)
-  .byte 0x3B,0x7F,0xE4,0x82,0x82,0x82           | Toolbox trap deltas (continued)
-  .byte 0x82,0x82,0x82,0xCE,0x01,0x38           | Toolbox trap deltas (continued)
-  .byte 0x7E,0xE2,0x00,0xF5,0xCC,0x00           | deltas; abs offset; abs offset
-  .byte 0x81,0x7D,0x60,0x02,0x24,0xFF           | Toolbox trap deltas (continued)
-  .byte 0x00,0x00,0x1F,0x38,0xFF,0x00           | abs offset; abs offset (start)
-  .byte 0x01,0x19,0x24,0x09,0xEC,0x7F           | abs offset (end); deltas
-  .byte 0x96,0x7F,0xBB,0x03,0x58,0x7D           | Toolbox trap deltas (continued)
-  .byte 0x83,0x00,0xA1,0x92,0x8E,0x8F           | delta; abs offset; deltas
-  .byte 0x8D,0x9F,0x87,0x8C,0x94,0x96           | Toolbox trap deltas (continued)
-  .byte 0x8C,0xA1,0x87,0x82,0x82,0xA1           | Toolbox trap deltas (continued)
-  .byte 0x82,0x82,0x97,0xD9,0x00,0x7F           | deltas; abs offset (start)
-  .byte 0x7E,0x86,0x82,0x01,0xBC,0x7D           | abs offset (end); deltas
-  .byte 0xF3,0xFF,0x00,0x00,0x19,0xF0           | delta; abs offset; delta
-  .byte 0x7F,0xED,0xFF,0x00,0x01,0x10           | delta; abs offset (start)
-  .byte 0x00,0x7F,0xFE,0x7F,0xD2,0x8B           | abs offset (end); deltas
-  .byte 0x7F,0xCB,0x89,0x7F,0xE9,0xD7           | Toolbox trap deltas (continued)
-  .byte 0x1E,0x51,0xED,0xAD,0x7D,0x7F           | Toolbox trap deltas (continued)
-  .byte 0x00,0xEF,0x9C,0x02,0x38,0x7E           | abs offset; deltas
-  .byte 0x14,0x9D,0xE7,0x9B,0xC3,0x01           | Toolbox trap deltas (continued)
-  .byte 0xA0,0x7C,0x88,0x7F,0xFA,0x82           | Toolbox trap deltas (continued)
-  .byte 0x82,0x01,0xFC,0xAD,0xA6,0x92           | Toolbox trap deltas (continued)
-  .byte 0x84,0xA3,0xAB,0x7F,0xF0,0x7E           | Toolbox trap deltas (continued)
-  .byte 0x92,0x7C,0x2D,0xD8,0x95,0x77           | Toolbox trap deltas (continued)
-  .byte 0x34,0x01,0xC9,0xF4,0x9F,0xF1           | Toolbox trap deltas (continued)
-  .byte 0x01,0x61,0x04,0x99,0x7B,0xBB           | Toolbox trap deltas (continued)
-  .byte 0x95,0xCE,0xA5,0xB2,0xA2,0x02           | Toolbox trap deltas (continued)
-  .byte 0xCD,0x9F,0xD9,0x01,0xD4,0x7E           | Toolbox trap deltas (continued)
-  .byte 0x6A,0x8A,0x99,0xA3,0x7F,0x44           | Toolbox trap deltas (continued)
-  .byte 0x00,0xE1,0x7F,0x88,0x00,0xE5           | abs offset; deltas; abs offset
-  .byte 0x7F,0x23,0x7F,0xF4,0x7F,0xB6           | Toolbox trap deltas (continued)
-  .byte 0x79,0x92,0x12,0x1D,0xE0,0xE9           | Toolbox trap deltas (continued)
-  .byte 0xBE,0xBB,0xA7,0x8D,0x8D,0x84           | Toolbox trap deltas (continued)
-  .byte 0x84,0x84,0x84,0xAB,0xA8,0xBF           | Toolbox trap deltas (continued)
-  .byte 0x6E,0xC3,0x10,0x43,0x80,0x6C           | deltas; skip; delta
-  .byte 0xF2,0x08,0x40,0x13,0xDC,0xBC           | Toolbox trap deltas (continued)
-  .byte 0xFF,0x00,0x00,0x11,0xDC,0x7F           | abs offset; delta
-  .byte 0xB3,0x7E,0xC1,0xFF,0x00,0x01           | deltas; abs offset (start)
-  .byte 0x60,0x8E,0x86,0x93,0x8F,0xEF           | abs offset (end); deltas
-  .byte 0xA2,0x9D,0x96,0xBD,0x97,0x02           | Toolbox trap deltas (continued)
-  .byte 0x50,0x93,0x87,0x01,0x40,0x91           | Toolbox trap deltas (continued)
-  .byte 0x8B,0x94,0xF6,0xB2,0x7F,0xB7           | Toolbox trap deltas (continued)
-  .byte 0xB6,0x74,0xCE,0x00,0xB2,0x8F           | deltas; abs offset; delta
-  .byte 0x84,0x8D,0x0C,0x32,0x91,0xC0           | Toolbox trap deltas (continued)
-  .byte 0x81,0x81,0x81,0x81,0x81,0x81           | 6x small negative delta (-2)
-  .byte 0x81,0x73,0x88,0x4E,0x83,0xC5           | Toolbox trap deltas (continued)
-  .byte 0xBE,0x7F,0xFD,0x00,0xC1,0x9C           | deltas; abs offset; delta
-  .byte 0x20,0x94,0x86,0x0F,0x8E,0x0B           | Toolbox trap deltas (continued)
-  .byte 0x26,0xBD,0x9A,0x9A,0xA6,0xB8           | Toolbox trap deltas (continued)
-  .byte 0x80,0xFF,0x00,0x00,0x21,0xF4           | skip; abs offset; delta
-  .byte 0x00,0xC9,0x9C,0xB8,0x8A,0x87           | abs offset; deltas
-  .byte 0x93,0x09,0xD7,0x04,0xDF,0x01           | Toolbox trap deltas (continued)
-  .byte 0x15,0x7E,0x07,0x02,0x34,0x03           | Toolbox trap deltas (continued)
-  .byte 0x30,0x7E,0xFA,0x76,0x6F,0x7C           | Toolbox trap deltas (continued)
-  .byte 0x22,0x13,0x4B,0x7F,0x59,0x00           | deltas; abs offset (start)
-  .byte 0xC0,0x70,0x9E,0x02,0x47,0xA8           | abs offset (end); deltas
-  .byte 0x77,0xC9,0x05,0x3A,0x0D,0x18           | Toolbox trap deltas (continued)
-  .byte 0xFF,0x00,0x00,0xFF,0x38,0xB6           | abs offset; deltas
-  .byte 0x83,0xB5,0x94,0xCD,0x8E,0x90           | Toolbox trap deltas (continued)
-  .byte 0x7F,0xFB,0xA3,0x91,0x96,0x7F           | Toolbox trap deltas (continued)
-  .byte 0xFA,0x8F,0x9F,0x7F,0xE5,0xBD           | Toolbox trap deltas (continued)
-  .byte 0x85,0x7F,0xD1,0x7E,0x84,0x00           | deltas; abs offset (start)
-  .byte 0xCB,0x06,0x23,0xFF,0x00,0x00           | abs offset (end); deltas; abs offset
-  .byte 0x26,0xEC,0xBC,0xC4,0x8F,0x7A           | abs offset (end); deltas
-  .byte 0x10,0xA5,0x0B,0xE3,0xFF,0x00           | deltas; abs offset (start)
-  .byte 0x01,0x02,0x74,0x7A,0x8E,0x8D           | abs offset (end); deltas
-  .byte 0x90,0x85,0x84,0x89,0xFF,0x00           | deltas; abs offset (start)
-  .byte 0x00,0x24,0xCA,0xAF,0xFF,0x00           | abs offset (end); deltas; abs (start)
-  .byte 0x00,0xFC,0xC2,0x01,0xAE,0xFF           | abs offset (end); deltas; abs (start)
-  .byte 0x00,0x00,0x48,0x8A,0x85,0x7F           | abs offset (end); deltas
-  .byte 0xDF,0x03,0x61,0x01,0x18,0x67           | Toolbox trap deltas (continued)
-  .byte 0x63,0x7F,0xD8,0xFF,0x00,0x01           | deltas; abs offset (start)
-  .byte 0x01,0x1C,0x00,0x94,0x85,0x7F           | abs offset (end); abs offset; deltas
-  .byte 0x11,0x7F,0xA7,0x98,0xFF,0x00           | deltas; abs offset (start)
-  .byte 0x00,0x25,0x58,0xFF,0x00,0x00           | abs offset (end); abs offset (start)
-  .byte 0xF7,0x2C,0xEC,0x03,0x0A,0x85           | abs offset (end); deltas
-  .byte 0xFF,0x00,0x00,0x01,0xF8,0xFF           | abs offset; abs offset (start)
-  .byte 0x00,0x00,0xF8,0x78,0x80,0x80           | abs offset (end); 2 skips
-  .byte 0x02,0xFF,0x3B,0xAE,0x87,0x8D           | delta; special; deltas
-  .byte 0x80,0x80,0x80,0x80,0x80,0xFF           | 5 skips; abs (start)
-  .byte 0x00,0x00,0x28,0x52,0xFF,0x00           | abs offset (end); abs (start)
-  .byte 0x00,0xFF,0xB0,0xAD,0xD2,0x00           | abs offset (end); deltas; abs (start)
-  .byte 0xEF,0x7F,0x09,0xCE,0x80,0x80           | abs offset (end); deltas; 2 skips
-  .byte 0x80,0x80,0x80,0xFF,0x00,0x00           | 3 skips; abs offset (start)
-  .byte 0x0C,0x7A,0xE9,0x80,0x80,0x80           | abs offset (end); delta; 3 skips
-  .byte 0x80,0x80,0x80,0x80,0x80,0x80           | Toolbox traps: all Unimplemented
-  .byte 0x80,0x80,0x80,0x80,0x80,0x80           | (skip block continues)
-  .byte 0x80,0x80,0x80,0x80,0x80,0x80           | (skip block continues)
-  .byte 0x80,0x80,0x80,0x80,0x80,0x80           | (skip block continues)
-  .byte 0x80,0x80,0x80,0x80,0x80,0x80           | (skip block continues)
-  .byte 0x80,0x80,0x80,0x80,0x80,0x80           | (skip block continues)
-  .byte 0x80,0x80,0x80,0x80,0x80,0x80           | (skip block continues)
-  .byte 0x80,0x80,0x80,0x80,0x80,0x80           | (skip block continues)
-  .byte 0x80,0x80,0x80,0x80,0x80,0x80           | (skip block continues)
-  .byte 0x80,0x80,0x80,0x80,0x80,0x80           | (skip block continues)
-  .byte 0x80,0x80,0x80,0x80,0x80,0x80           | (skip block continues)
-  .byte 0x80,0x80,0x80,0x80,0x80,0x80           | (skip block continues)
-  .byte 0x80,0x80,0x80,0x80,0x80,0x80           | end of Toolbox skip block
-  .byte 0x24,0x4D,0x10,0x73,0xF5,0x01           | OS traps $A000+: deltas
-  .byte 0x22,0x8B,0xEC,0x7F,0xBD,0xFD           | OS trap deltas (continued)
-  .byte 0x7F,0xEA,0xF5,0xBC,0xA7,0x89           | OS trap deltas (continued)
-  .byte 0x74,0xF8,0xA0,0x00,0xD3,0xB3           | deltas; abs offset; deltas
-  .byte 0xE1,0x01,0x50,0xE0,0xC6,0x03           | OS trap deltas (continued)
-  .byte 0x16,0x00,0xE7,0x7C,0x34,0x00           | delta; abs offset; deltas; abs (start)
-  .byte 0xBE,0x7F,0x8D,0x75,0xED,0xEA           | abs offset (end); deltas
-  .byte 0x01,0x0E,0x04,0x04,0x80,0x68           | deltas; skip; delta
-  .byte 0x58,0x10,0xC3,0x00,0xAE,0x73           | deltas; abs offset; deltas
-  .byte 0x79,0x00,0xA4,0x04,0x12,0x04           | delta; abs offset; deltas
-  .byte 0xE1,0x00,0xEF,0x80,0x80,0x80           | delta; abs offset; 3 skips
-  .byte 0x80,0x80,0x80,0x80,0x80,0x80           | OS traps: all Unimplemented
-  .byte 0x80,0x80,0x80,0x80,0x80,0x80           | (skip block continues)
-  .byte 0x80,0x80,0x80,0xFF,0x00,0x00           | 3 skips; abs offset (start)
-  .byte 0xF6,0x7A,0x1F,0x2D,0x02,0x84           | abs offset (end); deltas
-  .byte 0x7E,0x1E,0x05,0x8F,0x12,0x62           | OS trap deltas (continued)
-  .byte 0x01,0x2D,0xBA,0x00,0x00,0x00           | deltas; 3 zero padding bytes (end)
 

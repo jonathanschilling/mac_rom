@@ -1,13 +1,10 @@
 | Window Manager
 |
-| Manages overlapping windows on the Mac Plus desktop.
-| Handles window creation, movement, sizing, visibility, update regions,
-| and desktop painting. Also includes Desk Manager (desk accessories)
-| and the portion of Menu Manager that lives in this ROM section.
-|
-| Hardware interaction:
-| Screen buffer access for DragGrayRgn rubber-banding
-| VBL task for window update scheduling
+| Apple source: WindowMgr.a (MacSEROM.lst module WMGR). It starts with
+| NewString/SetString ($A906/$A907, string handles, used for window
+| titles) and the window-list primitives FIND_PREV_WINDOW, INSERT_WINDOW
+| and DeleteWindow, followed by the window traps from CalcVis to
+| DrawGrowIcon.
 |
 | WindowRecord (MPW 1.0 Windows.h):
 | GrafPort port (108 bytes: portBits, portRect, visRgn, clipRgn, pnLoc, etc.)
@@ -57,7 +54,7 @@ NewString:
         _PtrToHand                              | copy D0 bytes from (A0) into new handle
         MOVE.L  A0,0x8(SP)                      | store returned handle as result
         MOVE.L  (SP)+,(SP)                      | strip one param, keep return address
-        RTS                                     | return to caller
+        RTS                                     | return from NewString
 
 | ----------------------------------------------------------
 |
@@ -70,7 +67,7 @@ GET_STR_PTR_LEN:
         MOVEQ.L #0x0,D0                         | clear D0
         MOVE.B  (A0),D0                         | D0 = length byte of Pascal string
         ADDQ.W  #0x1,D0                         | +1 for length byte itself = total size
-        RTS                                     | return to caller
+        RTS                                     | return from GET_STR_PTR_LEN
 
 | ----------------------------------------------------------
 |
@@ -191,7 +188,7 @@ CALCVIS_EXIT:
 CALCVIS_EXIT_2:
         MOVE.L  (SP)+,(SP)                      | strip Pascal param
 CALCVIS_DONE:
-        RTS                                     | return to caller
+        RTS                                     | return from CALCVIS_DONE
 
 | ----------------------------------------------------------
 |
@@ -293,7 +290,7 @@ ClipAbove:
         BSR.B   CALCVIS_CONT                    | subtract all windows above A2
         MOVEM.L (SP)+,D4/A2-A3                  | restore regs
         MOVE.L  (SP)+,(SP)                      | strip param
-        RTS                                     | return to caller
+        RTS                                     | return from ClipAbove
 
 | ----------------------------------------------------------
 |
@@ -366,7 +363,7 @@ PAINTONE_CONT:
         BSR.W   GetSetWPort                     | save current port, set WMgr port
         MOVE.L  (WMgrPort).w,A3                 | A3 = WMgrPort
         MOVE.L  0x1C(A3),D3                     | D3 = WMgr clipRgn handle
-        RTS                                     | return to caller
+        RTS                                     | return from PAINTONE_CONT
 
 | ----------------------------------------------------------
 |
@@ -408,7 +405,7 @@ PAINTONE_NO_4:
         PEA.L   0x10(A3)                        | push WMgr port rectangle
         PEA.L   (DeskPattern).w                 | push desktop pattern (from PRAM)
         _FillRect                               | fill desktop with pattern
-        RTS                                     | return to caller
+        RTS                                     | return from PAINTONE_NO_4
 
 | ----------------------------------------------------------
 |
@@ -506,7 +503,7 @@ SaveOld:
         MOVEM.L D3-D4,(OldStructure).w          | save both handles to globals
         MOVEM.L (SP)+,D3-D4/A2                  | restore regs
         MOVE.L  (SP)+,(SP)                      | strip param
-        RTS                                     | return to caller
+        RTS                                     | return from SaveOld
 
 | ----------------------------------------------------------
 |
@@ -596,7 +593,7 @@ GetSetWPort:
         MOVE.L  (A5),A0                         | A0 = ptr to thePort global
         MOVE.L  (A0),D4                         | D4 = save current port
         MOVE.L  (WMgrPort).w,(A0)               | thePort = WMgrPort
-        RTS                                     | return to caller
+        RTS                                     | return from GetSetWPort
 
 | ----------------------------------------------------------
 |
@@ -606,7 +603,7 @@ GetSetWPort:
 RestorePort:
         MOVE.L  D4,-(SP)                        | push saved port from D4
         _SetPort                                | restore it as current port
-        RTS                                     | return to caller
+        RTS                                     | return from RestorePort
 
 | ----------------------------------------------------------
 |
@@ -623,12 +620,16 @@ GetWMgrPort:
 
 | ----------------------------------------------------------
 |
-| _CheckUpDate ($A911)
+| _CheckUpDate ($A911): find a window that needs updating (for GetNextEvent)
+| Pascal: FUNCTION CheckUpdate(VAR theEvent: EventRecord): BOOLEAN;
+| Scans the window list front to back for a visible window with a
+| non-empty updateRgn. A window with a windowPic is redrawn in place
+| (clipRgn := portRect, BeginUpdate, DrawPicture, EndUpdate, old clip
+| restored) and skipped; for the first other one theEvent.what :=
+| updateEvt, message := window and the result is TRUE (CHECKUPDATE_NO).
+| The current port is saved and restored.
 |
-| _CheckUpdate ($A911): find window needing update (for GetNextEvent)
-| Scans window list front-to-back for first window with non-empty updateRgn
-| Returns: true + event filled if update needed, false otherwise
-CheckUpDate:
+CheckUpdate:
         LINK    A6,#-0x8                        | local vars
         MOVE.L  A3,-(SP)                        | save A3
         CLR     0xC(A6)                         | result = false initially
@@ -681,7 +682,7 @@ CHECKUPDATE_EXIT:
         MOVE.L  (SP)+,A3                        | restore A3
         UNLK    A6                              | tear down stack frame
         MOVE.L  (SP)+,(SP)                      | strip param
-        RTS                                     | return to caller
+        RTS                                     | return from CHECKUPDATE_EXIT
 
 | ----------------------------------------------------------
 |
@@ -705,7 +706,7 @@ CHECKUPDATE_CONT_3:
         MOVE.L  A0,A3                           | A3 = port pointer
         MOVE.L  A0,-(SP)                        | push port for OpenPort
         _OpenPort                               | initialize as GrafPort
-        RTS                                     | return to caller
+        RTS                                     | return from CHECKUPDATE_CONT_3
 
 | ----------------------------------------------------------
 |
@@ -775,7 +776,7 @@ InitWindows:
         CLR.L   (A0)+                           | CurActivate = nil
         CLR.L   (A0)+                           | CurDeactive = nil
         MOVEM.L (SP)+,D3-D5/A3-A4               | restore saved regs
-        RTS                                     | return to caller
+        RTS                                     | return from InitWindows
 INITWINDOWS_EMPTY:
         AND.L   (Lo3Bytes).w,D0                 | mask to 24-bit address
         MOVE.L  D0,A0                           | A0 = wStorage pointer
@@ -803,7 +804,7 @@ NewWindow:
         BSR.W   CHECKUPDATE_EMPTY               | NewPtr(D0) + OpenPort -> A3 = new port
 NEWWINDOW_CONT:
         MOVE.L  A3,0x22(A6)                     | store WindowPtr as return value
-        MOVE    #0x1,0x44(A3)                   | set font to system font (1)
+        MOVE    #0x1,0x44(A3)                   | txFont := 1 (applFont)
         MOVE.L  26(A6),A2                       | A2 = boundsRect parameter
         MOVE.L  (A2),-(SP)                      | push boundsRect.topLeft
         _MovePortTo                             | position port origin
@@ -898,7 +899,7 @@ NEWWINDOW_NO:
         BRA.B   NEWWINDOW_EXIT                  | paint and return
 
 | ----------------------------------------------------------
-| CloseWindow -- _CloseWindow ($A92D). Plus window_mgr.s 853.
+| CloseWindow -- _CloseWindow ($A92D).
 | Pascal: procedure CloseWindow(theWindow: WindowPtr);
 | Closes a window without disposing its WindowRecord storage:
 | hides it, kills its controls, sends wDispose to the WDEF, and
@@ -962,15 +963,17 @@ CLOSEWINDOW_CONT:
         MOVE    windowKind(A0),(CurDeKind).w    | save kind for deactivate event
         MOVE.L  D0,(CurDeactive).w              | schedule deactivate event
 CLOSEWINDOW_CONT_SKIP:
-        RTS                                     | return to caller
+        RTS                                     | return from CLOSEWINDOW_CONT_SKIP
 
 | ----------------------------------------------------------
-| DisposeWindow -- _DisposeWindow ($A914). Plus window_mgr.s 930.
-| Pascal: procedure DisposeWindow(theWindow: WindowPtr);
-| Calls CloseWindow then deallocates the WindowRecord memory.
-| Used for windows allocated by NewWindow (vs CloseWindow alone
-| for caller-allocated WindowRecord storage).
-DisposeWindow:
+|
+| _DisposWindow ($A914): close a window and release its WindowRecord
+| Pascal: PROCEDURE DisposeWindow(theWindow: WindowPtr);
+| Calls CloseWindow, then _DisposPtr on the WindowRecord itself (for
+| windows whose storage was allocated by NewWindow / GetNewWindow).
+| Apple source name: DisposeWindow (MacSEROM.lst: DISPOSEWINDOW)
+|
+DisposWindow:
         MOVE.L  4(SP),-(SP)                     | push window for CloseWindow
         BSR.W   CloseWindow                     | close window's data structures
         MOVE.L  (SP)+,A1                        | pop return address
@@ -1033,13 +1036,13 @@ HideWindow:
         _SelectWindow                           | select the new front window
 HIDEWINDOW_DONE:
         MOVE.L  (SP)+,(SP)                      | strip param
-        RTS                                     | return to caller
+        RTS                                     | return from HIDEWINDOW_DONE
 HIDEWINDOW_EMPTY:
         ADDQ.W  #0x4,SP                         | discard nil FrontWindow result
         BRA.B   HIDEWINDOW_DONE                 | -> return
 
 | ----------------------------------------------------------
-| GetWRefCon -- _GetWRefCon ($A917). Plus window_mgr.s 1009.
+| GetWRefCon -- _GetWRefCon ($A917).
 | Pascal: function GetWRefCon(theWindow: WindowPtr): LongInt;
 | Returns the refCon field (offset 0x98) of a WindowRecord.
 GetWRefCon:
@@ -1051,7 +1054,7 @@ GETWREFCON_TAIL:
         JMP     (A0)                            | return
 
 | ----------------------------------------------------------
-| SetWRefCon -- _SetWRefCon ($A918). Plus window_mgr.s 1022.
+| SetWRefCon -- _SetWRefCon ($A918).
 | Pascal: procedure SetWRefCon(theWindow: WindowPtr; data: LongInt);
 | Stores a new value into the refCon field (offset 0x98).
 SetWRefCon:
@@ -1064,7 +1067,7 @@ SETWREFCON_TAIL:
         JMP     (A0)                            | RTS
 
 | ----------------------------------------------------------
-| SetWindowPic -- _SetWindowPic ($A92E). Plus window_mgr.s 1036.
+| SetWindowPic -- _SetWindowPic ($A92E).
 | Pascal: procedure SetWindowPic(theWindow: WindowPtr; pic: PicHandle);
 | Stores a PicHandle into the windowPic field (offset 0x94).
 | Used by Window Manager to redraw window contents from a saved picture.
@@ -1073,7 +1076,7 @@ SetWindowPic:
         BRA.B   SETWREFCON_TAIL                 | -> generic field setter
 
 | ----------------------------------------------------------
-| GetWindowPic -- _GetWindowPic ($A92F). Plus window_mgr.s 1045.
+| GetWindowPic -- _GetWindowPic ($A92F).
 | Pascal: function GetWindowPic(theWindow: WindowPtr): PicHandle;
 | Returns the PicHandle stored in the windowPic field (offset 0x94).
 GetWindowPic:
@@ -1096,7 +1099,7 @@ GETWTITLE_LOOP:
         JMP     (A0)                            | return
 
 | ----------------------------------------------------------
-| SetWTitle -- _SetWTitle ($A91A). Plus window_mgr.s 1073.
+| SetWTitle -- _SetWTitle ($A91A).
 | Pascal: procedure SetWTitle(theWindow: WindowPtr; title: Str255);
 | Updates a window's title string. Saves a copy of the old
 | strucRgn, replaces the title via _SetString, recalculates
@@ -1157,7 +1160,7 @@ DeltaPoint:
         BRA.B   SETWTITLE_EXIT_TRAMP            | -> STRIP_2PARAMS_RTS via .W trampoline
 
 | ----------------------------------------------------------
-| MoveWindow -- _MoveWindow ($A91B). Plus window_mgr.s 1197.
+| MoveWindow -- _MoveWindow ($A91B).
 | Pascal: procedure MoveWindow(theWindow: WindowPtr; hGlobal,
 | vGlobal: INTEGER; front: BOOLEAN);
 | Moves a window to a new global position. Saves the visible
@@ -1250,7 +1253,7 @@ MOVEWINDOW_SKIP_2:
         _DisposeRgn                             | free it
         BSR.W   RestorePort                     | restore original port
         MOVEM.L (SP)+,D3-D6/A3-A4               | restore registers
-        BRA.W   QDEXTENSIONS_EXIT               | -> pop retaddr, discard 0xA, RTS
+        BRA.W   SIZEWINDOW_EXIT                 | -> pop retaddr, discard 0xA, RTS
 
 | ----------------------------------------------------------
 | MOVEWINDOW_OK - call WDEF procedure for window A3
@@ -1263,7 +1266,7 @@ MOVEWINDOW_SKIP_2:
 MOVEWINDOW_OK:
         CLR.L   -(SP)                           | space for WDEF function result
         MOVEQ.L #0x0,D1                         | clear D1
-        MOVE.B  windowDef(A3),D1                | D1 = variation code (low byte)
+        MOVE.B  windowDef(A3),D1                | D1 = variation code (high byte of windowDefProc)
         MOVE    D1,-(SP)                        | push varCode
         MOVE.L  A3,-(SP)                        | push window
         MOVE    D0,-(SP)                        | push message
@@ -1282,14 +1285,14 @@ MOVEWINDOW_CONT:
         MOVE.L  (SP)+,D0                        | D0 = WDEF result
         MOVE.L  windowDef(A3),A0                | A0 = WDEF handle
         BCLR    #0x7,(A0)                       | unlock WDEF handle
-        RTS                                     | return to caller
+        RTS                                     | return from MOVEWINDOW_CONT
 MOVEWINDOW_CONT_2:
         MOVE.L  D3,-(SP)                        | save caller's D3
         MOVEQ.L #0x0,D3                         | param = 0
         MOVEQ.L #0x0,D0                         | message = wDraw
         BSR.B   MOVEWINDOW_OK                   | send wDraw to WDEF
         MOVE.L  (SP)+,D3                        | restore D3
-        RTS                                     | return to caller
+        RTS                                     | return from MOVEWINDOW_CONT_2
 MOVEWINDOW_EMPTY:
         MOVEQ.L #0x2,D0                         | message = wCalcRgns
         TST.B   wVisible(A3)                    | window visible?
@@ -1300,10 +1303,10 @@ MOVEWINDOW_EMPTY:
         _SetEmptyRgn                            | set empty
         MOVE.L  0x18(A3),-(SP)                  | push visRgn
         _SetEmptyRgn                            | set empty
-        RTS                                     | return to caller
+        RTS                                     | return from MOVEWINDOW_EMPTY
 
 | ----------------------------------------------------------
-| HiliteWindow -- _HiliteWindow ($A91C). Plus window_mgr.s 1352.
+| HiliteWindow -- _HiliteWindow ($A91C).
 | Pascal: procedure HiliteWindow(theWindow: WindowPtr; fHilite: BOOLEAN);
 | Sets a window's highlight (active) state. Only acts if the
 | highlight state is actually changing -- uses EOR + LSR to test
@@ -1331,35 +1334,35 @@ HILITEWINDOW_CONT_2:
         _SetClip                                | set WMgr clip to region
         MOVE.L  A3,-(SP)                        | push window
         _ClipAbove                              | subtract all windows above A3
-        RTS                                     | return to caller
+        RTS                                     | return from HILITEWINDOW_CONT_2
 HILITEWINDOW_CONT_3:
         MOVE.L  (GrayRgn).w,-(SP)               | push desktop region
         BRA.B   HILITEWINDOW_CONT_2             | set clip to GrayRgn minus windows above
 
 | ----------------------------------------------------------
-| SizeWindow -- _SizeWindow ($A91D). Plus window_mgr.s 1397
-| (where Plus uses the FDisasm-synthetic name QDExtensions).
-| Pascal: procedure SizeWindow(theWindow: WindowPtr; w, h: INTEGER;
-| fUpdate: BOOLEAN);
-| Resizes a window's portRect by adding (w, h) to portRect.topLeft
-| to compute the new botRight. If visible, snapshots old regions,
-| recalculates strucRgn/contRgn via wCalcRgns, sends wDraw, then
-| DrawNew to repaint exposed/changed area. Plus 1986 factored the
-| redraw sequence into a QDEXTENSIONS_CONT helper and explicitly
-| loads the fUpdate parameter; classic 1984 inlines the redraw.
+|
+| _SizeWindow ($A91D): change the size of a window
+| Pascal: PROCEDURE SizeWindow(theWindow: WindowPtr; w, h: INTEGER;
+|                              fUpdate: BOOLEAN);
+| Does nothing if w = h = 0. Sets portRect.bottom := top + h and
+| portRect.right := left + w. If the window is visible: SaveOld,
+| recalculate strucRgn/contRgn (wCalcRgns), redraw the frame (wDraw)
+| and DrawNew(theWindow, fUpdate).; the Plus
+| factors the redraw into a SIZEWINDOW_CONT helper, the 1984 ROM inlines it.
+|
 SizeWindow:
         MOVEM.L D3-D4/A3-A4,-(SP)               | save regs
-        MOVE.L  22(SP),D3                       | D3 = new height (h param)
-        BEQ.B   QDEXTENSIONS_DONE               | zero size -> done
+        MOVE.L  22(SP),D3                       | D3 = (h,w) as one long
+        BEQ.B   SIZEWINDOW_DONE                 | w = h = 0 -> nothing to do
         MOVE.L  26(SP),A3                       | A3 = window
-        MOVE    22(SP),D4                       | D4 = new width (w param, low word)
+        MOVE    22(SP),D4                       | D4 = h
         LEA.L     16(A3),A4                     | A4 = portRect
-        ADD     (A4)+,D4                        | D4 = portRect.top + width = new bottom
-        ADD     (A4)+,D3                        | D3 = portRect.left + height = new right
+        ADD     (A4)+,D4                        | D4 = portRect.top + h = new bottom
+        ADD     (A4)+,D3                        | D3 = portRect.left + w = new right
         MOVE    D4,(A4)+                        | store new portRect.bottom
         MOVE    D3,(A4)+                        | store new portRect.right
         TST.B   wVisible(A3)                    | window visible?
-        BEQ.B   QDEXTENSIONS_DONE               | invisible -> just store new portRect
+        BEQ.B   SIZEWINDOW_DONE                 | invisible -> just store new portRect
         BSR.W   GetSetWPort                     | save port, switch to WMgr
         MOVE.L  A3,-(SP)                        | push window
         _SaveOld                                | snapshot old regions
@@ -1370,24 +1373,25 @@ SizeWindow:
         MOVE    24(SP),-(SP)                    | push fUpdate parameter
         _DrawNew                                | repaint changed areas
         BSR.W   RestorePort                     | restore caller's port
-QDEXTENSIONS_DONE:
+SIZEWINDOW_DONE:
         MOVEM.L (SP)+,D3-D4/A3-A4               | restore saved regs
-QDEXTENSIONS_EXIT:                              | shared "pop retaddr + discard 0xA" exit
+SIZEWINDOW_EXIT:                                | shared "pop retaddr + discard 0xA" exit
         MOVE.L  (SP)+,A0                        | A0 = saved return addr
         ADDA.W  #0xA,SP                         | pop 10 bytes of param area
         JMP     (A0)                            | RTS
 
 | ----------------------------------------------------------
-| TrackGoAway -- _TrackGoAway ($A91E). Plus window_mgr.s 1499.
-| Pascal: function TrackGoAway(theWindow: WindowPtr; thePt: Point): BOOLEAN;
-| Tracks the mouse in a window's go-away box. Sends wHit messages
-| to the WDEF in a loop, toggling the part highlight while the
-| mouse is inside, until the mouse is released. Returns true if
-| the release happens inside the go-away box.
-| Plus 1986 split this into a TrackGoAway trampoline (push
-| partCode=6, fall through) and a generic AddComp body shared
-| with TrackBox (which Plus added). Classic 1984 has only
-| TrackGoAway and hardcodes the partCode comparison to 4 (=6-2).
+|
+| _TrackGoAway ($A91E): track the mouse in a window's go-away box
+| Pascal: FUNCTION TrackGoAway(theWindow: WindowPtr; thePt: Point): BOOLEAN;
+| While the button is down: asks the WDEF (wHit) whether the mouse is in
+| the go-away box (wInGoAway = 4), toggles the box highlight (wDraw,
+| param 4) when that changes, gets the mouse and calls DragHook. Returns
+| TRUE, and un-highlights the box, if released inside it.
+| . The Plus turns this into a stub that pushes
+| partCode 6 and falls into the generic TrackBox loop (TrackBox is new
+| in the Plus); the 1984 ROM compares the wHit result with 4 (= 6-2).
+|
 TrackGoAway:
         LINK    A6,#-0x4                        | local var: mouse point
         MOVEM.L D3-D5/A3,-(SP)                  | save regs
@@ -1398,43 +1402,43 @@ TrackGoAway:
         CLR     (A0)                            | result = false initially
         MOVEQ.L #0x0,D5                         | D5 = current highlight state (off)
         BSR.B   HILITEWINDOW_CONT               | clip to strucRgn above window
-ADDCOMP_OK:
+TRACKGOAWAY_OK:
         MOVEQ.L #0x1,D0                         | message = wHit (hit-testing)
         MOVE.L  -4(A6),D3                       | param = current mouse point
         BSR.W   MOVEWINDOW_OK                   | ask WDEF which part was hit
         CMPI    #0x4,D0                         | partCode == wInGoAway?
-        BEQ.B   ADDCOMP_OK_2                    | yes -> highlight on
+        BEQ.B   TRACKGOAWAY_OK_2                | yes -> highlight on
         MOVEQ.L #0x0,D0                         | no -> highlight off
-ADDCOMP_OK_2:
+TRACKGOAWAY_OK_2:
         CMP     D0,D5                           | highlight state changed?
-        BEQ.B   ADDCOMP_SKIP                    | no -> skip redraw
+        BEQ.B   TRACKGOAWAY_SKIP                | no -> skip redraw
         MOVE    D0,D5                           | update highlight state
-        BSR.B   ADDCOMP_CONT                    | toggle part highlight via wDraw
-ADDCOMP_SKIP:
+        BSR.B   TRACKGOAWAY_CONT                | toggle part highlight via wDraw
+TRACKGOAWAY_SKIP:
         PEA.L     -4(A6)                        | push addr of mouse local var
         _GetMouse                               | fetch current mouse position
-        BSR.W   DRAGTHERGN_CONT_3               | transform global to local mouse pt
+        BSR.W   DRAGTHERGN_CONT_3               | call DragHook, if one is installed
         CLR     -(SP)                           | space for WaitMouseUp result
         _WaitMouseUp                            | button still down?
         TST.B   (SP)+                           | check result
-        BNE.B   ADDCOMP_OK                      | button down -> keep tracking
+        BNE.B   TRACKGOAWAY_OK                  | button down -> keep tracking
         TST     D5                              | was last state highlighted?
-        BEQ.B   ADDCOMP_NO                      | no -> exit, return false
-        ADDQ.B  #0x1,16(A6)                     | 16(A6) += 0x1
-        BSR.B   ADDCOMP_CONT                    | un-highlight (released inside box)
-ADDCOMP_NO:
+        BEQ.B   TRACKGOAWAY_NO                  | no -> exit, return false
+        ADDQ.B  #0x1,16(A6)                     | result := TRUE
+        BSR.B   TRACKGOAWAY_CONT                | un-highlight (released inside box)
+TRACKGOAWAY_NO:
         BSR.W   RestorePort                     | restore original port
         MOVEM.L (SP)+,D3-D5/A3                  | restore regs
         UNLK    A6                              | tear down frame
         BRA.W   STRIP_2PARAMS_RTS               | -> strip params and return
-ADDCOMP_CONT:
+TRACKGOAWAY_CONT:
         MOVEQ.L #0x0,D0                         | message = wDraw
         MOVEQ.L #0x4,D3                         | param = wInGoAway part code
         BSR.W   MOVEWINDOW_OK                   | toggle go-away box highlight
-        RTS                                     | return to caller
+        RTS                                     | return from TRACKGOAWAY_CONT
 
 | ----------------------------------------------------------
-| SelectWindow -- _SelectWindow ($A91F). Plus window_mgr.s 1568.
+| SelectWindow -- _SelectWindow ($A91F).
 | Pascal: procedure SelectWindow(theWindow: WindowPtr);
 | Brings a window to the front of the window list and activates
 | it (highlights it + schedules an activate event). If a different
@@ -1463,7 +1467,7 @@ SELECTWINDOW_OK:
         _HiliteWindow                           | highlight the window
 SELECTWINDOW_OK_CONT:
         MOVE.L  (SP)+,(SP)                      | push window
-        RTS                                     | return to caller
+        RTS                                     | return from SELECTWINDOW_OK_CONT
 BringToFront:
         CLR.B   (DragFlag).w                    | clear drag-state flag
 BRINGTOFRONT_CONT:
@@ -1525,7 +1529,7 @@ BRINGTOFRONT_DONE_CONT:
         BSR.W   RestorePort                     | restore original port
         MOVEM.L (SP)+,D3-D6/A2-A4               | restore saved regs
         MOVE.L  (SP)+,(SP)                      | strip param
-        RTS                                     | return to caller
+        RTS                                     | return from BRINGTOFRONT_DONE_CONT
 
 | ----------------------------------------------------------
 | BRINGTOFRONT_CONT_2 - negate a point on the stack (reverse an offset)
@@ -1534,10 +1538,10 @@ BRINGTOFRONT_DONE_CONT:
 BRINGTOFRONT_CONT_2:
         NEG     0x4(SP)                         | negate v component
         NEG     0x6(SP)                         | negate h component
-        RTS                                     | return to caller
+        RTS                                     | return from BRINGTOFRONT_CONT_2
 
 | ----------------------------------------------------------
-| SendBehind -- _SendBehind ($A921). Plus window_mgr.s 1691.
+| SendBehind -- _SendBehind ($A921).
 | Pascal: procedure SendBehind(theWindow: WindowPtr;
 | behindWindow: WindowPtr);
 | Reorders theWindow to be just behind behindWindow in the window
@@ -1579,17 +1583,17 @@ SENDBEHIND_NO_2:
         BRA.W   STRIP_2PARAMS_RTS               | -> strip params and return
 
 | ----------------------------------------------------------
-| BeginUpDate -- _BeginUpdate ($A922). Plus window_mgr.s 1736.
-| Pascal: procedure BeginUpdate(theWindow: WindowPtr);
-| Saves the current visRgn into SaveVisRgn, then replaces the
-| visRgn with the intersection of visRgn and updateRgn (so
-| subsequent drawing only affects the area needing redraw).
-| Clears updateRgn so future BeginUpdates know the dirty area
-| has been claimed.
-BeginUpDate:
+|
+| _BeginUpDate ($A922): restrict the visRgn to the update region
+| Pascal: PROCEDURE BeginUpdate(theWindow: WindowPtr);
+| Converts visRgn to global coordinates, saves a copy in SaveVisRgn,
+| sets visRgn := visRgn SECT updateRgn, converts visRgn back to local
+| coordinates (offset by portBits.bounds.topLeft) and empties updateRgn.
+|
+BeginUpdate:
         MOVEM.L D3-D4/A3,-(SP)                  | save regs
         MOVE.L  16(SP),A3                       | A3 = window
-        MOVE.L  8(A3),D3                        | D3 = portBounds offset (local origin)
+        MOVE.L  8(A3),D3                        | D3 = portBits.bounds.topLeft
         MOVE.L  24(A3),D4                       | D4 = visRgn handle
         MOVE.L  D4,-(SP)                        | push visRgn
         MOVE.L  D3,-(SP)                        | push offset
@@ -1603,38 +1607,37 @@ BeginUpDate:
         MOVE.L  D4,-(SP)                        | push visRgn (dest)
         _SectRgn                                | visRgn = visRgn AND updateRgn
         MOVE.L  D4,-(SP)                        | push visRgn for offset
-        MOVE.L  D3,-(SP)                        | push local-to-global offset
+        MOVE.L  D3,-(SP)                        | push bounds.topLeft (global -> local)
         _OffsetRgn                              | visRgn -> local coords
         MOVE.L  updateRgn(A3),-(SP)             | push updateRgn handle
         _SetEmptyRgn                            | updateRgn = empty
         BRA.W   CLOSEWINDOW_SKIP_NO_NORESTORE   | -> restore regs + return (no port restore)
 
 | ----------------------------------------------------------
-| EndUpDate -- _EndUpDate ($A923). Plus window_mgr.s 1736.
-| Pascal: procedure EndUpdate(theWindow: WindowPtr);
-| Restores the window's visRgn from SaveVisRgn (where BeginUpDate
-| stashed the original visRgn). The 6-byte trap entry was
-| previously emitted as raw .byte (with a misleading "unreached"
-| comment) -- actually reached via trap dispatch directly to this
-| address; the BRA.W in BeginUpDate's path simply skips over it
-| so BeginUpDate's tail doesn't fall through here.
-EndUpDate:
+|
+| _EndUpDate ($A923): restore the visRgn after an update
+| Pascal: PROCEDURE EndUpdate(theWindow: WindowPtr);
+| Converts SaveVisRgn (saved by BeginUpdate in global coordinates) to the
+| window's local coordinates, copies it into visRgn and empties
+| SaveVisRgn.
+|
+EndUpdate:
         MOVE.L  A3,-(SP)                        | save A3
         MOVE.L  8(SP),A3                        | A3 = window
-        MOVE.L  (SaveVisRgn).w,-(SP)            | push SaveVisRgn handle
-        MOVE.L  (SP),-(SP)                      | dup for OffsetRgn
-        MOVE.L  (SP),-(SP)                      | dup again for CopyRgn source
-        MOVE.L  8(A3),-(SP)                     | push portBounds offset (local)
+        MOVE.L  (SaveVisRgn).w,-(SP)            | push SaveVisRgn (for SetEmptyRgn)
+        MOVE.L  (SP),-(SP)                      | dup (CopyRgn source)
+        MOVE.L  (SP),-(SP)                      | dup (OffsetRgn)
+        MOVE.L  8(A3),-(SP)                     | push portBits.bounds.topLeft
         _OffsetRgn                              | convert SaveVisRgn to local coords
         MOVE.L  0x18(A3),-(SP)                  | push visRgn (dest)
         _CopyRgn                                | visRgn = saved visRgn
         _SetEmptyRgn                            | empty SaveVisRgn for next use
         MOVE.L  (SP)+,A3                        | restore A3
         MOVE.L  (SP)+,(SP)                      | strip param
-        RTS                                     | return
+        RTS                                     | return from EndUpdate
 
 | ----------------------------------------------------------
-| FrontWindow -- _FrontWindow ($A924). Plus window_mgr.s 1798.
+| FrontWindow -- _FrontWindow ($A924).
 | Pascal: function FrontWindow: WindowPtr;
 | Returns the frontmost visible non-ghost window in the window
 | list. Plus 1986 added a (WWExist).w check that returns nil if
@@ -1654,10 +1657,10 @@ FRONTWINDOW_LOOP_SKIP:
         BRA.B   FRONTWINDOW_LOOP                | loop
 FRONTWINDOW_LOOP_EXIT:
         MOVE.L  A0,4(SP)                        | return value = window ptr (or nil)
-        RTS                                     | return to caller
+        RTS                                     | return from FRONTWINDOW_LOOP_EXIT
 
 | ----------------------------------------------------------
-| DragWindow -- _DragWindow ($A925). Plus window_mgr.s 1833.
+| DragWindow -- _DragWindow ($A925).
 | Pascal: procedure DragWindow(theWindow: WindowPtr; startPt: Point;
 | boundsRect: Rect);
 | Tracks a gray-outline drag of a window. Clamps the bounds rect
@@ -1711,15 +1714,15 @@ DRAGWINDOW_SKIP:
         CMPI    #-0x8000,D5                     | drag cancelled?
         BEQ.B   DRAGWINDOW_SKIP_SKIP            | cancelled (-32768) -> cleanup
         MOVE.L  A3,-(SP)                        | push window for MoveWindow
-        MOVE.L  16(A3),D0                       | D0 = portRect.top (high word used)
-        SUB     10(A3),D0                       | subtract portBounds.top (global y)
-        ADD     D5,D0                           | add vertical drag offset
-        MOVE    D0,-(SP)                        | push new vGlobal
-        SWAP    D0                              | get horizontal component
-        SWAP    D5                              | get horizontal drag offset
-        SUB     8(A3),D0                        | subtract portBounds.left (global x)
+        MOVE.L  16(A3),D0                       | D0 = portRect.topLeft (low word = left)
+        SUB     10(A3),D0                       | subtract portBits.bounds.left (global x)
         ADD     D5,D0                           | add horizontal drag offset
         MOVE    D0,-(SP)                        | push new hGlobal
+        SWAP    D0                              | D0.W = portRect.top
+        SWAP    D5                              | D5.W = vertical drag offset
+        SUB     8(A3),D0                        | subtract portBits.bounds.top (global y)
+        ADD     D5,D0                           | add vertical drag offset
+        MOVE    D0,-(SP)                        | push new vGlobal
         TST.B   D6                              | Command key held?
         SPL     -(SP)                           | front = true if Cmd not held
         _MoveWindow                             | move to new position
@@ -1819,7 +1822,7 @@ DRAGTHERGN_CONT_NO:
 DRAGTHERGN_CONT_2:                              | call subroutine via A0
         ADD     D1,30(A6)                       | result.h += horizontal delta
         ADD     D4,0x20(A6)                     | result.v += vertical delta
-        MOVE.L  A3,-(SP)                        | push region for OffsetRgn
+        MOVE.L  A3,-(SP)                        | push region for OfsetRgn
         MOVE    D4,-(SP)                        | push vertical offset
         MOVE    D1,-(SP)                        | push horizontal offset
         TST     D5                              | outline currently drawn?
@@ -1873,7 +1876,7 @@ DRAGTHERGN_EMPTY:
         MOVE.L  D0,A0                           | A0 = hook proc address
         JSR     (A0)                            | call subroutine via A0
 DRAGTHERGN_SKIP_4:
-        RTS                                     | return to caller
+        RTS                                     | return from DRAGTHERGN_SKIP_4
 
 | ----------------------------------------------------------
 | DRAGTHERGN_CONT_4 - mouse outside limitRect: check slopRect and toggle outline
@@ -1905,7 +1908,7 @@ DRAGTHERGN_OK_4:
         BRA.W   DRAGTHERGN_CONT                 | -> apply delta and move outline
 
 | ----------------------------------------------------------
-| InvalRgn -- _InvalRgn ($A927). Plus window_mgr.s 2124.
+| InvalRgn -- _InvalRgn ($A927).
 | Add a region to current window's updateRgn (mark as needing redraw).
 | Pascal: procedure InvalRgn(badRgn: RgnHandle);
 | D0 = 0 selects union mode; the shared INVALRGN_CONT body
@@ -1941,10 +1944,10 @@ INVALRGN_CONT_CONT:
 INVALRGN_CONT_EXIT:
         MOVEM.L (SP)+,D3-D5/A3                  | restore saved regs
         MOVE.L  (SP)+,(SP)                      | strip param
-        RTS                                     | return to caller
+        RTS                                     | return from INVALRGN_CONT_EXIT
 
 | ----------------------------------------------------------
-| InvalRect -- _InvalRect ($A928). Plus window_mgr.s 2171.
+| InvalRect -- _InvalRect ($A928).
 | Add a rect to current window's updateRgn.
 | Pascal: procedure InvalRect(badRect: Rect);
 | Wraps the rect in a temp region and forwards to INVALRGN_CONT.
@@ -1965,7 +1968,7 @@ INVALRECT_CONT:
         BRA.B   INVALRGN_CONT_EXIT              | -> restore and return
 
 | ----------------------------------------------------------
-| ValidRgn -- _ValidRgn ($A929). Plus window_mgr.s 2191.
+| ValidRgn -- _ValidRgn ($A929).
 | Remove a region from current window's updateRgn.
 | Pascal: procedure ValidRgn(goodRgn: RgnHandle);
 ValidRgn:
@@ -1973,7 +1976,7 @@ ValidRgn:
         BRA.B   INVALRGN_CONT                   | -> shared core
 
 | ----------------------------------------------------------
-| ValidRect -- _ValidRect ($A92A). Plus window_mgr.s 2202.
+| ValidRect -- _ValidRect ($A92A).
 | Remove a rect from current window's updateRgn.
 | Pascal: procedure ValidRect(goodRect: Rect);
 ValidRect:
@@ -1981,7 +1984,7 @@ ValidRect:
         BRA.B   INVALRECT_CONT                  | -> shared rect-to-region wrapper
 
 | ----------------------------------------------------------
-| GrowWindow -- _GrowWindow ($A92B). Plus window_mgr.s 2215.
+| GrowWindow -- _GrowWindow ($A92B).
 | Track mouse to resize a window; draws gray outline while tracking,
 | returns new size on release (high word=height, low=width;
 | 0=cancelled if size unchanged).
@@ -2062,7 +2065,7 @@ GROWWINDOW_CONT:
         MOVE.L  A4,D3                           | param = ptr to grow rect
         BSR.W   MOVEWINDOW_OK                   | call WDEF(wGrow, rectPtr)
         MOVE.L  (SP)+,D3                        | restore D3
-        RTS                                     | return to caller
+        RTS                                     | return from GROWWINDOW_CONT
 
 | ----------------------------------------------------------
 | GROWWINDOW_CONT_2 - read mouse, compute constrained new botRight for grow rect
@@ -2090,17 +2093,17 @@ GROWWINDOW_CONT_2:
         MOVE    2(A4),D3                        | D3.w = grow rect.left
         ADD     (SP)+,D3                        | add pinned width
         ADD     D5,D3                           | add horizontal anchor offset
-        RTS                                     | return to caller
+        RTS                                     | return from GROWWINDOW_CONT_2
 GROWWINDOW_CONT_3:
         SUBQ.W  #0x4,SP                         | space for DeltaPoint result
         MOVE.L  4(A4),-(SP)                     | push botRight
         MOVE.L  (A4),-(SP)                      | push topLeft
         BSR.W   DeltaPoint                      | compute size = botRight - topLeft
         MOVE.L  (SP)+,D0                        | D0 = packed size (height:width)
-        RTS                                     | return to caller
+        RTS                                     | return from GROWWINDOW_CONT_3
 
 | ----------------------------------------------------------
-| FindWindow -- _FindWindow ($A92C). Plus window_mgr.s 2354.
+| FindWindow -- _FindWindow ($A92C).
 | Determine which window part contains a point.
 | Pascal: function FindWindow(thePoint: Point;
 | VAR whichWindow: WindowPtr): Integer;
@@ -2181,7 +2184,7 @@ FINDWINDOW_OK_2:
         BRA.B   FINDWINDOW_CONT_EXIT            | -> store result
 
 | ----------------------------------------------------------
-| DrawGrowIcon -- _DrawGrowIcon ($A904). Plus window_mgr.s 2472.
+| DrawGrowIcon -- _DrawGrowIcon ($A904).
 | Draws the size box in a window's lower-right corner by sending
 | wGrow+1=6 message to the WDEF.
 | Pascal: procedure DrawGrowIcon(theWindow: WindowPtr);
@@ -2194,4 +2197,4 @@ DrawGrowIcon:
         BSR.W   RestorePort                     | restore original port
         MOVEM.L (SP)+,D4/A3                     | restore regs
         MOVE.L  (SP)+,(SP)                      | strip param
-        RTS                                     | return to caller
+        RTS                                     | return from DrawGrowIcon

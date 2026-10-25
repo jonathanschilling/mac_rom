@@ -1,6 +1,6 @@
 | Sad Mac Icon Display and Boot-Screen Icon Drawing
 |
-| Contains the RLE icon decoder (DeviceLoop), Sad Mac / Happy Mac
+| Contains the RLE icon decoder (PutIcon), Sad Mac / Happy Mac
 | entry points, and compressed icon templates for the Macintosh
 | outline, floppy disk, and the four symbolic overlays (happy/sad
 | faces, question mark, X mark) drawn onto the boot screen.
@@ -9,12 +9,12 @@
 | later failure condition forces a panic; the numeric error code has
 | already been written above the icon by vectors.s:SADMAC_DRAW_CODE.
 | The icon templates are delta-encoded (each row XOR-ed against the
-| previous one) and decoded row-by-row by DeviceLoop.
+| previous one) and decoded row-by-row by PutIcon.
 |
 | References:
 | Inside Macintosh II, Ch 12: System Error Handler
 
-| DeviceLoop - RLE-style icon decoder for boot screen icons
+| PutIcon - RLE-style icon decoder for boot screen icons
 |
 | Decodes compressed icon data from (A4) into the screen buffer at A2.
 | The encoding uses a bit-flag byte: for each bit (LSB first), 1 = copy
@@ -25,7 +25,7 @@
 | Entry: A2 = screen destination, A4 = compressed icon data
 | A6 = return address
 | Called during boot.
-DeviceLoop:
+PutIcon:
         MOVEQ.L #0xF,D3                         | D3 = 15: 16 rows of icon data to decode
         MOVE.L  A2,A0                           | A0 = save screen start for XOR propagation
         MOVEQ.L #0x3,D2                         | D2 = 3: 4 bytes per row before stride skip
@@ -77,10 +77,10 @@ ShowSadMac:
 | DRAW_MAC_ICON - common icon drawing: decode Macintosh outline + overlay face
 DRAW_MAC_ICON:
         LEA.L   ICON_MAC_OUTLINE(PC),A4         | A4 = compressed Mac outline icon (ICON_MAC_OUTLINE)
-        MOVE.L  A0,D7                           | D7 = save face data pointer across DeviceLoop
+        MOVE.L  A0,D7                           | D7 = save face data pointer across PutIcon
         MOVE.L  #0x3FCB5E,A2                    | A2 = centered screen position for icon (SEScrnIcon)
         LEA.L   DRAW_FACE_OVERLAY(PC),A6        | return to DRAW_FACE_OVERLAY after drawing outline
-        BRA.B   DeviceLoop                      | decode and draw Mac outline icon
+        BRA.B   PutIcon                         | decode and draw Mac outline icon
 
 | ----------------------------------------------------------
 |
@@ -124,7 +124,7 @@ PUTSYMBOL_LOOP:
 | ----------------------------------------------------------
 |
 | ICON_MAC_OUTLINE - compressed Macintosh computer outline icon (32x32, delta-encoded)
-| Decoded by DeviceLoop into a 32-pixel-wide icon at SEScrnIcon.
+| Decoded by PutIcon into a 32-pixel-wide icon at SEScrnIcon.
 ICON_MAC_OUTLINE:
   .byte 0x00,0x57,0xFF,0xFF,0xD5,0xFF           | Mac outline icon rows 1-2 (top edge)
   .byte 0xFF,0xFF,0xFF,0x06,0xF8,0x3F           | rows 2-3 (bezel top corners)

@@ -72,7 +72,7 @@ OKRECT:
         PEA.L     -0x94(A6)                     | push effective addr -0x94(A6)
         MOVE.L  6(A5),-(SP)                     | push 6(A5)
         MOVE.L  -0xCC(A6),A5                    | A5 := -0xCC(A6)
-        JSR     DrawControls(PC)                | FontMgr cursor stub (legacy)
+        JSR     ShieldCursor(PC)                | ShieldCursor(minRect, dstBits.bounds.topLeft)
         MOVE.L  0x22(A6),A5                     | A5 := 0x22(A6)
         MOVE    #0x1E,D0                        | D0 := #0x1E
         SUB     (A1),D0                         | D0 -= (A1)
@@ -322,7 +322,7 @@ BUMPV:
         BNE.B   RGNBLT_NXTMASK                  | NO, LOOP FOR ALL SCAN LINES
 RGNBLT_DONE:
         MOVE.L  -0xCC(A6),A5                    | A5 := saveA5
-        JSR     FMQD_ShowCursor(PC)             | call FMQD_ShowCursor
+        JSR     ShowCursor(PC)                  | call ShowCursor
 RGNBLT_GOHOME:
         MOVE.L  -0x8C(A6),SP                    | SP := savedRgnSP
         MOVEM.L (SP)+,D0-D7/A1-A5               | restore scratch regs from stack
@@ -347,15 +347,15 @@ RGNBLT_GOHOME_CONT_2:                           | computed-jump table base (16 b
         MOVE    -0xBC(A6),D0                    | D0 := -0xBC(A6)
         LEA.L     -0x58(A6),A1                  | A1 = &regionA
         JSR     SeekRgn(PC)                     | advance region state to current row
-        RTS                                     | return to caller
+        RTS                                     | return from RGNBLT_GOHOME_CONT_2
         MOVE    -0xBC(A6),D0                    | D0 := -0xBC(A6)
         LEA.L     -0x70(A6),A1                  | A1 = &regionB
         JSR     SeekRgn(PC)                     | advance region state to current row
-        RTS                                     | return to caller
+        RTS                                     | return from RGNBLT_GOHOME_CONT_2
         MOVE    -0xBC(A6),D0                    | D0 := -0xBC(A6)
         LEA.L     -0x88(A6),A1                  | A1 = &rgnState
         JSR     SeekRgn(PC)                     | RESTORE CURSOR
-        RTS                                     | return to caller
+        RTS                                     | return from RGNBLT_GOHOME_CONT_2
         MOVE    -0xBC(A6),D0                    | D0 := -0xBC(A6)
         LEA.L     -0x58(A6),A1                  | POINT TO STATE RECORD B
         JSR     SeekRgn(PC)                     | UPDATE RGNB
@@ -374,7 +374,7 @@ ABLOOP:
         MOVE.L  D0,(A2)+                        | (A2)+ := D0
         DBRA    D1,ABLOOP                       | loop D1 -> ABLOOP
 ABLOOP_DONE:
-        RTS                                     | return to caller
+        RTS                                     | return from ABLOOP_DONE
         MOVE    -0xBC(A6),D0                    | D0 := -0xBC(A6)
         LEA.L     -0x58(A6),A1                  | A1 = &regionA
         JSR     SeekRgn(PC)                     | advance region state to current row
@@ -393,7 +393,7 @@ ACLOOP:
         MOVE.L  D0,(A2)+                        | (A2)+ := D0
         DBRA    D1,ACLOOP                       | loop D1 -> ACLOOP
 ACLOOP_DONE:
-        RTS                                     | return to caller
+        RTS                                     | return from ACLOOP_DONE
         MOVE    -0xBC(A6),D0                    | D0 := -0xBC(A6)
         LEA.L     -0x70(A6),A1                  | A1 = &regionB
         JSR     SeekRgn(PC)                     | advance region state to current row
@@ -547,355 +547,3 @@ ABCDONE_LOOP_8:
         AND.L   D0,(A5)+                        | BIC RESULT INTO DST
         DBRA    D2,ABCDONE_LOOP_8               | LOOP ALL LONGS THIS ROW
         BRA.W   RGNBLT_NXTMASK_NEXT_2           | LOOP BACK FOR NEXT ROW
-StdRRect:
-        LINK    A6,#0x0                         | set up stack frame, reserve 0x0 locals
-        MOVEM.L D7/A3-A4,-(SP)                  | save scratch regs to stack
-        MOVE.B  16(A6),D7                       | D7 := maskRgn
-        JSR     CheckPic(PC)                    | call CheckPic
-        BLE.W   STDRRECT_NOTPIC                 | if signed <= -> STDRRECT_NOTPIC
-        MOVE.B  D7,-(SP)                        | push D7
-        JSR     PutPicVerb(PC)                  | call PutPicVerb
-        MOVE.L  0x5C(A3),A0                     | A0 := 0x5C(A3)
-        MOVE.L  (A0),A0                         | A0 := (A0)
-        MOVE.L  8(A6),D0                        | D0 := pat
-        CMP.L   0x4C(A0),D0                     | compare D0 with 0x4C(A0)
-        BEQ.B   OVALOK                          | if zero -> OVALOK
-        MOVE.L  D0,0x4C(A0)                     | 0x4C(A0) := D0
-        MOVE.L  D0,-(SP)                        | push D0
-        MOVE.B  #0xB,-(SP)                      | push #0xB
-        JSR     PutPicByte(PC)                  | call PutPicByte
-        JSR     PutPicLong(PC)                  | call PutPicLong
-OVALOK:
-        MOVEQ.L #0x40,D0                        | D0 := #0x40
-        ADD     D7,D0                           | D0 += D7
-        MOVE.B  D0,-(SP)                        | push D0
-        MOVE.L  12(A6),-(SP)                    | -(SP) := mode
-        JSR     PutPicRect(PC)                  | call PutPicRect
-STDRRECT_NOTPIC:
-        MOVE.L  12(A6),-(SP)                    | -(SP) := mode
-        TST.B   D7                              | test D7
-        BNE.B   STDRRECT_NOTFRM                 | if non-zero -> STDRRECT_NOTFRM
-        TST.L   0x60(A3)                        | test 0x60(A3)
-        BEQ.B   STDRRECT_NOTRGN                 | if zero -> STDRRECT_NOTRGN
-        MOVE.L  12(A6),-(SP)                    | -(SP) := mode
-        MOVE.L  8(A6),-(SP)                     | -(SP) := pat
-        MOVE.L  -0x94(A4),-(SP)                 | push -0x94(A4)
-        PEA.L     -0x96(A4)                     | push effective addr -0x96(A4)
-        PEA.L     -0x98(A4)                     | push effective addr -0x98(A4)
-        JSR     RR_OVAL_HELPER(PC)              | call RR_OVAL_HELPER
-STDRRECT_NOTRGN:
-        MOVE.B  #0x1,-(SP)                      | push #0x1
-        BRA.B   STDRRECT_DOIT                   | jump to STDRRECT_DOIT
-STDRRECT_NOTFRM:
-        CLR.B   -(SP)                           | push zero word
-STDRRECT_DOIT:
-        MOVE.L  8(A6),-(SP)                     | -(SP) := pat
-        JSR     PushVerb(PC)                    | pc-relative jsr (was raw .short pair)
-        CLR     -(SP)                           | push zero word
-        MOVE    #0x168,-(SP)                    | push #0x168
-        JSR     DrawArc(PC)                     | call DrawArc
-        MOVEM.L (SP)+,D7/A3-A4                  | restore scratch regs from stack
-        UNLK    A6                              | tear down frame
-        MOVE.L  (SP)+,A0                        | pop return address into A0
-        ADDA.W  #0xA,SP                         | pop parameter bytes from stack
-        JMP     (A0)                            | RTS
-
-| ---------------------------------------------------------------
-| PROCEDURE CallRRect(r: Rect; ovWd,ovHt: INTEGER);
-| code shared by FrameRoundRect, PaintRoundRect, EraseRoundRect,
-| InvertRoundRect, and FillRoundRect.
-| enter with verb in D0.
-| Called during boot.
-CallRRect:
-        MOVE.L  (SP)+,A0                        | pop return address into A0
-        MOVE.L  (SP)+,D1                        | pop D1
-        MOVE.L  (SP)+,A1                        | pop A1
-        MOVE.B  D0,-(SP)                        | push D0
-        MOVE.L  A1,-(SP)                        | push A1
-        MOVE.L  D1,-(SP)                        | push D1
-        MOVE.L  A0,-(SP)                        | push A0
-        MOVE.L  (A5),A0                         | A0 := (A5)
-        MOVE.L  (A0),A0                         | A0 := (A0)
-        MOVE.L  0x68(A0),D0                     | D0 := 0x68(A0)
-        LEA     StdRRect(PC),A0                 | A0 = &StdRRect(PC)
-        BEQ.B   CALLRRECT_CONT                  | if zero -> CALLRRECT_CONT
-        MOVE.L  D0,A0                           | A0 := D0
-        MOVE.L  12(A0),A0                       | A0 := 12(A0)
-CALLRRECT_CONT:
-        JMP     (A0)                            | RTS
-
-| ----------------------------------------------------------
-| PROCEDURE FrameRoundRect(r: Rect; ovWd, ovHt: INTEGER);
-| Plus equivalent: RRects.s 95.
-FrameRoundRect:
-        MOVEQ.L #0x0,D0                         | VERB = FRAME
-        JMP     CallRRect(PC)                   | SHARE COMMON CODE
-
-| ----------------------------------------------------------
-| PROCEDURE PaintRoundRect(r: Rect; ovWd, ovHt: INTEGER);
-| Plus equivalent: RRects.s 103.
-PaintRoundRect:
-        MOVEQ.L #0x1,D0                         | VERB = PAINT
-        JMP     CallRRect(PC)                   | SHARE COMMON CODE
-
-| ----------------------------------------------------------
-| PROCEDURE EraseRoundRect(r: Rect; ovWd, ovHt: INTEGER);
-| Plus equivalent: RRects.s 112.
-EraseRoundRect:
-        MOVEQ.L #0x2,D0                         | VERB = ERASE
-        JMP     CallRRect(PC)                   | SHARE COMMON CODE
-
-| ----------------------------------------------------------
-| PROCEDURE InvertRoundRect(r: Rect; ovWd, ovHt: INTEGER);
-| Plus equivalent: RRects.s 121.
-InvertRoundRect:
-        MOVEQ.L #0x3,D0                         | VERB = INVERT
-        JMP     CallRRect(PC)                   | SHARE COMMON CODE
-
-| ----------------------------------------------------------
-| PROCEDURE FillRoundRect(r: Rect; ovWd, ovHt: INTEGER; pat: Pattern);
-| Plus equivalent: RRects.s 130.
-FillRoundRect:
-        MOVE.L  (SP)+,A0                        | POP RETURN ADDR
-        MOVE.L  (SP)+,A1                        | POP ADDR OF PATTERN
-        MOVE.L  A0,-(SP)                        | RESTORE RETURN ADDR
-        MOVE.L  (A5),A0                         | POINT TO QUICKDRAW GLOBALS
-        MOVE.L  (A0),A0                         | GET CURRENT GRAFPORT
-        LEA.L     0x28(A0),A0                   | POINT TO FILLPAT
-        MOVE.L  (A1)+,(A0)+                     | COPY PAT INTO FILLPAT
-        MOVE.L  (A1)+,(A0)+                     | ALL EIGHT BYTES
-        MOVEQ.L #0x4,D0                         | VERB = FILL
-        JMP     CallRRect(PC)                   | SHARE COMMON CODE
-StdOval:
-        LINK    A6,#-0x4                        | set up stack frame, reserve -0x4 locals
-        MOVEM.L D7/A3-A4,-(SP)                  | save scratch regs to stack
-        MOVE.B  12(A6),D7                       | D7 := mode
-        JSR     CheckPic(PC)                    | call CheckPic
-        BLE.W   STDOVAL_NOTPIC                  | if signed <= -> STDOVAL_NOTPIC
-        MOVE.B  D7,-(SP)                        | push D7
-        JSR     PutPicVerb(PC)                  | call PutPicVerb
-        MOVEQ.L #0x50,D0                        | D0 := #0x50
-        ADD     D7,D0                           | D0 += D7
-        MOVE.B  D0,-(SP)                        | push D0
-        MOVE.L  8(A6),-(SP)                     | -(SP) := pat
-        JSR     PutPicRect(PC)                  | call PutPicRect
-STDOVAL_NOTPIC:
-        MOVE.L  8(A6),A0                        | A0 := pat
-        MOVE    6(A0),D0                        | D0 := 6(A0)
-        SUB     2(A0),D0                        | D0 -= 2(A0)
-        MOVE    D0,-2(A6)                       | -2(A6) := D0
-        MOVE    4(A0),D0                        | D0 := 4(A0)
-        SUB     (A0),D0                         | D0 -= (A0)
-        MOVE    D0,-4(A6)                       | -4(A6) := D0
-        MOVE.L  A0,-(SP)                        | push A0
-        TST.B   D7                              | test D7
-        BNE.B   NOTFR                           | if non-zero -> NOTFR
-        TST.L   0x60(A3)                        | test 0x60(A3)
-        BEQ.B   STDOVAL_NOTRGN                  | if zero -> STDOVAL_NOTRGN
-        MOVE.L  A0,-(SP)                        | push A0
-        MOVE.L  -4(A6),-(SP)                    | push -4(A6)
-        MOVE.L  -0x94(A4),-(SP)                 | push -0x94(A4)
-        PEA.L     -0x96(A4)                     | push effective addr -0x96(A4)
-        PEA.L     -0x98(A4)                     | push effective addr -0x98(A4)
-        JSR     RR_OVAL_HELPER(PC)              | call RR_OVAL_HELPER
-STDOVAL_NOTRGN:
-        MOVE.B  #0x1,-(SP)                      | push #0x1
-        BRA.B   STDOVAL_DOIT                    | LOOP BACK FOR NEXT ROW
-NOTFR:
-        CLR.B   -(SP)                           | push zero word
-STDOVAL_DOIT:
-        MOVE.L  -4(A6),-(SP)                    | push -4(A6)
-        JSR     PushVerb(PC)                    | pc-relative jsr (was raw .short pair)
-        CLR     -(SP)                           | push zero word
-        MOVE    #0x168,-(SP)                    | push #0x168
-        JSR     DrawArc(PC)                     | call DrawArc
-        MOVEM.L (SP)+,D7/A3-A4                  | restore scratch regs from stack
-        UNLK    A6                              | tear down frame
-        MOVE.L  (SP)+,A0                        | pop return address into A0
-        ADDQ.W  #0x6,SP                         | pop parameter bytes from stack
-        JMP     (A0)                            | RTS
-| ----------------------------------------------------------
-| CallOval -- verb-dispatch helper used by Frame/Paint/Erase/Invert/
-| FillOval. Pops verb in D0, looks up ovalProc via QDProcs or
-| falls back to StdOval. Plus equivalent: Ovals.s 151.
-CallOval:
-        MOVE.L  (SP)+,A0                        | POP RETURN ADDR
-        MOVE.L  (SP)+,A1                        | POP ADDR OF RECT
-        MOVE.B  D0,-(SP)                        | PUSH VERB
-        MOVE.L  A1,-(SP)                        | PUSH ADDR OF RECT
-        MOVE.L  A0,-(SP)                        | RESTORE RETURN ADDR
-        MOVE.L  (A5),A0                         | POINT TO QUICKDRAW GLOBALS
-        MOVE.L  (A0),A0                         | GET CURRENT GRAFPORT
-        MOVE.L  0x68(A0),D0                     | IS GRAFPROCS NIL ?
-        LEA     StdOval(PC),A0                  | _StdOval (ovalProc)
-        BEQ.B   CALLOVAL_USESTD                 | YES, USE STD PROC
-        MOVE.L  D0,A0                           | NO, GET PROC PTR
-        MOVE.L  16(A0),A0                       | GET ovalProc
-CALLOVAL_USESTD:
-        JMP     (A0)                            | USESTD: GO TO IT
-
-| ----------------------------------------------------------
-| PROCEDURE FrameOval(r: Rect); Plus equivalent: Ovals.s 100.
-FrameOval:
-        MOVEQ.L #0x0,D0                         | VERB = FRAME
-        JMP     CallOval(PC)                    | SHARE COMMON CODE
-
-| PROCEDURE PaintOval(r: Rect); Plus equivalent: Ovals.s 108.
-PaintOval:
-        MOVEQ.L #0x1,D0                         | VERB = PAINT
-        JMP     CallOval(PC)                    | SHARE COMMON CODE
-
-| PROCEDURE EraseOval(r: Rect); Plus equivalent: Ovals.s 116.
-EraseOval:
-        MOVEQ.L #0x2,D0                         | VERB = ERASE
-        JMP     CallOval(PC)                    | SHARE COMMON CODE
-
-| PROCEDURE InvertOval(r: Rect); Plus equivalent: Ovals.s 124.
-InvertOval:
-        MOVEQ.L #0x3,D0                         | VERB = INVERT
-        JMP     CallOval(PC)                    | SHARE COMMON CODE
-
-| PROCEDURE FillOval(r: Rect; pat: Pattern); Plus equivalent: Ovals.s 132.
-FillOval:
-        MOVE.L  (SP)+,A0                        | POP RETURN ADDR
-        MOVE.L  (SP)+,A1                        | POP ADDR OF PATTERN
-        MOVE.L  A0,-(SP)                        | RESTORE RETURN ADDR
-        MOVE.L  (A5),A0                         | POINT TO QUICKDRAW GLOBALS
-        MOVE.L  (A0),A0                         | GET CURRENT GRAFPORT
-        LEA.L     0x28(A0),A0                   | POINT TO FILLPAT
-        MOVE.L  (A1)+,(A0)+                     | COPY PAT INTO FILLPAT
-        MOVE.L  (A1)+,(A0)+                     | ALL EIGHT BYTES
-        MOVEQ.L #0x4,D0                         | VERB = FILL
-        JMP     CallOval(PC)                    | SHARE COMMON CODE
-
-| ----------------------------------------------------------
-| RR_OVAL_HELPER -- internal RoundRect/Oval drawing helper.
-| Called from StdRRect (line 365) and StdOval (line 480).
-| Takes 3 params: rect handle (16(A6)) + 2 offset words
-| (8(A6), 12(A6)) -- used to scale dimensions for oval overlay.
-| NOT _TEDispose -- that lives in textedit.s. Earlier mass-rename
-| pass mislabeled this.
-RR_OVAL_HELPER:
-        LINK    A6,#-0x32                       | set up stack frame
-        MOVEM.L D0-D7/A1-A5,-(SP)               | save scratch regs to stack
-        MOVE.L  16(A6),A3                       | A3 := maskRgn
-        MOVE.L  (A3),A3                         | A3 := (A3)
-        MOVE.L  A3,A2                           | A2 := A3
-        MOVE.L  12(A6),A0                       | A0 := mode
-        ADDA.W  (A0),A3                         | A3 += (A0)
-        MOVE.L  A2,A1                           | A1 := A2
-        MOVE.L  8(A6),A0                        | A0 := pat
-        ADDA.W  (A0),A1                         | A1 += (A0)
-        MOVE.L  24(A6),-(SP)                    | -(SP) := srcRgn
-        PEA.L     -0x2A(A6)                     | push effective addr -0x2A(A6)
-        MOVE    22(A6),-(SP)                    | push 22(A6)
-        MOVE    20(A6),-(SP)                    | -(SP) := dstRgn
-        JSR     InitOval(PC)                    | call InitOval
-        MOVE    -0x24(A6),-0x30(A6)             | jump via A0
-        MOVE    -0x20(A6),-0x32(A6)             | -0x32(A6) := -0x20(A6)
-        MOVE    20(A6),D0                       | D0 := dstRgn
-        ASR     #0x1,D0                         | D0 >>= 1 (arith)
-        ADD     -0x2A(A6),D0                    | D0 += -0x2A(A6)
-        MOVE    D0,-0x2C(A6)                    | -0x2C(A6) := D0
-        MOVE.L  24(A6),A0                       | A0 := srcRgn
-        ADD     4(A0),D0                        | D0 += 4(A0)
-        SUB     (A0),D0                         | D0 -= (A0)
-        SUB     20(A6),D0                       | D0 -= 20(A6)
-        MOVE    D0,-0x2E(A6)                    | -0x2E(A6) := D0
-        MOVE    -0x2A(A6),D6                    | D6 := -0x2A(A6)
-        MOVE    -0x30(A6),D5                    | D5 := -0x30(A6)
-        JSR     PUTPT(PC)                       | call PUTPT
-        MOVE    -0x32(A6),D5                    | D5 := -0x32(A6)
-        JSR     PUTPT(PC)                       | call PUTPT
-NXTVERT:
-        CMP     -0x2C(A6),D6                    | compare D6 with -0x2C(A6)
-        BLT.B   PUTOVAL_YESBUMP                 | if signed < -> PUTOVAL_YESBUMP
-        CMP     -0x2E(A6),D6                    | compare D6 with -0x2E(A6)
-        BLT.B   PUTOVAL_YESBUMP_SKIP            | if signed < -> PUTOVAL_YESBUMP_SKIP
-PUTOVAL_YESBUMP:
-        PEA.L     -0x2A(A6)                     | push effective addr -0x2A(A6)
-        MOVE    D6,-(SP)                        | push D6
-        JSR     BumpOval(PC)                    | call BumpOval
-        MOVE    -0x24(A6),D5                    | D5 := -0x24(A6)
-        CMP     -0x30(A6),D5                    | compare D5 with -0x30(A6)
-        BEQ.B   PUTOVAL_YESBUMP_OK              | if zero -> PUTOVAL_YESBUMP_OK
-        JSR     PUTPT(PC)                       | call PUTPT
-        MOVE    -0x30(A6),D5                    | D5 := -0x30(A6)
-        JSR     PUTPT(PC)                       | call PUTPT
-        MOVE    -0x24(A6),-0x30(A6)             | -0x30(A6) := -0x24(A6)
-PUTOVAL_YESBUMP_OK:
-        MOVE    -0x20(A6),D5                    | D5 := -0x20(A6)
-        CMP     -0x32(A6),D5                    | compare D5 with -0x32(A6)
-        BEQ.B   PUTOVAL_YESBUMP_SKIP            | if zero -> PUTOVAL_YESBUMP_SKIP
-        JSR     PUTPT(PC)                       | call PUTPT
-        MOVE    -0x32(A6),D5                    | D5 := -0x32(A6)
-        JSR     PUTPT(PC)                       | call PUTPT
-        MOVE    -0x20(A6),-0x32(A6)             | -0x32(A6) := -0x20(A6)
-PUTOVAL_YESBUMP_SKIP:
-        ADDQ.W  #0x1,D6                         | D6 += #0x1
-        CMP     -0x28(A6),D6                    | compare D6 with -0x28(A6)
-        BLT.B   NXTVERT                         | if signed < -> NXTVERT
-        MOVE    -0x30(A6),D5                    | D5 := -0x30(A6)
-        JSR     PUTPT(PC)                       | call PUTPT
-        MOVE    -0x32(A6),D5                    | D5 := -0x32(A6)
-        JSR     PUTPT(PC)                       | call PUTPT
-        SUBA.L  A2,A3                           | A3 -= A2
-        MOVE.L  12(A6),A0                       | A0 := mode
-        MOVE    A3,(A0)                         | (A0) := A3
-        MOVEM.L (SP)+,D0-D7/A1-A5               | restore scratch regs from stack
-        UNLK    A6                              | tear down frame
-        MOVE.L  (SP)+,A0                        | pop return address into A0
-        ADDA.W  #0x14,SP                        | pop parameter bytes from stack
-        JMP     (A0)                            | RTS
-
-| -----------------------------------------------------------------------
-| Local routine to Append a point to the end of the saved points buffer,
-| extending buffer if necessary. If pt is a duplicate of the last pt,
-| cancel both instead.
-| INPUTS: D5: HORIZ COORD
-| D6: VERT COORD
-| A1: BUFLIMIT GETS EXPANDED AND RELOCATED
-| A2: BUFSTART GETS RELOCATED
-| A3: BUFPTR GETS BUMPED AND RELOCATED
-| ALTERS: A1,A2,A3, VAR SIZE
-| Called during boot.
-PUTPT:
-        CMPA.L  A1,A3                           | compare A3 with A1
-        BLT.B   PUTOVAL_SIZEOK                  | if signed < -> PUTOVAL_SIZEOK
-        SUBA.L  A2,A3                           | A3 -= A2
-        SUBA.L  A2,A1                           | A1 -= A2
-        ADDA.W  #0x400,A1                       | A1 += #0x400
-        MOVEM.L D0-A3,-(SP)                     | save scratch regs to stack
-        MOVE.L  8(A6),A0                        | PUT HORIZ COORD
-        MOVE    A1,(A0)                         | (A0) := A1
-        MOVE.L  16(A6),-(SP)                    | -(SP) := maskRgn
-        MOVE    A1,-(SP)                        | push A1
-        JSR     SetHSize(PC)                    | call SetHSize
-        MOVEM.L (SP)+,D0-A3                     | restore scratch regs from stack
-        MOVE.L  16(A6),A2                       | A2 := maskRgn
-        MOVE.L  (A2),A2                         | A2 := (A2)
-        ADDA.L  A2,A3                           | A3 += A2
-        ADDA.L  A2,A1                           | A1 += A2
-| -------------------------------------------------------------------
-| ADD NEW POINT TO THE SAVE BUFFER UNLESS IT MATCHED THE PREVIOUS PT.
-| DELETE DUPLICATE POINTS SINCE THEY WILL CANCEL EACH OTHER ANYWAY.
-| Called during boot.
-PUTOVAL_SIZEOK:
-        CMPA.L  A2,A3                           | compare A3 with A2
-        BEQ.B   APPEND                          | if zero -> APPEND
-        CMP     -2(A3),D5                       | compare D5 with -2(A3)
-        BNE.B   APPEND                          | if non-zero -> APPEND
-        CMP     -4(A3),D6                       | compare D6 with -4(A3)
-        BNE.B   APPEND                          | if non-zero -> APPEND
-        SUBQ.W  #0x4,A3                         | A3 -= #0x4
-        RTS                                     | return to caller
-
-| ----------------------------------------------------------
-| APPEND -- append (vert,horiz) point pair to region build buffer.
-| Used by PUTOVAL_SIZEOK helper in RgnBlt.s. In Plus this small
-| helper lives at the tail of PutOval.s as `APPEND:`.
-| Inputs: D6 = vert, D5 = horiz, A3 = bufPtr.
-APPEND:
-        MOVE    D6,(A3)+                        | PUT VERT COORD
-        MOVE    D5,(A3)+                        | PUT HORIZ COORD
-        RTS                                     | RETURN

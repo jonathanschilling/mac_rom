@@ -677,7 +677,7 @@ DRAWLINE_ABLOOP:
         AND.L   (A1)+,D0                        | INTERSECT A AND B
         MOVE.L  D0,(A2)+                        | STORE IN COMPOSITE MASK
         DBF     D1,DRAWLINE_ABLOOP              | LOOP FOR ALL LONGS IN SCANLINE
-        RTS                                     | RETURN
+        RTS                                     | return from DRAWLINE_ABLOOP
 
 
 | -------------------------------------------------------
@@ -889,7 +889,7 @@ HVSETUP:
         LEA.L   DT_mMaskTab(PC),A0              | return with masktab in A0
         ANDI    #0xF,D0                         | MASK OUT LOWER 4 BITS
         ADD     D0,D0                           | DOUBLE FOR TABLE
-        RTS                                     | RETURN
+        RTS                                     | return from HVSETUP
 
 
 

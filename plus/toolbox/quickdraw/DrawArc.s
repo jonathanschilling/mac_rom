@@ -538,8 +538,8 @@ CLRMASK:
 | INIT STATE RECORDS AND ALLOCATE BUFFERS FOR EACH NON-RECTANGULAR REGION
 |
         CLR     D5                              | INIT BOTH ARE RECT
-        MOVE    #-0x7FFF,-0x52(A6)              | STATEA NEXTV := -32767
-        MOVE    #0x7FFF,-0x50(A6)               | STATEA ENDV := 32767
+        MOVE    #-0x7FFF,-0x52(A6)              | INIT REGION STATEA: THISV := -32767
+        MOVE    #0x7FFF,-0x50(A6)               | STATEA NEXTV := 32767 (HARMLESS IN CASE RECT)
         CMPI    #0xA,(A2)                       | IS CLIPRGN RECTANGULAR ?
         BEQ.B   CLRMASK_OK                      | YES, CONTINUE
         ADDQ.W  #0x2,D5                         | FLAG CLIPRGN NON-RECT
@@ -547,8 +547,8 @@ CLRMASK:
         LEA.L   -0x60(A6),A1                    | POINT TO STATE RECORD A
         BSR.B   CLRMASK_CONT                    | INIT STATE, ALLOC BUFFER
 CLRMASK_OK:
-        MOVE    #-0x7FFF,-0x6A(A6)              | STATEB NEXTV := -32767
-        MOVE    #0x7FFF,-0x68(A6)               | STATEB ENDV := 32767
+        MOVE    #-0x7FFF,-0x6A(A6)              | INIT REGION STATEB: THISV := -32767
+        MOVE    #0x7FFF,-0x68(A6)               | STATEB NEXTV := 32767 (HARMLESS IN CASE RECT)
         CMPI    #0xA,(A3)                       | IS VISRGN RECTANGULAR ?
 
 | ARECT
@@ -1060,7 +1060,7 @@ ABLOOP:
         AND.L   (A1)+,D0                        | INTERSECT WITH VISRGN
         MOVE.L  D0,(A2)+                        | STORE IN MASKBUF
         DBF     D1,ABLOOP                       | LOOP FOR ALL LONGS
-        RTS                                     | RETURN
+        RTS                                     | return from ABLOOP
 
 | .PROC INITOVAL,4
 | ------------------------------------------------------------

@@ -471,7 +471,7 @@ SetOrigin:
         BSR.B   OFSPORT                         | OFFSET PORTBITS.BOUNDS
         LEA.L   (A0),A0                         | POINT A0 AT PORTRECT
         BSR.B   OFSRECT                         | OFFSET PORTRECT
-        JSR     OffsetRgn(PC)                   | OFFSET VISRGN
+        JSR     OfsetRgn(PC)                    | OFFSET VISRGN
 SETORIGIN_DONE:
         MOVE.L  (SP)+,(SP)                      | DONE: STRIP 4 BYTES
         RTS                                     | AND RETURN

@@ -216,9 +216,9 @@ CLRDST:
 | --------------------------------------------------------
 |
         MOVE    LEFT(A0),D1                     | GET DSTRECT LEFT
-        SUB     0x8(A3),D1                      | SUB DST BBOX LEFT
+        SUB     BOUNDS+LEFT(A3),D1              | CONVERT TO GLOBAL COORDS (DSTBITS.BOUNDS.LEFT)
         ANDI    #-0x10,D1                       | TRUNCATE TO MULTIPLE OF 16
-        ADD     0x8(A3),D1                      | ADD DST BBOX LEFT
+        ADD     BOUNDS+LEFT(A3),D1              | CONVERT BACK TO LOCAL
         MOVE    D1,-0x74(A6)                    | SAVE AS BUFLEFT
         MOVE    -0xE(A6),D0                     | GET DSTRECT RIGHT
         SUB     D1,D0                           | CALC WIDTH IN DOTS

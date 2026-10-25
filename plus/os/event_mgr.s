@@ -1,9 +1,10 @@
-| Operating System Event Manager + File Manager dispatch
+| Operating System Event Manager -- _PostEvent, _OSEventAvail, _GetOSEvent, _FlushEvents
 |
-| GetOSEvent ($A031): dequeue highest-priority event matching mask in D0
-| FlushEvents ($A032): remove all events matching mask; stop at stopMask
-| FSDispatch ($A060): HFS trap dispatcher - routes selector in D0 to
-| one of 18 HFS routines via HFS_DISPATCH_TABLE jump table
+| Apple source: OSEventMgr.a (MacSEROM.lst module EVENTS). The event queue
+| (EventQueue) is kept in a fixed circular buffer of event records
+| (SysEvtBuf); PostEvent takes a free record (or the oldest one) and
+| enqueues it, OSEventAvail/GetOSEvent find the highest-priority event
+| matching a mask, FlushEvents removes events.
 |
 | Event queue entries (EvQEl, 22 bytes):
 | +0 qLink pointer next queue element
@@ -15,14 +16,156 @@
 | +20 evtQMeta byte modifier key state
 | +21 evtQMBut byte mouse button state
 |
-| FS I/O parameter block (reuses EvQEl offsets for queue linkage):
-| +6 ioTrap word trap word that invoked this call
-| +8 ioCmdAddr long address of routine to execute
-| +16 ioResult word result code (>0 = pending, 0 = done, <0 = error)
+| References: Inside Macintosh Vol II, Ch 3 (The Operating System Event
+| Manager).
+
+| ----------------------------------------------------------
 |
-| References:
-| Inside Macintosh Vol II, Ch 3: OS Event Manager (pp 65-76)
-| Inside Macintosh Vol II, Ch 4: File Manager (pp 77-142)
+| _PostEvent ($A02F)
+| A0 = event number (0-15), D0 = event message -> D0 = error
+| Posts an event to the system event queue if the event type is
+| enabled in SysEvtMask. Returns evtNotEnb (1) if event masked out.
+|
+| Called during boot.
+PostEvent:
+        MOVE    (SysEvtMask).w,D2               | D2 = system event mask (bit per event type)
+        MOVE    A0,D1                           | D1 = event number
+        BTST    D1,D2                           | is this event type enabled?
+        BNE.B   POSTEVENT_ENABLED               | yes -> post it
+        MOVEQ.L #0x1,D0                         | D0 = 1 (evtNotEnb: event not enabled)
+        RTS                                     | return from PostEvent
+
+| ----------------------------------------------------------
+|
+| POSTEVENT_ENABLED - event is enabled, find a free event record and enqueue it
+| Event records are in a circular buffer (SysEvtBuf). Each record is
+| 22 bytes: 6-byte queue header + 16-byte event data (evtNum, evtMessage,
+| evtTicks, evtMouse, evtMeta, evtMBut).
+| Searches for a "free" record (evtNum = -1). If none free, steals the
+| oldest event from queue head.
+|
+| Called during boot.
+POSTEVENT_ENABLED:
+        MOVE    SR,-(SP)                        | save interrupt state
+        MOVE.L  D0,-(SP)                        | save event message on stack
+        MOVE    A0,-(SP)                        | save event number on stack
+        MOVE.L  (SysEvtBuf).w,A0                | A0 = event buffer base
+        ADDQ.L  #0x6,A0                         | skip queue header to first evtNum field
+        MOVEQ.L #0x16,D0                        | D0 = 22 = event record size
+        MOVEQ.L #-0x1,D1                        | D1 = -1 (marker for free event record)
+        SUBA    D0,A0                           | pre-decrement for loop (ADDA first in loop)
+        MOVE    (EvtBufCnt).w,D2                | D2 = number of event buffer slots
+        ORI     #0x100,SR                       | disable interrupts during queue manipulation
+POSTEVENT_SCAN_LOOP:
+        ADDA    D0,A0                           | advance to next event record's evtNum
+        CMP     (A0),D1                         | evtNum == -1? (free slot)
+        DBEQ    D2,POSTEVENT_SCAN_LOOP          | loop until free slot found or all checked
+        LEA.L   (EventQueue).w,A1               | A1 = event queue header
+        BEQ.B   POSTEVENT_FILL                  | found free slot -> use it
+| No free slot: steal oldest event from queue head
+        MOVE.L  0x2(A1),A0                      | A0 = queue head element (oldest event)
+        MOVE.L  (A0),0x2(A1)                    | dequeue: head = head->qLink
+        ADDQ.L  #0x6,A0                         | A0 past queue header to evtNum field
+POSTEVENT_FILL:
+| Fill in the event record
+        MOVE    (SP)+,(A0)                      | store evtNum (event number)
+        MOVE.L  (SP)+,0x2(A0)                   | store evtMessage
+        BSR.B   FILL_EVENT_FIELDS               | fill evtTicks, evtMouse, evtMeta, evtMBut
+        SUBQ.L  #0x6,A0                         | back up to queue element header
+        MOVE    #0x4,0x4(A0)                    | qType = evType (4)
+        JSR     Enqueue(PC)                     | add to EventQueue (at tail)
+        MOVE    (SP)+,SR                        | restore interrupt state
+        MOVEQ.L #0x0,D0                         | D0 = noErr
+        RTS                                     | return from POSTEVENT_FILL
+
+| ----------------------------------------------------------
+|
+| FILL_EVENT_FIELDS - Fill event record timestamp and modifier fields
+| A0 points to evtNum field (event record + 6 bytes past queue header).
+| Fills evtTicks, evtMouse (v,h), evtMeta (modifier keys), evtMBut.
+|
+| Called during boot (32,478 times in 30s trace).
+FILL_EVENT_FIELDS:
+        MOVE.L  (Ticks).w,0x6(A0)               | evtTicks = current tick count
+        MOVE.L  (Mouse_v).w,0xA(A0)             | evtMouse = mouse position (v,h)
+        MOVE    (KeyMap_6).w,D1                 | D1 = modifier key bits from KeyMap byte 12-13
+        ROL     #0x1,D1                         | rotate: align modifier bits for evtMeta format
+        MOVE.B  D1,0xE(A0)                      | evtMeta = modifier key state byte
+        MOVE.B  (MBState).w,0xF(A0)             | evtMBut = mouse button state
+        RTS                                     | return from FILL_EVENT_FIELDS
+
+| ----------------------------------------------------------
+|
+| _OSEventAvail ($A030)
+| D0 = event mask (bit per event type), A0 = event record buffer ->
+| D0 = 0 if event found (copied to buffer), D0 = -1 if no matching event.
+| Peeks at the event queue without dequeuing. Also generates auto-key
+| repeat events (autoKeyEvt=5) when a key is held past KeyThresh ticks.
+|
+| Called during boot (32,478 times in 30s trace).
+OSEventAvail:
+        LEA.L   (EventQueue).w,A1               | A1 = event queue header
+        MOVE    SR,-(SP)                        | save interrupt state
+        ORI     #0x100,SR                       | disable interrupts during queue scan
+        MOVE.L  0x2(A1),D1                      | D1 = queue head (first event element)
+        BEQ.B   OSEVTAVAIL_CHK_AUTOKEY          | queue empty -> check auto-key repeat
+OSEVTAVAIL_WALK:
+| Walk the event queue looking for an event matching the caller's mask
+        MOVE.L  D1,A1                           | A1 = current queue element
+        MOVE    dCtlQueue(A1),D1                | D1 = evtNum (at offset 6 in queue element)
+        BTST    D1,D0                           | is this event type in caller's mask?
+        BNE.B   OSEVTAVAIL_FOUND                | yes -> return this event
+        MOVE.L  (A1),D1                         | D1 = qLink (next element)
+        BNE.B   OSEVTAVAIL_WALK                 | more elements -> keep searching
+OSEVTAVAIL_CHK_AUTOKEY:
+| No matching event found; check if auto-key repeat should fire
+        AND     (SysEvtMask).w,D0               | mask with system event mask
+        TST     (KeyLast).w                     | any key held down?
+        BEQ.B   OSEVTAVAIL_NO_EVENT             | no -> return "no event"
+        BTST    #0x5,D0                         | bit 5 = autoKeyEvt enabled in mask?
+        BEQ.B   OSEVTAVAIL_NO_EVENT             | auto-key not requested -> no event
+        MOVE.L  (Ticks).w,D1                    | D1 = current tick count
+        MOVE.L  D1,D2                           | D2 = copy for repeat threshold check
+        SUB.L   (KeyTime).w,D1                  | D1 = ticks since initial key-down
+        CMP     (KeyThresh).w,D1                | past initial repeat delay?
+        BLT.B   OSEVTAVAIL_NO_EVENT             | not yet -> no auto-key event
+        SUB.L   (KeyRepTime).w,D2               | D2 = ticks since last repeat event
+        CMP     (KeyRepThresh).w,D2             | past repeat interval?
+        BLT.B   OSEVTAVAIL_NO_EVENT             | not yet -> no auto-key event
+| Generate auto-key repeat event
+        MOVE.L  (Ticks).w,(KeyRepTime).w        | reset repeat timer
+        MOVE.L  A0,-(SP)                        | save caller's event record buffer
+        MOVE    #0x5,A0                         | A0 = autoKeyEvt (event code 5)
+        MOVEQ.L #0x0,D0                         | clear D0
+        MOVE    (KeyLast).w,D0                  | D0 = last key-down message (keyCode|charCode)
+        BSR     PostEvent                       | post autoKeyEvt to event queue
+        MOVE.L  A0,A1                           | A1 = the just-posted event element
+        MOVE.L  (SP)+,A0                        | restore caller's event record buffer
+OSEVTAVAIL_FOUND:
+| Found (or generated) a matching event; copy 16-byte event record to buffer
+        MOVE    (SP)+,SR                        | restore interrupt state
+        MOVEQ.L #0x4,D0                         | D0 = 4 (loop count: 4 longs = 16 bytes)
+        MOVEM.L A0-A1,-(SP)                     | save buffer and element pointers
+        ADDQ.L  #0x6,A1                         | skip queue header to evtNum field
+OSEVTAVAIL_COPY_LOOP:
+        MOVE.L  (A1)+,(A0)+                     | copy 4 bytes of event record
+        SUBQ.W  #0x1,D0                         | decrement loop counter
+        BNE.B   OSEVTAVAIL_COPY_LOOP            | loop 4 times (16 bytes total)
+        MOVEM.L (SP)+,A0-A1                     | restore pointers
+        RTS                                     | D0 = 0 (event found)
+
+| ----------------------------------------------------------
+|
+| OSEVTAVAIL_NO_EVENT - no matching event: fill buffer with null event, return -1
+|
+| Called during boot (32,476 times in 30s trace).
+OSEVTAVAIL_NO_EVENT:
+        BSR     FILL_EVENT_FIELDS               | fill null event with current timestamp/modifiers
+        MOVE    (SP)+,SR                        | restore interrupt state
+        CLR     (A0)                            | evtNum = 0 (nullEvt)
+        CLR.L   0x2(A0)                         | evtMessage = 0
+        MOVEQ.L #-0x1,D0                        | D0 = -1 (no event found)
+        RTS                                     | return from OSEVTAVAIL_NO_EVENT
 
 | ----------------------------------------------------------
 |
@@ -65,7 +208,10 @@ DEQUEUE_INVALIDATE:
 | FlEvtMask ($025E) filters which types the floppy driver cares about.
 | Walks the event queue under IPL 1 (disable VBL interrupts).
 | On exit: D0 = last matching event type if stopMask hit, else 0.
-GetGDevice:
+| Toolbox trap $A832 dispatches here as well (MacPlusROM.lst: Trap1_32):
+| in the 64K ROM, OS and Toolbox traps shared one dispatch table,
+| so $A832 and $A032 were the same slot.
+FlushEvents:
         MOVE    SR,-(SP)                        | save SR for interrupt restore
         MOVEM.L D3-D4,-(SP)                     | preserve D3-D4
         MOVEQ.L #-0x1,D1                        | D1 = $FFFFFFFF (all bits set)
@@ -99,167 +245,3 @@ FLUSH_EXIT:
         MOVE    (SP)+,SR                        | restore SR (re-enable interrupts)
         RTS                                     | return with D0 = event type or 0
 
-| ----------------------------------------------------------
-|
-| _FSDispatch ($A060) - HFS File Manager trap dispatcher
-|
-| D0.W = HFS selector (0-17). Validates range, then jumps
-| through HFS_DISPATCH_TABLE relative offset table to the appropriate handler.
-| Selectors: 0=MountVol, 1=OpenWD, 2=CloseWD, 3=CatMove,
-| 4=DirCreate, 5=GetWDInfo, 6=GetFCBInfo, 7=GetCatInfo,
-| 8=SetCatInfo, 9=SetVolInfo, 10=LockRng, 11=UnlockRng,
-| 12=CreateFileIDRef, 13=DeleteFileIDRef, 14=ResolveFileIDRef,
-| 15=ExchangeFiles, 16-17=reserved.
-| On invalid selector: returns paramErr (-50) via FSQUEUE_DONE.
-FSDispatch:
-        TST     D0                              | selector < 0?
-        BLT.B   FSDISPATCH_BAD_SEL              | yes: invalid selector
-        CMPI    #0x11,D0                        | selector > 17?
-        BLS.B   FSDISPATCH_VALID                | no: valid, dispatch it
-FSDISPATCH_BAD_SEL:
-        BSR.B   FSQUEUE_SETUP                   | set up param block for error return
-        MOVEQ.L #-0x32,D0                       | D0 = paramErr (-50)
-        BRA     FSQUEUE_DONE                    | jump to FS I/O completion
-
-| ----------------------------------------------------------
-|
-| HFS dispatch - index into HFS_DISPATCH_TABLE and jump to handler
-|
-FSDISPATCH_VALID:
-        MOVE    D0,D2                           | D2 = selector
-        LEA.L   HFS_DISPATCH_TABLE(PC),A2       | A2 = base of offset table
-        ADD     D2,D2                           | D2 *= 2 (word offsets)
-        ADDA    0x0(A2,D2.W),A2                 | A2 += HFS_DISPATCH_TABLE[selector] (PC-relative)
-        JMP     (A2)                            | jump to HFS handler routine
-
-| ----------------------------------------------------------
-|
-| HFS_DISPATCH_TABLE - HFS dispatch relative offset table (18 word entries)
-|
-| Each word is a signed offset from the start of HFS_DISPATCH_TABLE to the
-| corresponding HFS routine. Selector 0 -> HFS_MOUNTVOL (MountVol), etc.
-HFS_DISPATCH_TABLE:
-  .byte 0x00,0x24,0x13,0x00,0x13,0xAC
-  .byte 0x12,0xA8,0x12,0xDC,0x1D,0xBE
-  .byte 0x19,0x64,0x13,0xE6,0x2B,0x40
-  .byte 0x22,0x5E,0x20,0x96,0x11,0x5C
-  .byte 0x0F,0x84,0x14,0xEE,0x15,0x18
-  .byte 0x14,0x92,0x2B,0xF4,0x2B,0xF4
-
-| HFS selector 0: MountVol - stamp ioMisc with version string
-HFS_MOUNTVOL:
-        BSR.B   FSQUEUE_SETUP                   | set up param block (ioTrap, ioCmdAddr)
-        MOVE.L  #0x312E3241,0x20(A0)            | ioMisc = "1.2A" (HFS version string)
-
-        MOVEQ.L #0x0,D0                         | D0 = noErr
-        BRA     FSQUEUE_DONE                    | jump to FS I/O completion
-
-| ----------------------------------------------------------
-|
-| FSQUEUE_SETUP_SYNC - FS param block setup (clear async bit)
-| FSQUEUE_SETUP - FS param block setup (preserve async bit)
-|
-| Prepares the I/O parameter block at A0 for FS queue submission.
-| Sets ioResult=1 (pending), stores ioTrap from D1, pops return
-| address into ioCmdAddr so the FS queue server knows which
-| routine to call. For HFSDispatch ($60), extracts low nibble
-| as the actual selector and stores HFS selector in high byte.
-FSQUEUE_SETUP_SYNC:
-        BCLR    #0xA,D1                         | clear async bit (force synchronous)
-| FSQUEUE_SETUP -- fSQueue: wait our turn.
-| Called by: FSDISPATCH_BAD_SEL, HFS_MOUNTVOL, FlushVol, hfsC, GetVolInfo (and 32 more)
-FSQUEUE_SETUP:
-        MOVE.L  (FSQueueHook).w,D2              | D2 = FSQueueHook callback
-        BLE.B   FSQUEUE_NO_HOOK                 | no hook installed: skip
-        MOVE.L  D2,A1                           | A1 = hook address
-        JSR     (A1)                            | call FSQueueHook(A0=paramBlock)
-FSQUEUE_NO_HOOK:
-        MOVE    #0x1,evtQWhere(A0)              | ioResult = 1 (I/O pending)
-        MOVE    D1,evtQWhat(A0)                 | ioTrap = trap word from D1
-        CMPI.B  #0x60,D1                        | is this _HFSDispatch ($A060)?
-        BNE.B   FSQUEUE_STORE_CMD               | no: skip selector extraction
-        ANDI.B  #0xF,evtQWhat(A0)               | ioTrap low byte = selector nibble
-        MOVE.B  D0,0x7(A0)                      | ioTrap high byte = HFS selector
-FSQUEUE_STORE_CMD:
-        MOVE.L  (SP)+,evtQMessage(A0)           | ioCmdAddr = return address (routine ptr)
-        MOVE    #0x5,0x4(A0)                    | qType = ioQType (5 = FS queue entry)
-        BTST    #0xA,D1                         | async bit set in trap word?
-        BEQ.B   FSQUEUE_SYNC_PATH               | no: synchronous call
-        TST.B   (FrcSync).w                     | force-sync override enabled?
-        BEQ.B   FSQUEUE_ENQUEUE                 | no: enqueue for async execution
-        BRA.B   FSQUEUE_SYNC_WAIT               | yes: fall through to sync wait loop
-
-| ----------------------------------------------------------
-|
-| Synchronous FS call path - enqueue, wait for completion
-|
-FSQUEUE_SYNC_PATH:
-        CLR.L   evtQWhen(A0)                    | ioCompletion = nil (no callback)
-FSQUEUE_SYNC_WAIT:
-        MOVE.L  A0,-(SP)                        | save param block ptr
-        BSR.B   FSQUEUE_ENQUEUE                 | enqueue into FS queue and execute
-        MOVE.L  (SP)+,A0                        | restore param block ptr
-FSQUEUE_SPIN_WAIT:
-        MOVE    evtQWhere(A0),D0                | D0 = ioResult
-        BGT.B   FSQUEUE_SPIN_WAIT               | still positive (pending): spin-wait
-        EXT.L   D0                              | sign-extend result code
-        CMPI    #-0x35,D0                       | ioResult == nsvErr (-53, no such vol)?
-        BNE.B   FSQUEUE_RETURN                  | no: return normally
-        MOVE.L  (DskSwtchHook).w,-(SP)          | push DskSwtchHook address
-        BGT.B   FSQUEUE_RETURN                  | hook is valid (>0): call it via RTS
-        ADDQ.W  #0x4,SP                         | no hook: pop the address
-        BTST    #0x7,(DSAlertRect).w            | system error dialog suppressed?
-        BNE     DSHook                          | yes: jump to disk-switch handler
-FSQUEUE_RETURN:
-        RTS                                     | return to caller or jump to DskSwtchHook via stack
-
-| ----------------------------------------------------------
-|
-| FSQUEUE_ENQUEUE - enqueue param block into FS queue and start server
-|
-| Adds the param block at A0 into the FS queue (FSQHdr).
-| If the queue was idle (qFlags bit 0 clear), starts the
-| FS queue server to process the request immediately.
-| If busy (bit 0 set), returns - the server will pick it up.
-FSQUEUE_ENQUEUE:
-        LEA.L   (FSQHdr_Flags).w,A1             | A1 = FS queue header
-        MOVE    SR,-(SP)                        | save SR
-        ORI     #0x300,SR                       | raise IPL to 3 (mask all interrupts)
-        JSR     Enqueue(PC)                     | add param block to FS queue
-FSQUEUE_TRY_LOCK:
-        BSet    #0x0,(FSQHdr_Flags).w           | test-and-set FS busy flag
-        BEQ.B   FSQUEUE_SERVER                  | was clear: we own the queue, run server
-        MOVEQ.L #0x0,D0                         | queue busy: another call is running
-        MOVE    (SP)+,SR                        | restore SR
-        RTS                                     | return to caller (request queued for later processing)
-
-| ----------------------------------------------------------
-|
-| FS queue server - dequeue and execute pending FS calls
-|
-| Processes the head entry of the FS queue. Sets up the PMSP
-| (Permission State Machine Pointer) and HFS stack, then calls
-| the routine address stored in ioCmdAddr of the param block.
-FSQUEUE_SERVER:
-        MOVE    (SP)+,SR                        | restore SR (re-enable interrupts)
-        MOVE.L  (FSQHdr_Head).w,A0              | A0 = head param block in FS queue
-        MOVE.L  evtQMessage(A0),A1              | A1 = ioCmdAddr (routine to execute)
-        MOVEM.L D3-D7/A2-A6,-(SP)               | save all registers for FS call
-        MOVE.L  (PMSPPtr).w,A6                  | A6 = PMSP (permission bitmap ptr)
-        CLR     -0x2(A6)                        | clear PMSP status word
-        BTST    #0xA,evtQWhat(A0)               | async bit set in ioTrap?
-        SNE.B   (NxtDB).w                       | NxtDB = $FF if async, $00 if sync
-        MOVE.L  (HFSVars_HFSStkTop).w,A6        | A6 = top of HFS stack
-        JSR     (A1)                            | call the FS routine
-        MOVEM.L (SP)+,D3-D7/A2-A6               | restore registers
-        RTS                                     | return to caller after executing FS routine
-
-| ----------------------------------------------------------
-|
-| NOPKG_SYSERROR - fatal error: no packages loaded (dsNoPk = 27)
-|
-| Called when a required package (e.g., Standard File) is not
-| available. Triggers a system error with ID 27 (dsNoPk).
-NOPKG_SYSERROR:
-        MOVEQ.L #0x1B,D0                        | D0 = dsNoPk (no package error)
-        _SysError                               | trigger fatal system error and halt

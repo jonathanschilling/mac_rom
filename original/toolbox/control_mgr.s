@@ -1,22 +1,14 @@
-| Control Manager (tail block)
+| Control Manager
 |
-| This file holds the Control Manager:
-| NewControl, DisposeControl, KillControls,
-| ShowControl, HideControl, MoveControl,
-| GetCRefCon, SetCRefCon, GetCtlAction, SetCtlAction, TrackControl,
-| DrawControls, the embedded CDEF data tables, and the
-| FindControl entry point. The bulk of the Control Manager bodies
-| (NewControl, DisposeControl, KillControls, ShowControl, HideControl,
-| MoveControl, SizeControl, HiliteControl, GetCRefCon, SetCRefCon,
-| GetCTitle, SetCTitle, SetCtlValue, GetCtlValue, DragControl,
-| TrackControl) physically lives at the tail of menu_mgr.s in classic;
-| see also src/original/toolbox/menu_mgr.s.
-|
-| The corresponding Plus file (src/plus/toolbox/control_mgr.s) is
-| organized completely differently: it starts the Resource Manager
-| because Plus's Control Manager is consolidated in a single later
-| file. Bodies do not align between the two trees on a file-by-file
-| basis -- only the underlying ROM bytes do.
+| Apple source: ControlMgr.a (MacSEROM.lst module CMGR). The Control
+| Manager trap entries, in ROM order: NewControl, DisposControl,
+| KillControls, ShowControl, HideControl, MoveControl, GetCRefCon,
+| SetCRefCon, GetCtlAction, SetCtlAction, SizeControl, HiliteControl,
+| GetCTitle, SetCTitle, GetCtlValue, GetMinCtl, GetMaxCtl, SetCtlValue,
+| SetMinCtl, SetMaxCtl, TestControl, DragControl, TrackControl,
+| DrawControls and FindControl. The controls are drawn and hit-tested by
+| their CDEF; the 64K ROM has none of its own (the System file supplies
+| CDEF 0 and 1).
 |
 | ControlRecord (MPW 1.0 Controls.h):
 | nextControl, contrlOwner, contrlRect, contrlVis, contrlHilite,
@@ -106,13 +98,13 @@ NEWCONTROL_CONT_6:
 | NEWCONTROL_FOUND: call CDEF proc for control A3
 | D0 = message (0=draw, 1=test, 2=calc, 3=init, 4=dispose, 5=pos,
 | 6=thumb, 7=drag, 8=autoTrack), D1 = param, A3 = ControlHandle
-| Called by: DRAGCONTROL_CONT, NEWCONTROL_CONT_4, NEWCONTROL_CONT_3, DisposeControl, TestControl (and 3 more)
+| Called by: DRAGCONTROL_CONT, NEWCONTROL_CONT_4, NEWCONTROL_CONT_3, DisposControl, TestControl (and 3 more)
 NEWCONTROL_FOUND:
         BSR.W   DRAGCONTROL_CONT_2              | save port, set control's owner port
         CLR.L   -(SP)                           | space for CDEF result (long)
         MOVE.L  (A3),A0                         | dereference ControlHandle
         MOVEQ.L #0x0,D2                         | clear D2
-        MOVE.B  contrlDefHandle(A0),D2          | D2 = variation code (low byte of handle)
+        MOVE.B  contrlDefHandle(A0),D2          | D2 = variation code (high byte of contrlDefProc)
         MOVE    D2,-(SP)                        | push variation code
         MOVE.L  A3,-(SP)                        | push ControlHandle
         MOVE    D0,-(SP)                        | push message
@@ -135,7 +127,7 @@ NEWCONTROL_OK:
 NEWCONTROL_CONT_2:
         _SetPort                                | restore saved port
 NEWCONTROL_OK_RTS:
-        RTS                                     | return to caller
+        RTS                                     | return from NEWCONTROL_OK_RTS
 
 | ----------------------------------------------------------
 | NEWCONTROL_CONT_3
@@ -160,12 +152,15 @@ NEWCONTROL_CONT_3:
         BRA.B   NEWCONTROL_CONT_2               | -> restore port
 
 | ----------------------------------------------------------
-| DisposeControl -- _DisposeControl ($A955). Plus menu_mgr.s 1050.
-| Pascal: procedure DisposeControl(theControl: ControlHandle);
-| Removes a control from its window's control list, calls the
-| CDEF disposeCntl message to clean up, then frees the control's
-| Handle storage.
-DisposeControl:
+|
+| _DisposControl ($A955): remove a control and release its storage
+| Pascal: PROCEDURE DisposeControl(theControl: ControlHandle);
+| Erases and invalidates the control's area (NEWCONTROL_CONT_3), unlinks
+| it from the owner window's control list (DRAWCONTROLS_CONT_2), sends
+| dispCntl (4) to the CDEF and disposes the control handle.
+| Apple source name: DisposeControl (MacSEROM.lst: DISPOSECONTROL)
+|
+DisposControl:
         MOVE.L  A3,-(SP)                        | save A3
         MOVE.L  8(SP),A3                        | A3 = ControlHandle
         BSR.B   NEWCONTROL_CONT_3               | erase and invalidate control region
@@ -181,11 +176,11 @@ DisposeControl:
         BRA.B   SHOWCONTROL_EXIT                | -> restore A3 and return
 
 | ----------------------------------------------------------
-| KillControls -- _KillControls ($A956). Plus menu_mgr.s 1071.
+| KillControls -- _KillControls ($A956).
 | Pascal: procedure KillControls(theWindow: WindowPtr);
 | Disposes all controls owned by a window. Loops calling
-| DisposeControl on the head of wControlList until the list is
-| empty (each DisposeControl removes its target from the list).
+| DisposControl on the head of wControlList until the list is
+| empty (each DisposControl removes its target from the list).
 KillControls:
         MOVE.L  A3,-(SP)                        | save A3
         MOVEA.L  8(SP),A3                       | A3 = theWindow
@@ -197,7 +192,7 @@ KILLCONTROLS_EMPTY:
         BRA.B   KILLCONTROLS_EMPTY              | repeat until list empty
 
 | ----------------------------------------------------------
-| ShowControl -- _ShowControl ($A957). Plus menu_mgr.s 1096.
+| ShowControl -- _ShowControl ($A957).
 | Pascal: procedure ShowControl(theControl: ControlHandle);
 | Sets the contrlVis byte to true ($FF) and draws the control if
 | not already visible.
@@ -213,10 +208,10 @@ ShowControl:
 SHOWCONTROL_EXIT:
         MOVE.L  (SP)+,A3                        | restore A3
         MOVE.L  (SP)+,(SP)                      | strip 4-byte param
-        RTS                                     | return to caller
+        RTS                                     | return from SHOWCONTROL_EXIT
 
 | ----------------------------------------------------------
-| HideControl -- _HideControl ($A958). Plus menu_mgr.s 1116.
+| HideControl -- _HideControl ($A958).
 | Pascal: procedure HideControl(theControl: ControlHandle);
 | Erases the control's region, invalidates it, and sets the
 | contrlVis byte to false ($00) if not already hidden.
@@ -248,7 +243,7 @@ MoveControl:
         MOVE    0xC(SP),D0                      | D0 = new v position
         SUB     (A0),D0                         | D0 = vertical delta (new - old top)
         MOVE    0xE(SP),D1                      | D1 = new h position
-        SUB     menuWidth(A0),D1                | D1 = horizontal delta (new - old left)
+        SUB     0x2(A0),D1                      | D1 = dh = new h - contrlRect.left (+$2)
         MOVE.L  A0,-(SP)                        | push contrlRect ptr
         MOVE    D1,-(SP)                        | push dh
         MOVE    D0,-(SP)                        | push dv
@@ -266,7 +261,7 @@ MOVECONTROL_CONT:
         JMP     (A0)                            | RTS
 
 | ----------------------------------------------------------
-| GetCRefCon -- _GetCRefCon ($A95A). Plus menu_mgr.s 1169.
+| GetCRefCon -- _GetCRefCon ($A95A).
 | Pascal: function GetCRefCon(theControl: ControlHandle): LongInt;
 | Returns the contrlRfCon field (offset 0x24) of a ControlRecord.
 GetCRefCon:
@@ -279,7 +274,7 @@ MOVECONTROL_CONT_4:
         JMP     (A0)                            | RTS
 
 | ----------------------------------------------------------
-| SetCRefCon -- _SetCRefCon ($A95B). Plus menu_mgr.s 1184.
+| SetCRefCon -- _SetCRefCon ($A95B).
 | Pascal: procedure SetCRefCon(theControl: ControlHandle; data: LongInt);
 | Stores a new value into the contrlRfCon field (offset 0x24).
 SetCRefCon:
@@ -293,7 +288,7 @@ SETCREFCON_CONT:
         JMP     (A0)                            | return
 
 | ----------------------------------------------------------
-| GetCtlAction -- _GetCtlAction ($A95E). Plus menu_mgr.s 1199.
+| GetCtlAction -- _GetCtlAction ($A96A).
 | Pascal: function GetCtlAction(theControl: ControlHandle): ProcPtr;
 | Returns the contrlAction proc field (offset 0x20).
 GetCtlAction:
@@ -301,7 +296,7 @@ GetCtlAction:
         BRA.B   MOVECONTROL_CONT_4              | -> generic get-long-field
 
 | ----------------------------------------------------------
-| SetCtlAction -- _SetCtlAction ($A95F). Plus menu_mgr.s 1208.
+| SetCtlAction -- _SetCtlAction ($A96B).
 | Pascal: procedure SetCtlAction(theControl: ControlHandle; actionProc: ProcPtr);
 | Stores a new ProcPtr into the contrlAction field (offset 0x20).
 SetCtlAction:
@@ -309,7 +304,7 @@ SetCtlAction:
         BRA.B   SETCREFCON_CONT                 | -> generic set-long-field
 
 | ----------------------------------------------------------
-| SizeControl -- _SizeControl ($A95C). Plus menu_mgr.s 1219.
+| SizeControl -- _SizeControl ($A95C).
 | Pascal: procedure SizeControl(theControl: ControlHandle; w, h: INTEGER);
 | Resizes a control's contrlRect to (w, h). Hides the control,
 | recomputes botRight = topLeft + (h, w), then re-shows if it
@@ -332,7 +327,7 @@ SizeControl:
         BRA.B   MOVECONTROL_OK                  | -> re-show if was visible
 
 | ----------------------------------------------------------
-| HiliteControl -- _HiliteControl ($A95D). Plus menu_mgr.s 1243.
+| HiliteControl -- _HiliteControl ($A95D).
 | Change hilite state of a control. Calls NEWCONTROL_CONT_6 to
 | redraw if state changed. If new state is 0 (unhilite), passes the
 | old state to the redraw helper so it knows which segment to clear.
@@ -372,11 +367,10 @@ GetCTitle:
         MOVE.B  (A0),D0                         | D0 = title length
         ADDQ.L  #0x1,D0                         | +1 for length byte
         _BlockMove                              | copy Pascal string A0 -> A1, D0 bytes
-        RTS                                     | return to caller
+        RTS                                     | return from GetCTitle
 
 | ----------------------------------------------------------
-| SetCTitle -- _SetCTitle ($A95D -- but commonly $A964 in 1984;
-| Plus calls it $A96B). Plus menu_mgr.s 1289.
+| SetCTitle -- _SetCTitle ($A95F).
 | Pascal: procedure SetCTitle(theControl: ControlHandle; title: Str255);
 | Updates a control's title. Hides the control, resizes the
 | handle to fit the new title (length + $29 = 41-byte header
@@ -411,7 +405,7 @@ GETCTITLE_SKIP:
         BRA.W   MOVECONTROL_CONT                | -> strip 8 bytes of params
 
 | ----------------------------------------------------------
-| GetCtlValue -- _GetCtlValue ($A960). Plus menu_mgr.s 1322.
+| GetCtlValue -- _GetCtlValue ($A960).
 | Returns control's contrlValue field via generic get-word-field.
 GetCtlValue:
         MOVEQ.L #0x12,D0                        | D0 = contrlValue offset
@@ -423,19 +417,19 @@ GETCTLVALUE_CONT:
         JMP     (A1)                            | return
 
 | ----------------------------------------------------------
-| GetMinCtl -- _GetMinCtl ($A961). Plus menu_mgr.s 1336.
+| GetMinCtl -- _GetMinCtl ($A961).
 GetMinCtl:
         MOVEQ.L #0x14,D0                        | D0 = contrlMin offset
         BRA.B   GETCTLVALUE_CONT                | -> generic get-word-field
 
 | ----------------------------------------------------------
-| GetMaxCtl -- _GetMaxCtl ($A962). Plus menu_mgr.s 1344.
+| GetMaxCtl -- _GetMaxCtl ($A962).
 GetMaxCtl:
         MOVEQ.L #0x16,D0                        | D0 = contrlMax offset
         BRA.B   GETCTLVALUE_CONT                | -> generic get-word-field
 
 | ----------------------------------------------------------
-| SetCtlValue -- _SetCtlValue ($A963). Plus menu_mgr.s 1353.
+| SetCtlValue -- _SetCtlValue ($A963).
 | Set control's contrlValue field with clamping to [contrlMin..contrlMax].
 SetCtlValue:
         MOVEQ.L #0x12,D0                        | D0 = contrlValue offset
@@ -465,19 +459,19 @@ SETCTLVALUE_OK:
         BRA.W   HILITECONTROL_CONT_2            | strip params and return
 
 | ----------------------------------------------------------
-| SetMinCtl -- _SetMinCtl ($A964). Plus menu_mgr.s 1385.
+| SetMinCtl -- _SetMinCtl ($A964).
 SetMinCtl:
         MOVEQ.L #0x14,D0                        | D0 = contrlMin offset
         BRA.B   SETCTLVALUE_CONT                | -> generic set-word-field
 
 | ----------------------------------------------------------
-| SetMaxCtl -- _SetMaxCtl ($A965). Plus menu_mgr.s 1394.
+| SetMaxCtl -- _SetMaxCtl ($A965).
 SetMaxCtl:
         MOVEQ.L #0x16,D0                        | D0 = contrlMax offset
         BRA.B   SETCTLVALUE_CONT                | -> generic set-word-field
 
 | ----------------------------------------------------------
-| TestControl -- _TestControl ($A966). Plus menu_mgr.s 1403.
+| TestControl -- _TestControl ($A966).
 | Test if a point hits a control. Returns part code or 0 if no hit
 | (invisible, inactive, or CDEF returned 0).
 TestControl:
@@ -498,7 +492,7 @@ TESTCONTROL_FOUND:
         BRA.W   MOVECONTROL_CONT                | strip params and return
 
 | ----------------------------------------------------------
-| DragControl -- _DragControl ($A967). Plus menu_mgr.s 1424.
+| DragControl -- _DragControl ($A967).
 | Drag a control's frame, calling its CDEF for custom behavior.
 DragControl:
         CLR     (DragFlag).w                    | not a thumb drag (whole control)
@@ -507,7 +501,7 @@ DragControl:
 DRAGCONTROL_CONT:
         LINK    A6,#0x0                         | no local vars
         MOVEM.L D3-D4/A3-A4,-(SP)               | save registers
-        MOVEM.L 14(A6),D3-D4/A3                 | D3=startPt, D4=limitRect, A3=ControlHandle
+        MOVEM.L 14(A6),D3-D4/A3                 | D3=limitRect ptr, D4=startPt, A3=ControlHandle
         BSR.W   DRAGCONTROL_CONT_2              | save port, set control's owner port
         MOVE    (DragFlag).w,D1                 | D1 = drag flag (0=drag, nonzero=thumb)
         MOVEQ.L #0x7,D0                         | D0 = dragCntl message (7)
@@ -569,14 +563,14 @@ DRAGCONTROL_CONT_2:
         SUBQ.W  #0x4,SP                         | space for GetPort result
         MOVE.L  SP,-(SP)                        | push ptr for GetPort
         _GetPort                                | save current port on stack
-        MOVE.L  D2,-(SP)                        | push part code
-        MOVE.L  (A3),A0                         | A0 = actionProc address
+        MOVE.L  D2,-(SP)                        | re-push the return address
+        MOVE.L  (A3),A0                         | A0 = ControlRecord (A3 = ControlHandle)
         MOVE.L  contrlOwner(A0),-(SP)           | push control's owner port
-        _SetPort                                | call subroutine via A0
-        RTS                                     | return to caller
+        _SetPort                                | set port to the control's owner window
+        RTS                                     | return from DRAGCONTROL_CONT_2
 
 | ----------------------------------------------------------
-| TrackControl -- _TrackControl ($A968). Plus menu_mgr.s 1515.
+| TrackControl -- _TrackControl ($A968).
 | Track mouse during a control press, calling its CDEF for hit-testing
 | and the action proc for repeated hits while held. Returns part code.
 TrackControl:
@@ -682,13 +676,15 @@ TRACKCONTROL_NO_4:
 
 | ----------------------------------------------------------
 |
-| _UpdtControl ($A953)
+| _DrawControls ($A969): draw all visible controls of a window
+| Pascal: PROCEDURE DrawControls(theWindow: WindowPtr);
+| Sets the port to theWindow and the pen to normal (saving and restoring
+| port and pen state), then walks wControlList and sends drawCntl with
+| part 0 to the CDEF of every control whose contrlVis is set
+| (NEWCONTROL_CONT_6). The 64K ROM has no UpdtControl: $A953 is
+| unimplemented.
 |
-| _UpdtControl ($A953): redraw all controls in a window's update region
-| Pascal: procedure UpdtControl(theWindow: WindowPtr; updateRgn: RgnHandle);
-| Walks the window's contrlList, calling Draw1Control for each visible
-| control whose region intersects the update region.
-UpdtControl:
+DrawControls:
         LINK    A6,#-0x18                       | 24 bytes local (pen state)
         MOVE.L  A3,-(SP)                        | save A3
         MOVE.L  0x8(A6),A3                      | A3 = theWindow
@@ -719,37 +715,36 @@ UPDTCONTROL_EXIT:
         _SetPort                                | restore caller's GrafPort
         MOVE.L  (SP)+,A3                        | restore A3
         UNLK    A6                              | tear down frame
-        MOVE.L  (SP)+,(SP)                      | strip Pascal params
-        RTS                                     | return to caller
+        MOVE.L  (SP)+,(SP)                      | strip theWindow param
+        RTS                                     | return from DrawControls
 
 | ----------------------------------------------------------
-| DRAWCONTROLS_CONT_2
+| DRAWCONTROLS_CONT_2 - unlink handle A0 from the list headed at (A1)
+| Each node is a handle whose record starts with the next-handle link.
+| Returns D0=0 if found and unlinked, D0=-1 if not found.
 | Called during boot.
-| DRAWCONTROLS_CONT_2: unlink handle A0 from linked list headed at (A1)
-| Each node: handle -> [nextHandle, ...], list head at (A1)
-| Returns D0=0 if found, D0=-1 if not found
 DRAWCONTROLS_CONT_2:
         MOVEM.L D1/A2-A3,-(SP)                  | save D1, A2, A3
         MOVEQ.L #-0x1,D0                        | default result = -1 (not found)
         TST.L   (A1)                            | list head non-empty?
         BEQ.B   DRAWCONTROLS_FOUND              | empty -> not found
-        MOVE.L  (A1),A2                         | push ControlHandle
-        MOVE.L  A1,A3                           | push thePoint
+        MOVE.L  (A1),A2                         | A2 = first handle in the list
+        MOVE.L  A1,A3                           | A3 = link to patch (list head)
         BRA.B   DRAWCONTROLS_CONT_3             | enter unlink scan loop
 DRAWCONTROLS_NEXT:
-        MOVE.L  (A2),A3                         | D0 = part code
+        MOVE.L  (A2),A3                         | A3 = current record (link at offset 0)
         MOVE.L  (A3),A2                         | A2 = next handle in list
         MOVE.L  A2,D1                           | set Z if end of list
         BEQ.B   DRAWCONTROLS_FOUND              | end -> not found
 DRAWCONTROLS_CONT_3:
         CMPA.L  A0,A2                           | current node == target?
         BNE.B   DRAWCONTROLS_NEXT               | no -> advance
-        MOVE.L  (A2),A2                         | A0 = VAR whichControl ptr
-        MOVE.L  (A2),(A3)                       | whichControl = this ControlHandle
+        MOVE.L  (A2),A2                         | A2 = target's record
+        MOVE.L  (A2),(A3)                       | predecessor link := target's next
         MOVEQ.L #0x0,D0                         | result = 0 (found and unlinked)
 DRAWCONTROLS_FOUND:
         MOVEM.L (SP)+,D1/A2-A3                  | restore registers
-        RTS                                     | return to caller
+        RTS                                     | return from DRAWCONTROLS_FOUND
 
 | ----------------------------------------------------------
 |
@@ -805,12 +800,3 @@ FINDCONTROL_FOUND:
         MOVE    D0,20(A6)                       | return partCode result
         BRA.B   FINDCONTROL_SKIP                | fall through to exit path
 
-RESOURCE_MAP:                                   | 32-byte param blob + BSR to helper
-        .short  0x0000, 0x0100                  | $D724-$D727
-        .short  0x0000, 0x0100                  | $D728-$D72B
-        .short  0x0000, 0x0000                  | $D72C-$D72F
-        .short  0x0000, 0x001E                  | $D730-$D733
-        .short  0x0000, 0x0000                  | $D734-$D737
-        .short  0x0000, 0x0000                  | $D738-$D73B
-        .short  0x001C, 0x001E                  | $D73C-$D73F
-        .short  0xFFFF, 0x0000                  | $D740-$D743
