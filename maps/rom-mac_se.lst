@@ -6,12 +6,15 @@ RAMEnd		RAM	FD,FFFFE
 
  seg Main 76
 BASEOFROM 	Main	$75,$0
-ROM_ResourceForkOffset_PlusStyle	Main	$75,$1A
-DT_mDispOff	Main	$75,$22
+STARTPC		Main	$75,$4
+ROMVERSION	Main	$75,$8
+STBOOT		Main	$75,$A
+BADDISK		Main	$75,$E
+ROMRSRC		Main	$75,$1A
 DISPOFF		Main	$75,$22
 CRITICAL		Main	$75,$26
-EBootStart	Main	$75,$2A
-Boot_Startup_Hardware_Init	Main	$75,$40
+RESETENTRY	Main	$75,$2A
+STARTBOOT 	Main	$75,$40
 STARTINIT1	Main	$75,$48
 WARMSTART_CHECK	Main	$75,$7C
 SET_BOOT_STACK	Main	$75,$8A
@@ -6208,8 +6211,8 @@ T2ISR_SKIP_TASK	Main	$75,$1AA78
 T2ISR_DISPATCH	Main	$75,$1AA82
 T2ISR_RESTORE	Main	$75,$1AA94
 T2ISR_DONE	Main	$75,$1AA96
-Compressed_ALine_Dispatch_Table	Main	$75,$1AA9C
 DISPTABLE 	Main	$75,$1AA9C
+Compressed_ALine_Dispatch_Table	Main	$75,$1AA9C
 ROM_Resource_Area_Header	Main	$75,$1AF1C
 ROM_Resource_Map	Main	$75,$1AF20
 ROM_Resource_Map_2	Main	$75,$1AF20

@@ -1,7 +1,7 @@
 | Startup: hardware and manager initialization (StartInit)
 |
 | Apple source: StartInit.a (System 7.1: OS/StartMgr/StartInit.a). Reset
-| entry (Boot_Startup_Hardware_Init, STARTINIT1, BOOTRETRY) and the
+| entry (STARTBOOT, STARTINIT1, BOOTRETRY) and the
 | initialization chain: JMPTBLINIT, memory and stack setup
 | (FILLWITHONES, COMPBOOTSTACK, SETUPSYSAPPZONE), DRAWBEEPSCREEN, ADB and
 | low-memory globals (INITADBVARS, INITHIMEMGLOBALS, INITGLOBALVARS), the
@@ -16,11 +16,13 @@
 | References: Inside Macintosh Vol III, Ch 2 and Vol IV/V (the startup
 | sequence); Mac Plus tree: boot/vectors.s and boot/boot_install.s.
 
-| Boot_Startup_Hardware_Init - first code executed after 68000 reset
-| On SE FDHD, the reset vector at $0004 points here (ROM + $40).
-| State at entry: SR = 0x2700 (supervisor, IPL=7), ROM overlay active.
+| STARTBOOT - the start code (Apple's label in StartInit.a; the source
+| file StartBoot.a is boot/boot_load.s)
+| Entered through the ROM header (boot/vectors.s): at reset through
+| RESETENTRY, on a restart through STBOOT or BADDISK. After a reset SR is
+| already $2700; a restart may come with interrupts enabled.
 | Sequence: disable interrupts -> RAM test -> hardware init -> boot.
-Boot_Startup_Hardware_Init:
+STARTBOOT:
     MOVE.W	#0x2700,SR                           | supervisor mode, IPL=7 (mask all interrupts)
     JMP	STARTTEST1(PC)                          | jump to cold/warm start RAM test
 | ----------------------------------------------------------
@@ -788,7 +790,7 @@ FILL_OS_DISP:
     DBF.W	D0,FILL_OS_DISP                       | loop for all 256 entries
 | Decode compressed dispatch table from ROM
     MOVEA.L	(ROMBase).W,A0                      | A0 = ROM base
-    ADDA.L	DT_mDispOff(PC),A0                   | A0 = compressed table start
+    ADDA.L	DISPOFF(PC),A0                       | A0 = compressed table start
     LEA.L	(ToolTable).W,A1                      | A1 = destination: Toolbox table
     MOVEA.L	(ROMBase).W,A2                      | A2 = running ROM address
     MOVE.W	#0x200,D0                            | D0 = 512 entries (Toolbox first)

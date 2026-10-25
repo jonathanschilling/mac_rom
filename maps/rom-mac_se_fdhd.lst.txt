@@ -1,10 +1,13 @@
 BASEOFROM 0x0 l
-ROM_ResourceForkOffset_PlusStyle 0x1A l
-DT_mDispOff 0x22 l
+STARTPC 0x4 l
+ROMVERSION 0x8 l
+STBOOT 0xA l
+BADDISK 0xE l
+ROMRSRC 0x1A l
 DISPOFF 0x22 l
 CRITICAL 0x26 l
-EBootStart 0x2A l
-Boot_Startup_Hardware_Init 0x40 l
+RESETENTRY 0x2A l
+STARTBOOT 0x40 l
 STARTINIT1 0x48 l
 WARMSTART_CHECK 0x7C l
 SET_BOOT_STACK 0x8A l
@@ -6203,8 +6206,8 @@ T2ISR_SKIP_TASK 0x1AA78 l
 T2ISR_DISPATCH 0x1AA82 l
 T2ISR_RESTORE 0x1AA94 l
 T2ISR_DONE 0x1AA96 l
-Compressed_ALine_Dispatch_Table 0x1AA9C l
 DISPTABLE 0x1AA9C l
+Compressed_ALine_Dispatch_Table 0x1AA9C l
 ROM_Resource_Area_Header 0x1AF1C l
 ROM_Resource_Map 0x1AF20 l
 ROM_Resource_Map_2 0x1AF20 l
