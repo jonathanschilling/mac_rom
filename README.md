@@ -186,3 +186,4 @@ resource missing.
 * https://axio.ms//projects/2024/06/16/MicroMac.html
 * https://computerhistory.org/blog/macpaint-and-quickdraw-source-code/
 * https://www.macintoshrepository.org/545-macintosh-programmer-s-workshop-mpw-3-x
+* https://archive.org/details/SWIMDesignDocs
