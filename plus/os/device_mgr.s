@@ -130,9 +130,10 @@ Stash:
 
 | ----------------------------------------------------------
 |
-| Device Manager I/O completion - noErr path
+| IOOK (Apple's name) - complete the I/O request with noErr: falls into
+| IODone
 |
-IODONE_NOERR:
+IOOK:
         MOVEQ.L #0x0,D0                         | result = noErr
 
 | ----------------------------------------------------------
@@ -246,7 +247,7 @@ START_HEAD_IOPARAM:
         CMPI.B  #0x5,0x7(A0)                    | ioTrap low byte = 5? (_Status)
         BEQ.B   CALL_DRV_ENTRY                  | dispatch to driver's Status entry
         TST.L   0x24(A0)                        | ioReqCount = 0? (no data to transfer)
-        BEQ     IODONE_NOERR                    | zero-length request: complete with noErr
+        BEQ     IOOK                            | zero-length request: complete with noErr
         MOVE    0x2C(A0),D0                     | D0 = ioPosMode (positioning mode + flags)
         MOVE.L  0x2E(A0),D1                     | D1 = ioPosOffset (requested file position)
         ROXR.B  #0x2,D0                         | shift positioning mode bits into carry+sign

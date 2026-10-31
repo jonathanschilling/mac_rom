@@ -9,7 +9,7 @@
 | References: Inside Macintosh Vol IV, Ch 19: The File Manager (data
 | organization on HFS volumes)
 
-| Apple source module: VSM
+VSM:                                            | Apple source module (MacSEROM.lst)
 BLKALLOC:
     MOVE.L      (0x77C).W,-(A7)                 | push BlkAlloc vector address
     RTS                                         | jump to HFS vector
@@ -350,7 +350,7 @@ READBM_NEXT_3:
     MOVE.L      (A6)+,-(A7)                     | restore return address
     TST.W       D0                              | set condition codes
     RTS                                         | return from GetBMBlk
-| Apple source module: FXM
+FXM:                                            | Apple source module (MacSEROM.lst)
 DEALLOCFILE:
     MOVE.L      (0x764).W,-(A7)                 | push DeallocFile vector address
     RTS                                         | jump to HFS vector

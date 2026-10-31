@@ -27,7 +27,7 @@
 | handler. Out-of-range selector -> FSDISPATCH_BAD_SEL which
 | returns paramErr (-50).
 |
-| Apple source module: TURBOFS
+TURBOFS:                                        | Apple source module (MacSEROM.lst)
 TFSDISPATCH:
     TST.W       D0                              | selector < 0 ?
     BLT.B       FSDISPATCH_BAD_SEL              | yes, invalid selector

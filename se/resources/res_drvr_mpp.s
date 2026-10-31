@@ -133,8 +133,7 @@
 Resource_DRVR_0009_DotMPP:
 | ROM resource header of DRVR 9 (8 bytes)
 Resource_DRVR_0009_DotMPP_Header:
-        .long   0xC0001556                      | ROM resource header: tag $C0, physical size $1556 (8 + $154E)
-        .long   0x00000070                      | relative handle: master pointer at ROM zone + $70
+    ROM_RESOURCE DRVR_9                         | 8-byte resource header (include/romrsrc.inc)
 | -------------------------------------------------------------------------
 | DRVR header (Inside Macintosh II-188): flags, delay, event mask, menu,
 | the offsets of the five entry points from the start of the header, the
@@ -3118,4 +3117,5 @@ NBP_CMPNAME:
 NIS_LUCOMPLETION:
         CLR.W   csCode(A0)                      | csCode = 0: block free
         RTS                                     | return
+    ROM_RESOURCE_END DRVR_9                     | end of the data: pads to even, sets the sizes
 

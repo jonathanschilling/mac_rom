@@ -133,8 +133,7 @@ Resource_MBDF_0000:
 | master pointer in the ROM zone (INITRESOURCES_CONT_2): 0x54 + 4 *
 | its index in the ROM map's reference lists.
 Resource_MBDF_0000_Header:
-    .long       0xC00005AE                      | ROM resource header: tag $C0, physical size $5AE (8 + $5A6)
-    .long       0x00000090                      | relative handle: master pointer at ROM zone + $90
+    ROM_RESOURCE MBDF_0                         | 8-byte resource header (include/romrsrc.inc)
 | ----------------------------------------------------------
 | _MBDF_0_ -- entry point and standard defproc header
 | ----------------------------------------------------------
@@ -825,4 +824,5 @@ MBDF0_APPLE1BITINV:
     .short      0xFC9F                          | ######..#..#####
     .short      0xFFFF                          | ################
     .short      0xFFFF                          | ################
+    ROM_RESOURCE_END MBDF_0                     | end of the data: pads to even, sets the sizes
 

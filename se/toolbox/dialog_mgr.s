@@ -17,6 +17,7 @@
 |
 | References: Inside Macintosh Vol I, Ch 13 (The Dialog Manager).
 
+IAPPEND:                                        | MacSEROM.lst: end marker of the module before
 DMGR:
     .short      0x000A
     .long       0x0014002A

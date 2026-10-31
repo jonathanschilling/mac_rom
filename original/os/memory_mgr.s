@@ -410,10 +410,10 @@ PTRZONE_NO:
 NewHandle:
         JSR      MMPrologue(PC)                 | set up TheZone, save regs
         JSR     NextMaster(PC)                  | allocate master pointer -> A1
-        BNE.B   NEWHANDLE                       | got one, allocate block ->
+        BNE.B   NEWHANDLE_ALLOC                 | got one, allocate block ->
         MOVEQ.L #-0x6C,D0                       | memFullErr
         BRA.B   DISPOSHANDLE_EXIT               | -> return nil handle
-NEWHANDLE:
+NEWHANDLE_ALLOC:
         JSR     AllocBK(PC)                     | allocate block of D0 bytes -> A0
         BEQ.B   NEWHANDLE_2                     | failed ->
 NEWHANDLE_CONT:
@@ -464,15 +464,13 @@ GetHandleSize:
 |        empty handle
 | SetSize grows the block in place if the space after it can be
 | freed, else moves it (unless locked); shrinking splits off the rest.
-| Note: SETHANDLESIZE inner label is intentionally distinct case
-| from SetHandleSize entry (GNU as is case-sensitive).
 SetHandleSize:
         JSR     MMHPrologue(PC)                 | deref handle -> A0=block, A1=MP
-        BNE.B   SETHANDLESIZE                   | block exists ->
+        BNE.B   SETHANDLESIZE_DO                | block exists ->
 SETHANDLESIZE_EMPTY:
         MOVEQ.L #-0x6D,D0                       | nilHandleErr
         BRA.B   SETHANDLESIZE_ERR               | -> return error
-SETHANDLESIZE:
+SETHANDLESIZE_DO:
         JSR     SetSize(PC)                     | resize block
 SETHANDLESIZE_ERR:
         MOVE.L  A1,A0                           | A0 = handle
@@ -859,19 +857,19 @@ BFINDS_EXIT:
         MOVE.L  A0,(A2)                         | update zone.allocPtr
         MOVEM.L (SP)+,D1-D2/A1-A2               | restore registers
         RTS                                     | return from BFindS
-| Called by: NewPtr, NEWHANDLE, REALLOCHANDLE_OK, HMAKEMOREMASTERS_CONT, MAKEPTRSPC_CONT_5
+| Called by: NewPtr, NEWHANDLE_ALLOC, REALLOCHANDLE_OK, HMAKEMOREMASTERS_CONT, MAKEPTRSPC_CONT_5
 AllocBK:
         MOVEM.L D0-D5,-(SP)                     | save registers
         MOVE.L  D0,D4                           | D4 = requested size (preserved)
         BSR.W   Actuals                         | round D0 to actual block size (+ header + align)
         BSR.B   BFindS                          | search free list for big enough block
-        BNE.B   ALLOCBK                         | found one ->
+        BNE.B   ALLOCBK_FOUND                   | found one ->
         MOVEQ.L #-0x1,D2                        | D2 = -1 (compact fully)
         BSR.W   BKCompacts                      | compact + purge + grow zone
-        BNE.B   ALLOCBK                         | found space ->
+        BNE.B   ALLOCBK_FOUND                   | found space ->
         SUBA.L  A0,A0                           | A0 = nil (alloc failed)
         BRA.B   ALLOCBK_ERR                     | -> return failure
-ALLOCBK:
+ALLOCBK_FOUND:
         MOVE.L  D0,D2                           | D2 = actual size needed
         MOVE.L  (A0),D0                         | D0 = free block's total size
         MOVE.L  A1,D5                           | D5 = master pointer

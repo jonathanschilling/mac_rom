@@ -8,8 +8,7 @@
 | Bytes 66-67: hotspot.h (INTEGER)
 
 | resource header
-        .long   0xC000004C                      | ROM resource header: tag $C0, physical size $4C (8 + $44)
-        .long   0x00000080                      | relative handle: master pointer at ROM zone + $80
+    ROM_RESOURCE CURS_2                         | 8-byte resource header (include/romrsrc.inc)
 _CURS_2_:
   .byte 0x04,0x00,0x04,0x00,0x04,0x00           | image rows 0-2: vertical bar
   .byte 0x04,0x00,0x04,0x00,0xFF,0xE0           | image rows 3-5: bar + horiz stroke
@@ -23,10 +22,10 @@ _CURS_2_:
   .byte 0x00,0x00,0x00,0x00,0x00,0x00           | mask rows 12-14: empty
   .byte 0x00,0x00,0x00,0x00,0x00,0x05           | mask row 15 + hotspot.v = 5
   .byte 0x00,0x05                               | hotspot.h = 5
+    ROM_RESOURCE_END CURS_2                     | end of the data: pads to even, sets the sizes
 
 | end of resource : 'CURS' 2
-        .long   0xC000004C                      | ROM resource header: tag $C0, physical size $4C (8 + $44)
-        .long   0x00000084                      | relative handle: master pointer at ROM zone + $84
+    ROM_RESOURCE CURS_3                         | 8-byte resource header (include/romrsrc.inc)
 
 | resource : 'CURS' 3
 | PlusCursor (3D plus sign for precision positioning)
@@ -47,10 +46,10 @@ _CURS_3_:
   .byte 0x7F,0xFF,0x0F,0xF0,0x0F,0xF0           | mask rows 11-13: horiz + arm mask
   .byte 0x07,0xF0,0x03,0xE0,0x00,0x08           | mask rows 14-15 + hotspot.v = 8
   .byte 0x00,0x08                               | hotspot.h = 8
+    ROM_RESOURCE_END CURS_3                     | end of the data: pads to even, sets the sizes
 
 | end of resource : 'CURS' 3
-        .long   0xC000004C                      | ROM resource header: tag $C0, physical size $4C (8 + $44)
-        .long   0x00000088                      | relative handle: master pointer at ROM zone + $88
+    ROM_RESOURCE CURS_1                         | 8-byte resource header (include/romrsrc.inc)
 
 | resource : 'CURS' 1
 | IBeamCursor (I-beam text insertion cursor)
@@ -71,10 +70,10 @@ _CURS_1_:
   .byte 0x00,0x00,0x00,0x00,0x00,0x00           | mask rows 11-13: empty
   .byte 0x00,0x00,0x00,0x00,0x00,0x04           | mask rows 14-15 + hotspot.v = 4
   .byte 0x00,0x07                               | hotspot.h = 7
+    ROM_RESOURCE_END CURS_1                     | end of the data: pads to even, sets the sizes
 
 | end of resource : 'CURS' 1
-        .long   0xC000004C                      | ROM resource header: tag $C0, physical size $4C (8 + $44)
-        .long   0x0000008C                      | relative handle: master pointer at ROM zone + $8C
+    ROM_RESOURCE CURS_4                         | 8-byte resource header (include/romrsrc.inc)
 
 | resource : 'CURS' 4
 | WatchCursor (wristwatch for busy/wait state)
@@ -95,5 +94,6 @@ _CURS_4_:
   .byte 0x7F,0x80,0x3F,0x00,0x3F,0x00           | mask rows 11-13: case + band
   .byte 0x3F,0x00,0x3F,0x00,0x00,0x08           | mask rows 14-15 + hotspot.v = 8
   .byte 0x00,0x08                               | hotspot.h = 8
+    ROM_RESOURCE_END CURS_4                     | end of the data: pads to even, sets the sizes
 
 | end of resource : 'CURS' 4

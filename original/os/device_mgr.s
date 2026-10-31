@@ -119,15 +119,16 @@ IO_CORE_ERR:                                    | fatal dsIOCoreErr
         BRA.B   FETCH_STASH_COMMON              | store D0.B in the request's buffer
 
 | ----------------------------------------------------------
-| IODone -- complete the current I/O request of a driver. JIODone
-| points 2 bytes in ($1116, D0 = result code); entering at IODone
-| itself ($1114) completes the request with noErr.
+| IOOK / IODone -- complete the current I/O request of a driver. JIODone
+| points at IODone ($1116, D0 = result code); IOOK ($1114) completes the
+| request with noErr (Apple's names, as in the Plus and SE).
 | Walks the I/O queue at A1 (= DCE), removes the just-completed
 | request from the queue head, runs ioCompletion if installed,
 | then returns to the next pending request (or RTE if none).
 | Entry: A1 = DCE ptr, D0 = result code
-IODone:                                         | noErr entry ($1114)
-        MOVEQ.L #0x0,D0                         | D0 = noErr; JIODone enters at the next line
+IOOK:                                           | noErr entry ($1114, Apple's IOOK)
+        MOVEQ.L #0x0,D0                         | D0 = noErr; falls into IODone
+IODone:                                         | JIODone points here ($1116)
         MOVE.L  8(A1),A0                        | A0 = head of pending IO queue
         BTST    #0x1,6(A0)                      | bit 1 of dCtlFlags: I/O active?
         BNE.B   UNLOCK_DRV_CHECK                | yes: skip lock-release (we own it)
@@ -203,7 +204,7 @@ START_HEAD_IOPARAM:                             | dispatch by ioTrap low byte
         CMPI.B  #0x5,ioTrap+1(A0)               | ioTrap low byte = 5? (_Status)
         BEQ.B   CALL_DRV_ENTRY                  | yes: dispatch to driver Status entry
         TST.L   ioReqCount(A0)                  | ioReqCount = 0? (no data to transfer)
-        BEQ.W   IODone                          | zero-length: complete with noErr
+        BEQ.W   IOOK                            | zero-length: complete with noErr
         MOVE    ioPosMode(A0),D0                | D0 = ioPosMode (positioning mode + flags)
         MOVE.L  ioPosOffset(A0),D1              | D1 = ioPosOffset (requested file position)
         ROXR.B  #0x2,D0                         | shift positioning bits into carry+sign

@@ -57,8 +57,7 @@
 |
 
 | resource header
-        .long   0xC000095A                      | ROM resource header: tag $C0, physical size $95A (8 + $952)
-        .long   0x00000060                      | relative handle: master pointer at ROM zone + $60
+    ROM_RESOURCE DRVR_10                        | 8-byte resource header (include/romrsrc.inc)
 _DRVR_10_.ATP:
         DC.W    0x4400                          | drvrFlags: dNeedLock, dCtlEnable
   .short 0x0000                                 | drvrDelay (no periodic)
@@ -1389,6 +1388,7 @@ ATP_GETCB_CLAIM:
 ATP_FREECB:
         CLR     ioRefNum(A3)                    | ioRefNum = 0 (free)
         RTS                                     | return from ATP_FREECB
+    ROM_RESOURCE_END DRVR_10                    | end of the data: pads to even, sets the sizes
 
 | end of resource : 'DRVR' 10 '.ATP'
 

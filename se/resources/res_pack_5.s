@@ -62,8 +62,7 @@
 | -------------------------------------------------------------------------
 Resource_PACK_0005:
 Resource_PACK_0005_Header:
-    .long       0xC0001066                      | ROM resource header: tag $C0, physical size $1066 (8 + $105E)
-    .long       0x00000054                      | relative handle: master pointer at ROM zone + $54
+    ROM_RESOURCE PACK_5                         | 8-byte resource header (include/romrsrc.inc)
 | ----------------------------------------------------------
 | Package header: branch to the entry, flags word, 'PACK', ID, version.
 | Called by: the _Pack5 trap (_Elems68K, $A9EC); recursively by XPWRY
@@ -2005,3 +2004,4 @@ ELEMS_ATANQ:
     .short      0x4003,0xC3C8,0x593D,0xFA3A,0x486F | z^2: 24.4728264658
     .short      0x4003,0x82AE,0x6838,0xDDF5,0xD945 | z^1: 16.3351597255
     .short      0x0000,0x0000,0x0000,0x0000,0x0000 | z^0: +0
+    ROM_RESOURCE_END PACK_5                     | end of the data: pads to even, sets the sizes

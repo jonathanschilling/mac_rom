@@ -146,9 +146,9 @@ CULLPOINTS:
     BRA.B       CULLPOINTS_WHILE1               | go to loop start
 | ----------------------------------------------------------
 |
-| DELETE -- src pair was duplicate, drop both
+| CULLPOINTS_DELETE -- src pair was duplicate, drop both
 |
-DELETE:
+CULLPOINTS_DELETE:
     ADDQ.W      #0x4,A1                         | skip over both src points
     BRA.B       CULLPOINTS_WHILE1               | go to loop start
 | ----------------------------------------------------------
@@ -158,7 +158,7 @@ DELETE:
 CULLPOINTS_MORE1:
     MOVE.L      (A1)+,D0                        | get current src point
     CMP.L       (A1),D0                         | is it same as next ?
-    BEQ.B       DELETE                          | yes, delete both
+    BEQ.B       CULLPOINTS_DELETE               | yes, delete both
     MOVE.L      D0,(A2)+                        | no, copy to dst
 CULLPOINTS_WHILE1:
     CMPA.L      A3,A1                           | is SrcPtr < LastPtr ?

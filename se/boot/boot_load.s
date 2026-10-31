@@ -22,6 +22,7 @@
 |   +$86: system heap size for 512K+ (long)
 |   +$8C: heap base adjustment (long)
 |   +$90: heap fraction multiplier (Fixed)
+MYBOOT:                                         | MacSEROM.lst: second name of this address
 BOOTME:
     BSR.W       FINDSTARTUPDEVICE               | find and read boot device blocks
     MOVE.B      0x6(A6),D1                      | D1 = boot block version byte

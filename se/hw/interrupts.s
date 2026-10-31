@@ -17,7 +17,7 @@
 | IER to identify active interrupt source. Scans bits 0-6 via LSR,
 | then dispatches through Lvl1DT vector table (low memory at KeyThresh).
 | Sources: Timer2, Timer1, keyboard SR, CB2, shift reg, 1-sec, VBL
-| Apple source module: INTHND
+INTHND:                                         | Apple source module (MacSEROM.lst)
 LVL1INT:
     MOVEM.L     D0-D3/A0-A3,-(A7)               | save registers for interrupt context
     LEA.L       (KeyThresh).W,A0                | A0 = Lvl1DT dispatch base
@@ -106,6 +106,7 @@ ONESECINT:
     CMP.L       (Time).W,D0                     | alarm time > current time?
     BHI.B       LVL2RTS                         | not yet: return
     BCLR        #0x1,(AlarmState)               | alarm fired: clear pending flag
+LVL1RTS:                                        | MacSEROM.lst: second name of this address
 LVL2RTS:
     RTS                                         | return from interrupt handler
 | VBLINT - vertical blanking interrupt handler (VIA Timer 1)

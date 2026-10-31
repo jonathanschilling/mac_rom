@@ -56,7 +56,7 @@
 | TMTask record (passed in A0):
 |   +0x00 long qLink, +0x06 long tmAddr, +0x0A long tmCount(ms)
 | _InsTime ($A058) - enqueue TMTask (A0) into timer queue
-| Apple source module: TIMEMGR
+TIMEMGR:                                        | Apple source module (MacSEROM.lst)
 INSTIME:
     MOVEA.L     (TimeVars).W,A1                 | A1 -> TimeVars
     LEA.L       0x8(A1),A1                      | A1 -> queue header (TimeVars+8)

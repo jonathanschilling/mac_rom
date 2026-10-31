@@ -237,18 +237,18 @@ SETCRSR_RETURN:
         JMP     (A0)                            | return to caller
 
 | ----------------------------------------------------------
-| ScrnAddress -- _ScrnAddress trap implementation.
-| Returns the screen base address in the longword on the stack at +4
+| P_ScrnAddress -- ScrnAddress (same label as in the Plus tree; not in the
+| trap dispatch table). Returns the screen base address in the longword on the stack at +4
 | (the caller's reserved result slot). Trivial: just copies (ScrnBase).w.
-ScrnAddress:
+P_ScrnAddress:
         MOVE.L  (ScrnBase).w,4(SP)              | result = ScrnBase
         RTS                                     | return from ScrnAddress
 
 | ----------------------------------------------------------
-| ScrnSize -- _ScrnSize trap implementation.
-| Returns the framebuffer dimensions (width x height) via two pointers
+| P_ScrnSize -- ScrnSize (same label as in the Plus tree; not in the trap
+| dispatch table). Returns the framebuffer dimensions (width x height) via two pointers
 | pushed on the stack. Mac 128K/512K screen = 512 x 342 mono pixels.
-ScrnSize:
+P_ScrnSize:
         MOVE.L  (SP)+,A1                        | A1 = return address
         MOVE.L  (SP)+,A0                        | A0 = ptr for height result
         MOVE    #0x156,(A0)                     | *A0 = 342 (screen height in pixels)

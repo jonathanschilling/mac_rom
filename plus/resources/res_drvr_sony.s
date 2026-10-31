@@ -71,8 +71,7 @@
 | DRVR header (Inside Macintosh II-188)
 
 | resource header
-        .long   0xC0002070                      | ROM resource header: tag $C0, physical size $2070 (8 + $2068)
-        .long   0x0000005C                      | relative handle: master pointer at ROM zone + $5C
+    ROM_RESOURCE DRVR_4                         | 8-byte resource header (include/romrsrc.inc)
 _DRVR_4_.Sony:
   .short 0x4F00                                 | drvrFlags: dNeedLock+dStatEnable+dCtlEnable+dWritEnable+dReadEnable
   .short 0x0000                                 | drvrDelay: no periodic action
@@ -4386,6 +4385,7 @@ SONY_DCD_COMMAND_STS:
         MOVE.L  StsRtnAddr(A1),A0               | A0 = StsRtnAddr
         TST     D0                              | CCR = result
         JMP     (A0)                            | continue there
+    ROM_RESOURCE_END DRVR_4                     | end of the data: pads to even, sets the sizes
 
 | end of resource : 'DRVR' 4 '.Sony'
 

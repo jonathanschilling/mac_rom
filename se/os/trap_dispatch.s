@@ -16,7 +16,7 @@
 | ATRAP68020 - A-line trap dispatcher (_Unimplemented handler shim)
 |
 | Adjusts stack frame and dispatches to the actual trap handler.
-| Apple source module: DSPATCH
+DSPATCH:                                        | Apple source module (MacSEROM.lst)
 ATRAP68020:
     MOVE.L      0x2(A7),0x4(A7)                 | shift return address up (make room)
     MOVEM.L     D1-D2/A2,-(A7)                  | save work registers

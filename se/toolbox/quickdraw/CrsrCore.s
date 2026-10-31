@@ -39,7 +39,7 @@
 | Cursor jump table (CRSRCORE) -- 4 longwords used by the trap
 | dispatcher to fan _HideCursor / _ShowCursor / _ShieldCursor /
 | _ObscureCursor / _SetCursor to the routines below.
-| Apple source module: CRSRCORE
+CRSRCORE:                                       | Apple source module (MacSEROM.lst)
 INITCRTABLE:
     .long       0x001E0070                      | jump table entries
     .long       0x013E01D0                      | (relative offsets)

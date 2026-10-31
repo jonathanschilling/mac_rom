@@ -646,7 +646,8 @@ NQCBuf:
     MOVE.L      A0,0x4(A4)                      | new->BLink = A0
     MOVEA.L     (A7)+,A1                        | restore A1
     RTS                                         | return from NQCBuf
-| Apple source module: CACHEIO
+CACHEIO:                                        | Apple source module (MacSEROM.lst)
+READBLOCK:                                      | MacSEROM.lst: second name of this address
 READOWNBUF:
     MOVE.L      (A7)+,-(A6)                     | save return address on A6 stack
     MOVEM.L     D1-D7/A0-A5,-(A6)               | save regs

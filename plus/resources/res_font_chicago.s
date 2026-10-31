@@ -8,8 +8,8 @@
 | kernMax, nDescent, fRectWidth, fRectHeight, owTLoc, ascent, descent,
 | leading, rowWords, then bitImage, locTable, owTable.
 
-        .long   0xC0000008                      | ROM resource header: tag $C0, physical size $8 (8 + $0)
-        .long   0x00000090                      | relative handle: master pointer at ROM zone + $90
+    ROM_RESOURCE FONT_0                         | 8-byte resource header (include/romrsrc.inc)
+    ROM_RESOURCE_END FONT_0                     | end of the data: pads to even, sets the sizes
 
 | resource : 'FONT' 0 'Chicago'
 | FONT resource ID 0 = 128*0 + 0 = font #0 (Chicago), size 0
@@ -17,8 +17,7 @@
 | Contains no glyph data, just marks the font family name
 | end of resource : 'FONT' 0 'Chicago'
 _FONT_0_Chicago:
-        .long   0xC0000D3C                      | ROM resource header: tag $C0, physical size $D3C (8 + $D34)
-        .long   0x00000094                      | relative handle: master pointer at ROM zone + $94
+    ROM_RESOURCE FONT_12                        | 8-byte resource header (include/romrsrc.inc)
 
 | resource : 'FONT' 12 - System font (Chicago 12pt)
 | FontRec header (26 bytes):
@@ -610,6 +609,7 @@ _FONT_12_:
   .byte 0x03,0x04,0x03,0x04,0x05,0x05
   .byte 0x04,0x07,0x03,0x0C,0x03,0x0A
   .byte 0xFF,0xFF
+    ROM_RESOURCE_END FONT_12                    | end of the data: pads to even, sets the sizes
 
 | end of resource : 'FONT' 12
 

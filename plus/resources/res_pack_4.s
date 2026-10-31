@@ -62,8 +62,7 @@
 | the physical size, then a relative-handle field) in front of the
 | resource data, as for every ROM resource.
 | -------------------------------------------------------------------------
-        .long   0xC00011C0                      | ROM resource header: tag $C0, physical size $11C0 (8 + $11B8)
-        .long   0x0000007C                      | relative handle: master pointer at ROM zone + $7C
+    ROM_RESOURCE PACK_4                         | 8-byte resource header (include/romrsrc.inc)
 | -------------------------------------------------------------------------
 | Package header: branch to the entry, flags word, 'PACK', ID, version.
 | -------------------------------------------------------------------------
@@ -2686,4 +2685,5 @@ FP68K_BD9_12:
 FP68K_BDFIN:
         ADDA.W  #0x1E,SP                        | BDFIN: drop the frame
         BRA.W   FP68K_POP3                      | -> POP3: three addresses
+    ROM_RESOURCE_END PACK_4                     | end of the data: pads to even, sets the sizes
 

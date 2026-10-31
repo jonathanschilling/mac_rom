@@ -8,8 +8,7 @@
 Resource_KMAP_0000:
 | KMAP 0 resource header.
 Resource_KMAP_0000_Header:
-    .long       0xC000008E                      | ROM resource header: tag $C0, physical size $8E (8 + $86)
-    .long       0x0000008C                      | relative handle: master pointer at ROM zone + $8C
+    ROM_RESOURCE KMAP_0                         | 8-byte resource header (include/romrsrc.inc)
 | KMAP 0 resource body.
 _KMAP_0_:
     .byte 0x00,0x00
@@ -46,4 +45,5 @@ _KMAP_0_:
     .byte 0x76,0x77,0x78,0x79
     .byte 0x7A,0x3C,0x3D,0x3E
     .byte 0x36,0x7F,0x00,0x00
+    ROM_RESOURCE_END KMAP_0                     | end of the data: pads to even, sets the sizes
 

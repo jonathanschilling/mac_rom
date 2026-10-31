@@ -11,8 +11,7 @@
 Resource_FONT_000C:
 | FONT 12 resource header.
 Resource_FONT_000C_Header:
-    .long       0xC0000DEA                      | ROM resource header: tag $C0, physical size $DEA (8 + $DE2)
-    .long       0x000000B0                      | relative handle: master pointer at ROM zone + $B0
+    ROM_RESOURCE FONT_12                        | 8-byte resource header (include/romrsrc.inc)
 | FONT 12 resource body.
 _FONT_12_:
     .byte 0x90,0x01,0x00,0x00
@@ -905,6 +904,7 @@ YFg:
     .byte 0x00,0x00,0x00,0x00
     .byte 0x01,0x0B,0x03,0x0A
     .byte 0x0A,0x38
+    ROM_RESOURCE_END FONT_12                    | end of the data: pads to even, sets the sizes
 
 | --------------------------------------------------------------------------
 | -------------------------------------------------------------------------
@@ -916,8 +916,8 @@ YFg:
 Resource_FONT_0000_Chicago:
 | FONT 0 resource header.
 Resource_FONT_0000_Chicago_Header:
-    .long       0xC0000008                      | ROM resource header: tag $C0, physical size $8 (8 + $0)
-    .long       0x000000B4                      | relative handle: master pointer at ROM zone + $B4
+    ROM_RESOURCE FONT_0                         | 8-byte resource header (include/romrsrc.inc)
+    ROM_RESOURCE_END FONT_0                     | end of the data: pads to even, sets the sizes
 
 | FONT 0 resource body.
 _FONT_0_Chicago:

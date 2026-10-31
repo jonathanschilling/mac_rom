@@ -11,7 +11,7 @@
 | Inside Macintosh Vol IV, Ch 8 (extended parameter RAM).
 
 | Called by: READPRAM_LOOP, INITUTIL, INITUTIL_LOOP_3, INITUTIL_LOOP_5, WPON (and 3 more)
-| Apple source module: CLOCK
+CLOCK:                                          | Apple source module (MacSEROM.lst)
 CLKRW:
     MOVE.W      SR,-(A7)                        | save status register
     MOVEM.L     D1/D3-D6/A0-A1/A5-A6,-(A7)      | save regs

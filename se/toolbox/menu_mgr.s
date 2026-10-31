@@ -29,7 +29,7 @@
 | back to the standard InitMenus path (loads 'MBDF' #0).
 | Pascal: procedure InitProcMenu(resID: INTEGER);
 | Stack: 4(SP) = resID
-| Apple source module: MMGR
+MMGR:                                           | Apple source module (MacSEROM.lst)
 INITPROCMENU:
     SUBQ.W      #0x4,A7                         | reserve _GetResource result slot
     MOVE.L      #0x4D424446,-(A7)               | push 'MBDF' resType
@@ -206,7 +206,7 @@ INSERTMENU_EXIT:
 | In:  D1 = menuID to find (0 = "not in list")
 | Out: D2/D0 = byte offset in MenuList (0 if not found),
 |      A1 = deref MenuList ptr, Z flag set if not found
-| Called by: INSERTMENU, DELETEMENU, HILITEMENU, DeleteMenu, FLASHMENUBAR (and 1 more)
+| Called by: INSERTMENU, DELETEMENU, HILITEMENU, HILITEMENU_NEW, FLASHMENUBAR (and 1 more)
 INSERTMENU_CONT_2:
     TST.W       D1                              | menuID = 0?
     BEQ.B       INSERTMENU_EMPTY                | yes -> not found
@@ -289,16 +289,16 @@ DRAWMENUBAR:
 | menuID=0 = unhighlight current. Hilites at most one title at a time.
 HILITEMENU:
     MOVE.W      (TheMenu).W,D1                  | D1 = currently highlighted menuID
-    BEQ.B       DeleteMenu                      | none -> just hilite new one
+    BEQ.B       HILITEMENU_NEW                  | none -> just hilite new one
     CMP.W       0x4(A7),D1                      | already highlighted?
     BEQ.B       HILITEMENU_SET_THEMENU          | yes -> nothing to do, return
     BSR.W       INSERTMENU_CONT_2               | locate current menuID in MenuList
-    BEQ.B       DeleteMenu                      | not found -> skip unhilite
+    BEQ.B       HILITEMENU_NEW                  | not found -> skip unhilite
     MOVEQ.L     #0x0,D1                         | D1.h = 0 (unhilite flag)
     MOVE.W      D0,D1                           | D1.l = byte offset
     MOVE.W      #0x5,D0                         | MBDF msg #5 = hilite
     BSR.W       MENU_CALL_MBDF                  | dispatch unhilite to MBDF
-DeleteMenu:
+HILITEMENU_NEW:
     MOVE.W      0x4(A7),D1                      | D1 = new menuID to hilite
     BSR.W       INSERTMENU_CONT_2               | locate it in MenuList
     BEQ.B       HILITEMENU_NOT_FOUND            | not found -> set TheMenu = 0

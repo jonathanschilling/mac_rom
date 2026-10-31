@@ -64,6 +64,7 @@
 | hook is installed, calls it first (can suppress the eject). Otherwise
 | calls _Eject directly. Beeps on eject failure.
 | Entry: D1 = drive number, D2 = volume refNum
+VDOEJECT:                                       | MacSEROM.lst: second name of this address
 DOEJECT:
     BSR.W       MAKESTKPB                       | build IOParam block on stack
     MOVE.W      D1,0x16(A0)                     | ioVRefNum = drive number

@@ -24,7 +24,7 @@
 | Entry: A0 = event code (mouseDown=1, mouseUp=2, keyDown=3, etc.)
 |        D0 = event message
 | Checks SysEvtMask to see if this event type is enabled.
-| Apple source module: EVENTS
+EVENTS:                                         | Apple source module (MacSEROM.lst)
 POSTEVENT:
     MOVE.W      (SysEvtMask).W,D2               | D2 = system event mask
     MOVE.W      A0,D1                           | D1 = event code

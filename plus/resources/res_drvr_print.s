@@ -7,8 +7,7 @@
 | corresponding offset within it. If PRER not found, returns noErr.
 
 | resource header
-        .long   0xC0000174                      | ROM resource header: tag $C0, physical size $174 (8 + $16C)
-        .long   0x00000054                      | relative handle: master pointer at ROM zone + $54
+    ROM_RESOURCE DRVR_2                         | 8-byte resource header (include/romrsrc.inc)
 _DRVR_2_.Print:
   .short 0x4F00                                 | drvrFlags
   .short 0x0000                                 | drvrDelay
@@ -190,6 +189,7 @@ PRINT_CHK_NOTFOUND:
         MOVEM   A1,(ResLoad).w                  | restore ResLoad state
         MOVEM.L (SP)+,D0-D1/A1-A2               | restore regs
         RTS                                     | return (Z set if not found)
+    ROM_RESOURCE_END DRVR_2                     | end of the data: pads to even, sets the sizes
 
 | end of resource : 'DRVR' 2 '.Print'
 

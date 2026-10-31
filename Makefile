@@ -67,7 +67,7 @@ ROMMAP_mac_plus_v3  = 00020000 1FFFF 75 75 ROMPlus plus
 ROMMAP_mac_se       = 00040000 3FFFF 76 75 Main    se
 ROMMAP_mac_se_fdhd  = 00040000 3FFFF 76 75 Main    se
 
-.PHONY: all verify $(ALL_TARGETS) rommap clean
+.PHONY: all verify $(ALL_TARGETS) rommap rez clean
 .PRECIOUS: build/rom-%.o
 
 all: verify
@@ -99,7 +99,15 @@ build/rom-%.bin: build/rom-%.o
 rommap: $(patsubst %,build/rom-%.lst,$(ALL_TARGETS))
 
 build/rom-%.lst: build/rom-%.bin
-	sh tools/rom_map.sh $(NM) build/rom-$*.o $(ROMMAP_$*) $@ $@.txt
+	sh tools/rom_map.sh $(NM) build/rom-$*.o $(ROMMAP_$*) $@ $@.txt tools/rom_map_flags.txt
+
+# The ROM resource forks are described in Rez (rez/<tree>/RomResources.r);
+# include/<tree>_rsrc.inc (the resource map, the order and relative handles
+# of the resources) is generated from them. After editing a .r file, run
+# `make rez` (needs Python 3) and then `make`.
+rez:
+	python3 tools/rez/rezc.py --rom-asm include/plus_rsrc.inc rez/plus/RomResources.r
+	python3 tools/rez/rezc.py --rom-asm include/se_rsrc.inc rez/se/RomResources.r
 
 clean:
 	rm -rf build

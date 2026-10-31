@@ -220,6 +220,7 @@ KILLCONTROLS_EMPTY:
 | (part 0 = whole control) to the CDEF only if the control is visible and its
 | contrlRect intersects the owner window's portRect.
 |
+Trap1_16D:                                      | MacPlusROM.lst placeholder for trap $A96D (Draw1Control)
 Draw1Control:
         MOVE.L  A3,-(SP)                        | save A3
         MOVE.L  0x8(SP),A3                      | A3 = ControlHandle

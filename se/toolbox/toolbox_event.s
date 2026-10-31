@@ -22,7 +22,7 @@
 | Each bit corresponds to a key: 1 = pressed, 0 = released.
 | After copying, invokes journaling (jcGetKeys = 3) if active.
 |
-| Apple source module: MISCMGR
+MISCMGR:                                        | Apple source module (MacSEROM.lst)
 GETKEYS:
     MOVEA.L     0x4(A7),A1                      | A1 = ptr to caller's KeyMap buffer
     LEA.L       (KeyMap).W,A0                   | A0 = low-mem KeyMap (128 bits = 16 bytes)

@@ -67,7 +67,7 @@
 
 | FSIODNETBL - Device Manager I/O parameter block template
 | 6 bytes: ioTrap offsets for Open/Close/Read/Write/Control/Status
-| Apple source module: IOCORE
+IOCORE:                                         | Apple source module (MacSEROM.lst)
 FSIODNETBL:
     .long       0x0006004A                      | Open/Close entry offsets
     .short      0x0052                          | Read/Write entry offset
@@ -111,23 +111,26 @@ IO_CORE_ERR:
 STASH:
     BSET        #0xF,D0                         | set bit 15 (write/stash mode)
     BRA.B       FETCH_STASH_COMMON              | use common Fetch/Stash path
-| IODONE wrapper - call IODone preserving D0
-IODONE_WRAPPER:
+| IOOK (Apple's name) - complete the I/O request with noErr: falls into
+| IODONE
+IOOK:
     MOVEQ.L     #0x0,D0                         | D0 = noErr
+| IODONE (Apple's IODone) - since <13Jan86> it preserves D0 around the
+| completion, which its local label @1 (IODONE_1) does
 IODONE:
     MOVE.W      D0,-(A7)                        | save result code
-    BSR.B       IODone                          | process I/O completion
+    BSR.B       IODONE_1                        | process I/O completion
     MOVE.W      (A7)+,D0                        | restore result code
     RTS                                         | return from IODone wrapper
 | ----------------------------------------------------------
 |
-| IODone - complete an asynchronous I/O request
+| IODONE_1 (IODone's @1) - complete an asynchronous I/O request
 |
 | Called via JIODone vector ($08FC) when a driver finishes an I/O
 | operation. A1 = DCE pointer, D0 = result code.
 | Dequeues the completed request, calls its completion routine,
 | and starts the next queued request if any.
-IODone:
+IODONE_1:
     MOVE.L      0x8(A1),D1                      | D1 = dCtlQHead: current I/O request
     BEQ.B       UNLOCK_DRV_CHECK                | no request queued: just clear busy flag
     MOVE.W      SR,-(A7)                        | save SR for later restore
@@ -224,7 +227,7 @@ START_HEAD_IOPARAM:
     BEQ.B       CALL_DRV_ENTRY                  | yes: call Status entry
 | Read/Write Prime path: set file position before calling driver
     TST.L       0x24(A0)                        | ioReqCount = 0? (no data to transfer)
-    BEQ.W       IODONE_WRAPPER                  | yes: no data to transfer, done
+    BEQ.W       IOOK                            | yes: no data to transfer, done
     MOVE.W      0x2C(A0),D0                     | D0 = ioPosMode (positioning mode)
     MOVE.L      0x2E(A0),D1                     | D1 = ioPosOffset (position value)
     ROXR.B      #0x2,D0                         | shift mode bits: bit1->X, bit0->bit7
@@ -595,6 +598,7 @@ WRITE_DEVICE:
     MOVEQ.L     #0x1,D4                         | D4 = 1 (test bit 1: write permission)
     BRA.B       DEVIO_COMMON                    | join common dispatch
 | P_tControl - _Control trap handler
+CONTROL__MAP:                                   | listed as CONTROL in the ROM maps (CONTROL is a register name for GNU as)
 P_tControl:
     MOVEM.L     D3-D5/A2-A4,-(A7)               | save work registers
     MOVE.W      0x18(A0),D2                     | D2 = ioRefNum
@@ -604,6 +608,7 @@ P_tControl:
 | P_tStatus - _Status trap handler
 |
 | Special case: csCode = 1 returns DCE handle in csParam.
+STATUS__MAP:                                    | listed as STATUS in the ROM maps (STATUS is a register name for GNU as)
 P_tStatus:
     MOVEM.L     D3-D5/A2-A4,-(A7)               | save work registers
     MOVE.W      0x18(A0),D2                     | D2 = ioRefNum

@@ -15,7 +15,7 @@
 | _GetPattern ($A9B8) - load 'PAT ' resource by ID.
 | Returns a Handle in result word.
 | ----------------------------------------------------------
-| Apple source module: GMGR
+GMGR:                                           | Apple source module (MacSEROM.lst)
 GETPATTERN:
     MOVE.L      #0x50415420,D0                  | D0 = 'PAT ' resource type
 GETPATTERN_EXIT:

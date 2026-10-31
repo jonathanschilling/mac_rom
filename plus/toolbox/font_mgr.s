@@ -1768,6 +1768,7 @@ REALFONT_LOOP:
 | invalidates all cached width tables (INITFONTS_CONT_2, cf. InValWidths
 | in System 7.1 FontMgr.a). Pops the 2-byte parameter.
 |
+SetFScaleDisabl:                                | MacPlusROM.lst spelling (15 characters) of SetFScaleDisable
 SetFScaleDisable:
         MOVE.L  (SP)+,A0                        | pop return address
         MOVE.B  (SP)+,(FScaleDisable).w         | pop boolean -> FScaleDisable

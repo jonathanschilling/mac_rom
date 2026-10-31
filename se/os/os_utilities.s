@@ -17,7 +17,8 @@
 |
 | References: Inside Macintosh Vol II, Ch 13 (Operating System Utilities).
 
-| Apple source module: SYSUTIL
+SGLDREND:                                       | MacSEROM.lst: end marker of the module before
+SYSUTIL:                                        | Apple source module (MacSEROM.lst)
 ASYNCPATCH:
     RTS                                         | return from ASYNCPATCH
 READPARAM:
@@ -72,9 +73,9 @@ DELAY_LOOP:
     RTS                                         | return from DELAY_LOOP
 | ----------------------------------------------------------
 |
-| CMPSTRING
+| CMPSTRING -- _CmpString ($A03C): compare two strings for equality (D0
+| high/low = lengths, A0/A1 = the strings); D0 = 0 if equal, 1 if not
 |
-| CmpString: lengths differ -> not equal
 CMPSTRING:
     MOVE.W      D0,D2                           | D2 = str1 length
     SWAP.W      D0                              | D0 = str2 length

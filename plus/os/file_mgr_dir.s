@@ -1529,7 +1529,7 @@ GetCatInfo_hfs:
         BSET    #0x0,(HFSFlags).w               | set flag
         TST     0x1C(A0)                        | test
         BMI.B   GETFILEINFO_CONT                | negative ->
-        BRA.B   GETFILEINFO                     | ->
+        BRA.B   GETFILEINFO_LOOKUP              | ->
 
 | ----------------------------------------------------------
 |
@@ -1540,7 +1540,7 @@ GetFileInfo:
         BSR     FSQUEUE_SETUP                   | call helper
         BCLR    #0x0,(HFSFlags).w               | clear flag
 | GetFileInfo: lookup by name or use ioFDirIndex
-GETFILEINFO:
+GETFILEINFO_LOOKUP:
         MOVE    0x1C(A0),D1                     | D1 = ioFDirIndex
         BGT.B   GETFILEINFO_CONT_2              | positive: index by position ->
         BSR     P_FndFilName                    | FndFilName: look up by name

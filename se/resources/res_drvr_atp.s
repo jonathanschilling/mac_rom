@@ -118,8 +118,7 @@
 Resource_DRVR_000A_DotATP:
 | ROM resource header of DRVR 10 (8 bytes)
 Resource_DRVR_000A_DotATP_Header:
-        .long   0xC0000C80                      | ROM resource header: tag $C0, physical size $C80 (8 + $C78)
-        .long   0x0000006C                      | relative handle: master pointer at ROM zone + $6C
+    ROM_RESOURCE DRVR_10                        | 8-byte resource header (include/romrsrc.inc)
 | -------------------------------------------------------------------------
 | DRVR header (Inside Macintosh II-188): flags, delay, event mask, menu,
 | the offsets of the five entry points from the start of the header, the
@@ -1919,4 +1918,5 @@ ATP_GETCB_CLAIM:
 ATP_FREECB:
         CLR.W   ioRefNum(A3)                    | ioRefNum = 0 (free)
         RTS                                     | return from ATP_FREECB
+    ROM_RESOURCE_END DRVR_10                    | end of the data: pads to even, sets the sizes
 

@@ -324,8 +324,7 @@
 | -------------------------------------------------------------------------
 Resource_DRVR_0028_DotXPP:
 Resource_DRVR_0028_DotXPP_Header:
-        .long   0xC0000A08                      | ROM resource header: tag $C0, physical size $A08 (8 + $A00)
-        .long   0x0000007C                      | relative handle: master pointer at ROM zone + $7C
+    ROM_RESOURCE DRVR_40                        | 8-byte resource header (include/romrsrc.inc)
 
 | -------------------------------------------------------------------------
 | DRVR header (Inside Macintosh II-188): flags, delay, event mask, menu,
@@ -1731,4 +1730,5 @@ XPP_ANYSESS_FOUND:
         MOVEA.L xppSessTbl(A1,D0.W),A2          | A2 = its SCB
         MOVEQ.L #0x0,D0                         | D0 = 0, EQ
         RTS                                     | return from XPP_ANYSESS
+    ROM_RESOURCE_END DRVR_40                    | end of the data: pads to even, sets the sizes
 

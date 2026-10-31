@@ -55,8 +55,7 @@
 | the physical size, then a relative-handle field) in front of the
 | resource data, as for every ROM resource.
 | -------------------------------------------------------------------------
-        .long   0xC000054E                      | ROM resource header: tag $C0, physical size $54E (8 + $546)
-        .long   0x00000074                      | relative handle: master pointer at ROM zone + $74
+    ROM_RESOURCE PACK_7                         | 8-byte resource header (include/romrsrc.inc)
 | -------------------------------------------------------------------------
 | Package header: branch to the entry, flags word, 'PACK', ID, version.
 | -------------------------------------------------------------------------
@@ -853,4 +852,5 @@ PACK_7_POW10_TABLE:
         .short  100                             | 10^2
         .short  1000                            | 10^3
         .short  10000                           | 10^4
+    ROM_RESOURCE_END PACK_7                     | end of the data: pads to even, sets the sizes
 

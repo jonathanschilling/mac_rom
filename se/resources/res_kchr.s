@@ -10,8 +10,7 @@
 Resource_KCHR_0000:
 | KCHR 0 resource header.
 Resource_KCHR_0000_Header:
-    .long       0xC0000572                      | ROM resource header: tag $C0, physical size $572 (8 + $56A)
-    .long       0x00000088                      | relative handle: master pointer at ROM zone + $88
+    ROM_RESOURCE KCHR_0                         | 8-byte resource header (include/romrsrc.inc)
 | KCHR 0 resource body.
 _KCHR_0_:
     .byte 0x00,0x00,0x00,0x00
@@ -362,4 +361,5 @@ K:
     .byte 0x4E,0x84,0x61,0x8B
     .byte 0x6E,0x96,0x6F,0x9B
     .byte 0x00,0x7E
+    ROM_RESOURCE_END KCHR_0                     | end of the data: pads to even, sets the sizes
 

@@ -138,8 +138,7 @@
 | the physical size, then a relative-handle field) in front of the
 | resource data, as for every ROM resource.
 | -------------------------------------------------------------------------
-        .long   0xC0000370                      | ROM resource header: tag $C0, physical size $370 (8 + $368)
-        .long   0x00000058                      | relative handle: master pointer at ROM zone + $58
+    ROM_RESOURCE DRVR_3                         | 8-byte resource header (include/romrsrc.inc)
 
 | -------------------------------------------------------------------------
 | Driver header (IM II-188): flags, delay, event mask, menu, the offsets
@@ -685,6 +684,7 @@ SND_FREEFORM_WRAP:
         MOVEA.L (SoundBase).w,A2                | A2 = word 0 of the buffer
         MOVEQ.L #0x1F,D2                        | at most 32 samples
         BRA.B   SND_RESAMPLE_OUTER              | -> resample them
+    ROM_RESOURCE_END DRVR_3                     | end of the data: pads to even, sets the sizes
 
 | end of resource : 'DRVR' 3 '.Sound'
 

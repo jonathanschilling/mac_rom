@@ -54,18 +54,18 @@ assembled source (`make rommap` regenerates them in `build/`):
                                joevt/68k-mac-rom-maps (for Ghidra's
                                ImportSymbolsScript.py)
 
-The Mac Plus labels follow Apple's MacPlusROM.lst (MPW 3.5 GM): every
-entry of that map is matched by the generated Plus maps, either by name
-or, where Apple lists a trap-table placeholder (Trap0_xx / Trap1_xxx),
-an unimplemented trap slot or a 15-character truncation, through the
-ROM's own trap dispatch table. The SE labels follow Apple's
-MacSEROM.lst, a link map of the SE ROM: every entry is matched by both
-SE maps, by name, as another of Apple's names for the same address
-(module names such as TURBOFS are noted in comments in the source) or,
-for CONTROL and STATUS, which cannot be assembler labels, through the
-trap dispatch table. There is no Apple map for the 64K ROM of the
-Macintosh 128K/512K; there, every trap entry point that the Plus also
-implements carries the Plus name.
+Apple's MPW ROM maps (MPW 3.5 GM) are the source of truth for every name
+they contain: each line of MacPlusROM.lst appears byte-identical in the
+three Plus maps, and each line of MacSEROM.lst in both SE maps -- the
+same name at the same offset, with Apple's flag, including Apple's
+trap-table placeholders (Trap0_xx / Trap1_xxx), MPW's 15-character
+truncations and the SE's module names. No other label conflicts with an
+Apple name or with another label, even ignoring case. (Source labels
+ending in __MAP appear in the maps without that suffix: CONTROL and
+STATUS cannot be assembler symbols, and MacPlusROM.lst lists SetAppBase
+at two offsets.) There is no Apple map for the 64K ROM of the Macintosh
+128K/512K; there, every trap entry point that the Plus also implements
+carries the Plus name.
 
 Per-target builds:
 
@@ -76,6 +76,44 @@ Per-target builds:
     make mac_plus_v3   # 1986-03, 128 KB, $4D1F8172  (SCSI patch)
     make mac_se        # 1987-03, 256 KB, $B2E362A8
     make mac_se_fdhd   # 1989-08, 256 KB, $B306E171
+
+## ROM resources (Rez)
+
+The resource forks of the Plus and SE ROMs (drivers, packages, definition
+procedures, cursors, fonts, ...) are described in Rez, the resource
+language of Apple's MPW: rez/plus/RomResources.r and rez/se/RomResources.r
+list the resources in ROM order with their names and attributes, and the
+fields of the resource map. tools/rez/rezc.py, an independent Rez compiler
+(Python 3), turns each into include/<tree>_rsrc.inc: the resource map with
+its counts and offsets, and the index and relative handle of every
+resource. Each resource's data sit in its source file between the macros
+ROM_RESOURCE and ROM_RESOURCE_END (include/romrsrc.inc), which write the
+8-byte resource header and take the size from the data -- nothing of the
+map or the headers is written by hand. A resource can also come from Rez
+itself (resource/data/read statements, a 'rez' entry in the 'rrsc' list,
+and ROM_RESOURCE_REZ where its data go in the ROM).
+
+After editing a .r file: `make rez` (needs Python 3), then `make`. A
+modified ROM no longer matches the fingerprints of `make`; build it with
+`make build/rom-<target>.bin` and fix its checksums with
+`python3 tools/fixup_checksum.py build/rom-<target>.bin` (the long at
+offset 0, and the per-chip checksums of the SE images).
+
+Room for more resources: the Plus ROM is full (its resources end at the
+extra area, which must stay at $1FFC0: the v3 SCSI patch is called by
+absolute address). In the SE ROMs the resources are followed by filler,
+the developer initials repeated up to the date at $3FFEE (13,382 bytes;
+in the SE FDHD 1,112 bytes up to its patch code at $3D000, which the
+.Sony driver calls by absolute address). Shorten the .rept counts in
+se/extra/rom_tail.s to make room; .org guards at these offsets stop the
+assembly ("attempt to move .org backwards") when the resources grow into
+them.
+
+rezc.py can also list the resources of a ROM image or write them as a
+resource fork:
+
+    python3 tools/rez/rezc.py --rom-image build/rom-mac_se.bin --list
+    python3 tools/rez/rezc.py --rom-image build/rom-mac_se.bin --rsrc se.rsrc
 
 ## Layout
 
@@ -89,6 +127,10 @@ Per-target builds:
     maps/                  ROM maps of all seven ROMs (see above)
     tools/verify_rom.sh    ROM verifier (size, checksum, version, MD5, cmp)
     tools/rom_map.sh       ROM map generator (make rommap)
+    tools/rom_map_flags.txt  flags of the Apple map entries, for rom_map.sh
+    tools/fixup_checksum.py  recompute the checksums of a modified ROM
+    tools/rez/             Rez compiler (rezc.py) and its templates
+    rez/                   Rez descriptions of the ROM resource forks
     Makefile               Self-contained build pipeline
 
 `include/` files:
@@ -105,6 +147,10 @@ Per-target builds:
     sonyequ.inc            Sony disk-driver equates
     private.inc            Private system equates (memory mgr internals)
     macros.inc             Helper macros (UNLINK, etc.)
+    romrsrc.inc            ROM resource fork: block-header constants and the
+                           ROM_RESOURCE / ROM_RESOURCE_END / map macros
+    plus_rsrc.inc          generated from rez/plus/RomResources.r (make rez)
+    se_rsrc.inc            generated from rez/se/RomResources.r (make rez)
 
 ## ROM variants and checksums
 

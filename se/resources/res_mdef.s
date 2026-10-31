@@ -82,8 +82,7 @@ Resource_MDEF_0000:
 | master pointer in the ROM zone (INITRESOURCES_CONT_2): 0x54 + 4 *
 | its index in the ROM map's reference lists.
 Resource_MDEF_0000_Header:
-    .long       0xC0000410                      | ROM resource header: tag $C0, physical size $410 (8 + $408)
-    .long       0x00000094                      | relative handle: master pointer at ROM zone + $94
+    ROM_RESOURCE MDEF_0                         | 8-byte resource header (include/romrsrc.inc)
 | ----------------------------------------------------------
 | _MDEF_0_ -- entry point and standard defproc header
 | ----------------------------------------------------------
@@ -674,4 +673,5 @@ MDEF_GRAY_ITEM:
     _PaintRect                                  | paint gray over disabled item
     _PenNormal                                  | restore default pen state
     RTS                                         | return from MDEF_GRAY_ITEM
+    ROM_RESOURCE_END MDEF_0                     | end of the data: pads to even, sets the sizes
 

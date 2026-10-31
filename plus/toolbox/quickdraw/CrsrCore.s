@@ -284,23 +284,27 @@ SETCRSR_RETURN:
 
 | ----------------------------------------------------------
 |
-| ScrnAddress - Return the screen base address
+| P_ScrnAddress - ScrnAddress: return the screen base address
+| (MacSEROM.lst: SCRNADDRESS; MacPlusROM.lst lists ScrnAddress at the
+| unimplemented-trap handler, where that name is a label)
 |
 | Stack: retAddr, result (longword pointer to fill)
 | Stores ScrnBase into the result location on the stack.
 |
-ScrnAddress:
+P_ScrnAddress:
         MOVE.L  (ScrnBase).w,0x4(SP)            | Store screen base address in result slot
         RTS                                     | return from ScrnAddress
 
 | ----------------------------------------------------------
 |
-| ScrnSize - Return screen dimensions (height and width)
+| P_ScrnSize - ScrnSize: return screen dimensions (height and width)
+| (MacSEROM.lst: SCRNSIZE; MacPlusROM.lst lists ScrnSize at the
+| unimplemented-trap handler, where that name is a label)
 |
 | Stack: retAddr, heightPtr, widthPtr
 | Stores 342 (0x156) for height, 512 (0x200) for width.
 |
-ScrnSize:
+P_ScrnSize:
         MOVE.L  (SP)+,A1                        | A1 = return address
         MOVE.L  (SP)+,A0                        | A0 = pointer for height result
         MOVE    #0x156,(A0)                     | Store screen height: 342 pixels

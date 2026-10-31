@@ -22,6 +22,8 @@
 | $0A-$16 and is zero at $22/$26.
 | -------------------------------------------------------------------------
 
+MYFIRSTPROC:                                    | MacSEROM.lst: second name of this address
+MYROM:                                          | MacSEROM.lst: second name of this address
 BASEOFROM:
 | Start of the ROM image. The ROM runs at $400000 (ROMBase). At reset the
 | SE also maps it to address 0 (the overlay), so that the 68000 can fetch
@@ -65,8 +67,8 @@ BADDISK:
     .long       0x00000000                      | +$12: zero (ROM release word in later ROMs)
     .long       0x00000000                      | +$16: zero (foreign-OS table offset, later ROMs)
 | +$1A: offset of the ROM resources: the two words in front of the
-| resource map (number of ROM resources, map size; at the end of
-| os/dispatch_table.s). InitResources adds it to ROMBase.
+| resource map (number of ROM resources, map size; resources/res_map.s).
+| InitResources adds it to ROMBase.
 ROMRSRC:
     .long       ROM_Resource_Area_Header-BASEOFROM | +$1A: offset of the ROM resource header
 | +$1E: eject entry (Apple: Eject; the label EJECT is the _Eject trap).

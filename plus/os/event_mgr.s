@@ -211,6 +211,7 @@ DEQUEUE_INVALIDATE:
 | Toolbox trap $A832 dispatches here as well (MacPlusROM.lst: Trap1_32):
 | in the 64K ROM, OS and Toolbox traps shared one dispatch table,
 | so $A832 and $A032 were the same slot.
+Trap1_32:                                       | MacPlusROM.lst placeholder for trap $A832 (FlushEvents)
 FlushEvents:
         MOVE    SR,-(SP)                        | save SR for interrupt restore
         MOVEM.L D3-D4,-(SP)                     | preserve D3-D4

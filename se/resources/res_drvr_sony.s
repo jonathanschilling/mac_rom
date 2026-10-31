@@ -4882,4 +4882,5 @@ SONY_DCD_COMMAND_STS:
         JMP     (A0)                            | continue there
 
 .endif
+    ROM_RESOURCE_END DRVR_4                     | end of the data: pads to even, sets the sizes
 

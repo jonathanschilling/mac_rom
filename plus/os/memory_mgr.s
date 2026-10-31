@@ -227,6 +227,7 @@ INITZONE_EXIT:
 | Toolbox trap $A81A dispatches here as well (MacPlusROM.lst: Trap1_1A):
 | in the 64K ROM, OS and Toolbox traps shared one dispatch table,
 | so $A81A and $A01A were the same slot.
+Trap1_1A:                                       | MacPlusROM.lst placeholder for trap $A81A (GetZone)
 GetZone:
         MOVE.L  (TheZone).w,A0                  | A0 = current zone pointer (return value)
         BRA.B   INITZONE_EXIT                   | -> return noErr
@@ -241,6 +242,7 @@ GetZone:
 | Toolbox trap $A81B dispatches here as well (MacPlusROM.lst: Trap1_1B):
 | in the 64K ROM, OS and Toolbox traps shared one dispatch table,
 | so $A81B and $A01B were the same slot.
+Trap1_1B:                                       | MacPlusROM.lst placeholder for trap $A81B (SetZone)
 SetZone:
         MOVE.L  A0,(TheZone).w                  | set current zone to A0
         BRA.B   INITZONE_EXIT                   | -> return noErr
@@ -277,6 +279,7 @@ MaxBlock:
 | Toolbox trap $A84C dispatches here as well (MacPlusROM.lst: Trap1_4C):
 | in the 64K ROM, OS and Toolbox traps shared one dispatch table,
 | so $A84C and $A04C were the same slot.
+Trap1_4C:                                       | MacPlusROM.lst placeholder for trap $A84C (CompactMem)
 CompactMem:
         JSR     MMPrologue(PC)                  | set up zone, save regs
         MOVEQ.L #0x0,D1                         | D1 = 0: CompactMem (MaxBlock passes 1)
@@ -393,6 +396,7 @@ RESRVMEM_SKIP:
 | Toolbox trap $A81D dispatches here as well (MacPlusROM.lst: Trap1_1D):
 | in the 64K ROM, OS and Toolbox traps shared one dispatch table,
 | so $A81D and $A01D were the same slot.
+Trap1_1D:                                       | MacPlusROM.lst placeholder for trap $A81D (MaxMem)
 MaxMem:
         JSR     MMPrologue(PC)                  | set up zone, save regs
         MOVE.L  #0x800000,D0                    | D0 = $800000: more than any zone can hold
@@ -501,6 +505,7 @@ MAXAPPLZONE_SKIP:
 | Toolbox trap $A81E dispatches here as well (MacPlusROM.lst: Trap1_1E):
 | in the 64K ROM, OS and Toolbox traps shared one dispatch table,
 | so $A81E and $A01E were the same slot.
+Trap1_1E:                                       | MacPlusROM.lst placeholder for trap $A81E (NewPtr)
 NewPtr:
         JSR     MMPrologue(PC)                  | set up zone, save regs
         SUBA.L  A1,A1                           | A1 = nil (non-relocatable block)
@@ -634,21 +639,22 @@ NewEmptyHandle:
 | Toolbox trap $A822 dispatches here as well (MacPlusROM.lst: Trap1_22):
 | in the 64K ROM, OS and Toolbox traps shared one dispatch table,
 | so $A822 and $A022 were the same slot.
+Trap1_22:                                       | MacPlusROM.lst placeholder for trap $A822 (NewHandle)
 NewHandle:
         JSR     MMPrologue(PC)                  | save regs; A6 = TheZone (SysZone if bit 10)
         JSR     NextMaster(PC)                  | allocate master pointer -> A1
-        BNE.B   NEWHANDLE                       | got one ->
+        BNE.B   NEWHANDLE_ALLOC                 | got one ->
 NEWHANDLE_EMPTY:
         MOVEQ.L #-0x6C,D0                       | memFullErr
         BRA.B   DISPOSHANDLE_EXIT               | -> return nil handle
 
 | ----------------------------------------------------------
 |
-| NEWHANDLE - NewHandle: got master pointer A1, now allocate the block
+| NEWHANDLE_ALLOC - NewHandle: got master pointer A1, now allocate the block
 | NEWHANDLE_CONT is also ReallocHandle's success path; NEWHANDLE_EXIT and
 | NEWHANDLE_EXIT_2 are common exits of the handle traps.
 |
-NEWHANDLE:
+NEWHANDLE_ALLOC:
         JSR     AllocBK(PC)                     | relocatable block for MP A1, Z if failed
         BEQ.B   NEWHANDLE_2                     | failed ->
 NEWHANDLE_CONT:
@@ -677,20 +683,21 @@ NEWHANDLE_2:
 | the block and its master pointer (memROZErr in a read-only zone).
 | Empty handle: the master pointer goes back on TheZone's free list (the
 | handle's own zone is unknown), or in a read-only zone is only cleared
-| (NEWPTR). h = nil: nothing is done (noErr).
+| (DISPOSHANDLE_ROZONE). h = nil: nothing is done (noErr).
 | DISPOSHANDLE_CONT / DISPOSHANDLE_EXIT are also NewHandle's failure exits.
 | Apple source name: DSPOSEHANDLE (MacSEROM.lst)
 |
 | Toolbox trap $A823 dispatches here as well (MacPlusROM.lst: Trap1_23):
 | in the 64K ROM, OS and Toolbox traps shared one dispatch table,
 | so $A823 and $A023 were the same slot.
+Trap1_23:                                       | MacPlusROM.lst placeholder for trap $A823 (DisposHandle)
 DisposHandle:
         JSR     MMHPrologue(PC)                 | A0 = block, A1 = h; Z if nil or empty
   .short 0x6680                                 | BNE.B DISPOSPTR_CONT (block present)
         MOVE.L  A1,D0                           | D0 = masked handle
         BEQ.B   DISPOSHANDLE_EXIT               | h = nil -> nothing to release (noErr)
         BTST    #0x0,0x16(A6)                   | empty handle: read-only zone (flags bit 0)?
-        BNE.B   NEWPTR                          | yes -> just clear the master pointer
+        BNE.B   DISPOSHANDLE_ROZONE             | yes -> just clear the master pointer
         MOVEQ.L #0x0,D0                         | noErr
 DISPOSHANDLE_CONT:
         JSR     ReleaseMP(PC)                   | put master pointer A1 back on the free list
@@ -700,10 +707,10 @@ DISPOSHANDLE_EXIT:
 
 | ----------------------------------------------------------
 |
-| NEWPTR - DisposHandle: empty handle in a read-only zone; clear the master
+| DISPOSHANDLE_ROZONE - DisposHandle: empty handle in a read-only zone; clear the master
 | pointer but do not return it to the free list
 |
-NEWPTR:
+DISPOSHANDLE_ROZONE:
         CLR.L   (A1)                            | clear the master pointer only
         BRA.B   NEWHANDLE_EXIT                  | -> noErr
 
@@ -719,6 +726,7 @@ NEWPTR:
 | Toolbox trap $A825 dispatches here as well (MacPlusROM.lst: Trap1_25):
 | in the 64K ROM, OS and Toolbox traps shared one dispatch table,
 | so $A825 and $A025 were the same slot.
+Trap1_25:                                       | MacPlusROM.lst placeholder for trap $A825 (GetHandleSize)
 GetHandleSize:
         JSR     MMHPrologue(PC)                 | dereference handle -> A0=block, A1=master ptr
         BEQ.B   SETHANDLESIZE_EMPTY             | nil or empty handle -> nilHandleErr
@@ -739,18 +747,19 @@ GetHandleSize:
 | Toolbox trap $A824 dispatches here as well (MacPlusROM.lst: Trap1_24):
 | in the 64K ROM, OS and Toolbox traps shared one dispatch table,
 | so $A824 and $A024 were the same slot.
+Trap1_24:                                       | MacPlusROM.lst placeholder for trap $A824 (SetHandleSize)
 SetHandleSize:
         JSR     MMHPrologue(PC)                 | dereference handle
-        BNE.B   SETHANDLESIZE                   | block exists ->
+        BNE.B   SETHANDLESIZE_DO                | block exists ->
 SETHANDLESIZE_EMPTY:
         MOVEQ.L #-0x6D,D0                       | nilHandleErr
         BRA.B   SETHANDLESIZE_ERR               | -> return error
 
 | ----------------------------------------------------------
 |
-| SETHANDLESIZE - SetHandleSize: block present, resize it
+| SETHANDLESIZE_DO - SetHandleSize: block present, resize it
 |
-SETHANDLESIZE:
+SETHANDLESIZE_DO:
         JSR     SetSize(PC)                     | resize block (may move it)
 SETHANDLESIZE_ERR:
         MOVE.L  A1,A0                           | A0 = handle (for caller)
@@ -865,6 +874,7 @@ REALLOCHANDLE_ERR_2:
 | Toolbox trap $A829 dispatches here as well (MacPlusROM.lst: Trap1_29):
 | in the 64K ROM, OS and Toolbox traps shared one dispatch table,
 | so $A829 and $A029 were the same slot.
+Trap1_29:                                       | MacPlusROM.lst placeholder for trap $A829 (HLock)
 HLock:
         BSR.B   HNOPURGE_CONT                   | A1 = masked h, D0 = master ptr (Z if nil)
         BEQ.B   HNOPURGE_EXIT_2                 | master pointer nil -> nilHandleErr
@@ -884,6 +894,7 @@ HLock:
 | Toolbox trap $A82A dispatches here as well (MacPlusROM.lst: Trap1_2A):
 | in the 64K ROM, OS and Toolbox traps shared one dispatch table,
 | so $A82A and $A02A were the same slot.
+Trap1_2A:                                       | MacPlusROM.lst placeholder for trap $A82A (HUnlock)
 HUnlock:
         BSR.B   HNOPURGE_CONT                   | A1 = masked h, D0 = master ptr (Z if nil)
         BEQ.B   HNOPURGE_EXIT_2                 | master pointer nil -> nilHandleErr
@@ -1840,26 +1851,27 @@ BFINDS_EXIT:
 | A1 = master pointer (relocatable block; set to point to the block) or
 |      nil (nonrelocatable block)
 | BFindS first; if no free block fits, BKCompacts with tryGrow = true.
-| Called by: NewPtr, NEWHANDLE, REALLOCHANDLE_OK, HMAKEMOREMASTERS_CONT, MAKEPTRSPC_CONT_5
+| Called by: NewPtr, NEWHANDLE_ALLOC, REALLOCHANDLE_OK, HMAKEMOREMASTERS_CONT, MAKEPTRSPC_CONT_5
 AllocBK:
         MOVEM.L D0-D5,-(SP)                     | save registers
         MOVE.L  D0,D4                           | D4 = requested size (preserved)
         BSR     Actuals                         | round D0 to actual block size (+ header + align)
         BSR.B   BFindS                          | search free list for big enough block
-        BNE.B   ALLOCBK                         | found one ->
+        BNE.B   ALLOCBK_FOUND                   | found one ->
 | no block found: compact heap and try again
         MOVEQ.L #-0x1,D2                        | D2 = -1: tryGrow (grow zone, call GZ proc)
         BSR     BKCompacts                      | compact + purge + grow zone
-        BNE.B   ALLOCBK                         | found space ->
+        BNE.B   ALLOCBK_FOUND                   | found space ->
         SUBA.L  A0,A0                           | A0 = nil (allocation failed)
         BRA.B   ALLOCBK_ERR                     | -> return failure
 
 | ----------------------------------------------------------
 |
-| AllocBK: carve block from free space at A0
+| ALLOCBK_FOUND - AllocBK found a free block: carve the block from the
+| free space at A0
 | D0 = actual size needed, A0 = free block, A1 = master pointer or nil
 |
-ALLOCBK:
+ALLOCBK_FOUND:
         MOVE.L  D0,D2                           | D2 = actual size needed
         MOVE.L  (A0),D0                         | D0 = free block's total size
         MOVE.L  A1,D5                           | D5 = master pointer

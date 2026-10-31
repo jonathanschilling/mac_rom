@@ -149,7 +149,7 @@ MOVETO:
 | PROCEDURE Move(dh,dv: INTEGER);
 |
 | Called during boot.
-| Apple source module: MOVE
+MOVE:                                           | Apple source module (MacSEROM.lst)
 MOOV:
     MOVEA.L     (A7)+,A0                        | POP RETURN ADDR
     MOVE.W      (A7)+,D0                        | POP DV

@@ -112,8 +112,7 @@
 Resource_DRVR_0004_DotSony:
 | ROM resource header of DRVR 4 (8 bytes; the same in both SE ROMs)
 Resource_DRVR_0004_DotSony_Header:
-        .long   0xC0002610                      | ROM resource header: tag $C0, physical size $2610 (8 + $2608)
-        .long   0x00000074                      | relative handle: master pointer at ROM zone + $74
+    ROM_RESOURCE DRVR_4                         | 8-byte resource header (include/romrsrc.inc)
 | --- ROM-variant difference @ $34680 ---
 | SE:      800K .Sony driver (resources/res_drvr_sony.s)
 | SE FDHD: SuperDrive .Sony driver (this file)

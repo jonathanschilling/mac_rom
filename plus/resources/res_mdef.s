@@ -63,8 +63,7 @@
 | -------------------------------------------------------------------------
 
 | resource header
-        .long   0xC0000406                      | ROM resource header: tag $C0, physical size $406 (8 + $3FE)
-        .long   0x0000006C                      | relative handle: master pointer at ROM zone + $6C
+    ROM_RESOURCE MDEF_0                         | 8-byte resource header (include/romrsrc.inc)
 _MDEF_0_:
         BRA.B   MDEF_ENTRY                      | skip resource header
   .byte 0x00,0x00                               | flags: unused
@@ -688,6 +687,7 @@ MDEF_GRAY_ITEM:
         _PaintRect                              | paint gray over disabled item
         _PenNormal                              | restore default pen state
         RTS                                     | return from MDEF_GRAY_ITEM
+    ROM_RESOURCE_END MDEF_0                     | end of the data: pads to even, sets the sizes
 
 | end of resource : 'MDEF' 0
 

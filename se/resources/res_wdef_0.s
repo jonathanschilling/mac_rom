@@ -70,8 +70,7 @@ Resource_WDEF_0000:
 | master pointer in the ROM zone (INITRESOURCES_CONT_2): 0x54 + 4 *
 | its index in the ROM map's reference lists.
 Resource_WDEF_0000_Header:
-    .long       0xC000069C                      | ROM resource header: tag $C0, physical size $69C (8 + $694)
-    .long       0x0000009C                      | relative handle: master pointer at ROM zone + $9C
+    ROM_RESOURCE WDEF_0                         | 8-byte resource header (include/romrsrc.inc)
 | ----------------------------------------------------------
 | _WDEF_0_ -- entry point and standard defproc header
 | ----------------------------------------------------------
@@ -900,4 +899,5 @@ WDEF_SIZEBOX_ICON:
     .short      0x0402                          | .....#........#.
     .short      0x07FE                          | .....##########.
     .short      0x0000                          | ................
+    ROM_RESOURCE_END WDEF_0                     | end of the data: pads to even, sets the sizes
 

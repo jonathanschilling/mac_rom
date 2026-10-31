@@ -681,6 +681,7 @@ TM_SEL3_RESET_STATE:
 | Initializes SCC serial port, then enters an infinite loop reading
 | commands via serial. Commands are single ASCII characters prefixed
 | by '*'. The loop: init SCC -> read char -> parse command -> repeat.
+TMENTRY1:                                       | MacSEROM.lst: second name of this address
 TMRESTART:
     MOVE.W      #0x2700,SR                      | supervisor mode, IPL=7 (mask all interrupts)
     MOVEQ.L     #0x0,D5                         | clear D5 (received char / status)
@@ -2126,5 +2127,7 @@ BEEP_SILENCE_LOOP:
     DBF.W       D1,BEEP_SILENCE_LOOP            | loop to fill buffer
     RTS                                         | return from BOOTBEEP
 | ERRORBEEP3 - error beep return stub (used by boot error paths)
+ERRORBEEP2:                                     | MacSEROM.lst: second name of this address
+ERRORBEEP1:                                     | MacSEROM.lst: second name of this address
 ERRORBEEP3:
     JMP         (A6)                            | return via A6

@@ -367,11 +367,11 @@ FINDNEXT_OFS_RTS:
         RTS                                     | return: D0 = size, D7 = next offset
 
 | ----------------------------------------------------------
-| UpdateResFile -- _UpdateResFile ($A999). Plus 316.
-| Walks all changed resources for a refnum and writes them out,
+| UpdateResFIle -- _UpdateResFile ($A999), labelled in MacPlusROM.lst's
+| spelling as in the Plus tree. Walks all changed resources for a refnum and writes them out,
 | then writes the map back. If mapCompact is set, does full
 | compaction (the "FindNext + write changed + maybe compact" loop).
-UpdateResFile:
+UpdateResFIle:
         BSR.W   STDMAPENTRY                     | find map by refnum
         BSR.W   CHECKLOAD_OK_4                  | test file read-only
         BNE.W   CMP_WRITE_MAP_SKIP              | read-only - skip

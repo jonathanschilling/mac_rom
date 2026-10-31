@@ -62,8 +62,7 @@
 |
 
 | resource header
-        .long   0xC0000FD6                      | ROM resource header: tag $C0, physical size $FD6 (8 + $FCE)
-        .long   0x00000064                      | relative handle: master pointer at ROM zone + $64
+    ROM_RESOURCE DRVR_9                         | 8-byte resource header (include/romrsrc.inc)
 _DRVR_9_.MPP:
   .short 0x5C00                                 | drvrFlags: dNeedLock, dNeedGoodbye, dStatEnable, dCtlEnable
   .short 0x0000                                 | drvrDelay
@@ -2520,6 +2519,7 @@ NBP_LISTENER_DROP:
         ADDQ.W  #0x3,D0                         | + 3 length bytes
         ADDA    D0,A5                           | A5 = next new tuple
         BRA.B   NBP_LISTENER_NEXTTUPLE          | ->
+    ROM_RESOURCE_END DRVR_9                     | end of the data: pads to even, sets the sizes
 
 | end of resource : 'DRVR' 9 '.MPP'
 

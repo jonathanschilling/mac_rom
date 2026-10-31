@@ -168,7 +168,7 @@ CalcVis:
         MOVE.L  D0,A2                           | A2 = WindowRecord
         MOVE.L  0x18(A2),D4                     | D4 = visRgn handle
         TST.B   wVisible(A2)                    | window visible?
-        BNE.B   CALCVIS                         | yes, calculate ->
+        BNE.B   CALCVIS_VISIBLE                 | yes, calculate ->
 | invisible window: set visRgn to empty
         MOVE.L  D4,-(SP)                        | push visRgn handle
         _SetEmptyRgn                            | visRgn = empty (invisible window)
@@ -183,7 +183,7 @@ CALCVIS_DONE:
 |
 | CalcVis: visible window - compute visRgn from content and desktop
 |
-CALCVIS:
+CALCVIS_VISIBLE:
         MOVE.L  (GrayRgn).w,-(SP)               | push desktop region
         MOVE.L  contRgn(A2),-(SP)               | push content region
         MOVE.L  D4,-(SP)                        | push visRgn (dest)

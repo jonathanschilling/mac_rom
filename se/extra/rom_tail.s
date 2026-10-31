@@ -20,6 +20,10 @@ ROMTail_Initials_SE:
     .ascii      "LWRLBBMABOEMTDAHJTCFJLMBKCRCLAKEHBRDCDAFSHFT JCS"
     .endr
     .ascii      "LWRLBBMABOEMTDAHJTCFJLMBKCRCLAKEHBRDCD"
+| The date at a fixed place: if the ROM resources grow into the tail, the
+| .org stops the assembly ("attempt to move .org backwards"; shorten the
+| initials above to make room); if they shrink, it pads with zeros.
+    .org    0x3FFEE                             | the date at ROM offset $3FFEE
 ROMTail_BuildDate_Thu_Nov_20_1986:
     .ascii      "Thu, Nov 20, 1986"             | build date
     .byte       0x11                            | last ROM byte
@@ -30,6 +34,12 @@ ROMTail_Initials_FDHD:
     .ascii      "SWC JSP GGD "
     .endr
     .ascii      "SWC JSP "
+| The patch code has a fixed place: the .Sony driver and the RAM-test hook
+| jump to its entry table by absolute address ($43D000, $43D034). If the
+| ROM resources grow into the tail, the .org stops the assembly ("attempt
+| to move .org backwards"; shorten the initials above to make room); if
+| they shrink, it pads with zeros.
+    .org    0x3D000                             | the patch code at ROM offset $3D000
 
 FDHD_ResourceTailPatchCode:
 | =========================================================================

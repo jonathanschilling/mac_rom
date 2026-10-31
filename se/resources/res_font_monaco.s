@@ -7,8 +7,7 @@
 Resource_FONT_0209:
 | FONT 521 resource header.
 Resource_FONT_0209_Header:
-    .long       0xC00009AC                      | ROM resource header: tag $C0, physical size $9AC (8 + $9A4)
-    .long       0x000000C0                      | relative handle: master pointer at ROM zone + $C0
+    ROM_RESOURCE FONT_521                       | 8-byte resource header (include/romrsrc.inc)
 | FONT 521 resource body.
 _FONT_521_:
     .byte 0x90,0x01,0x00,0x00
@@ -628,3 +627,4 @@ _FONT_521_:
     .byte 0x03,0x05,0x03,0x05
     .byte 0x02,0x09,0x03,0x05
     .byte 0x02,0x07,0x02,0x08
+    ROM_RESOURCE_END FONT_521                   | end of the data: pads to even, sets the sizes

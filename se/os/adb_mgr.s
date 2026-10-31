@@ -17,7 +17,7 @@
 | Initializes the ADB-based keyboard driver for the SE. Sets up
 | the JKybdTask vector, configures VIA shift register for ADB
 | communication, and initiates the ADB device scan.
-| Apple source module: KBDMNGR
+KBDMNGR:                                        | Apple source module (MacSEROM.lst)
 INITADB:
     CLR.B       (KbdType).W                     | clear keyboard type (unknown)
     BSR.W       ZERO_KEYMAP                     | init ADB hardware state

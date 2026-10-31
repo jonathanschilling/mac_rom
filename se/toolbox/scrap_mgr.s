@@ -32,7 +32,8 @@
 | (MacSEROM.lst also lists TE68KEND, the end of the TextEdit
 | module, at this offset.)
 | ----------------------------------------------------------
-| Apple source module: SCRAPMGR
+TE68KEND:                                       | MacSEROM.lst: end marker of the module before
+SCRAPMGR:                                       | Apple source module (MacSEROM.lst)
 INFOSCRAP:
     TST.W       (ScrapState).W                  | scrap initialized?
     BGE.B       INFOSCRAP_RETURN                | yes -> just return ptr

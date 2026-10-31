@@ -82,6 +82,7 @@
 | Block below is the system 'STR ' resource for default DA/desk-accessory
 | names and other tightly-packed initialization data; treat as opaque.
 | ==========================================================
+CMGREND:                                        | MacSEROM.lst: end marker of the module before
 RMGR:
     .long       0x00000100                      | system resource init data
     .long       0x00000100                      |

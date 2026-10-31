@@ -20,7 +20,7 @@
 | Side effects: SCSIDrvrs bitmap updated for any IDs that now
 | have a partition driver installed.
 |
-| Apple source module: SCSIBOOTS
+SCSIBOOTS:                                      | Apple source module (MacSEROM.lst)
 SCSILOAD:
     BTST        #0x7,(HWCfgFlags)               | SCSI hardware present ?
     BNE.B       BOOT_SCSI_TRY_DRIVE             | yes, scan bus
@@ -207,7 +207,7 @@ BOOT_SCSI_FIND_HFS:
     BRA.W       BOOT_SCSI_NO_PMAP               | yes, run driver init
 | ====================================================================
 |
-| SCSIREADBLOCKS / SCSIReadBlocks -- read N blocks from a SCSI device
+| SCSIREADBLOCKS -- read N blocks from a SCSI device
 |
 | D2 = block count, D3 = starting LBA, D4 = block size (bytes),
 | D5 = SCSI ID, A2 -> destination buffer.
@@ -226,10 +226,11 @@ SCSIREADBLOCKS:
     MOVEQ.L     #0x0,D7                         | clear D7 (retry flag = 0)
 | ----------------------------------------------------------
 |
-| SCSIReadBlocks
+| SCSIREADBLOCKS_RETRY -- build and send the READ(6) command; entered
+| again once after a unit attention (CHECK CONDITION)
 |
 | Called during boot.
-SCSIReadBlocks:
+SCSIREADBLOCKS_RETRY:
     LEA.L       (scratch8).W,A0                 | A0 -> CDB scratch (8 bytes)
     MOVE.B      #0x8,(A0)+                      | CDB[0] = 0x08 (READ(6))
     SWAP.W      D3                              | swap to read high half of LBA
@@ -283,14 +284,14 @@ BOOT_SCSI_HFS_FOUND:
     CMPI.W      #0x2,D7                         | CHECK CONDITION (status = 2) ?
     BNE.B       BOOT_SCSI_RDBLOCKS              | no, return error
     BSET        #0x1F,D7                        | yes, was bit 31 already set ?
-    BEQ.W       SCSIReadBlocks                  | no, retry once
-| Called by: BOOT_SCSI_HFS_FOUND, SCSIReadBlocks
+    BEQ.W       SCSIREADBLOCKS_RETRY            | no, retry once
+| Called by: BOOT_SCSI_HFS_FOUND, SCSIREADBLOCKS_RETRY
 BOOT_SCSI_RDBLOCKS:
     ADDA.W      #0x16,A7                        | drop 22 bytes of stack scratch
     MOVE.W      D7,D0                           | D0 = result code
     MOVE.L      (A7)+,D7                        | restore D7
     TST.W       D0                              | set Z if success
-    RTS                                         | return from SCSIReadBlocks
+    RTS                                         | return from SCSIREADBLOCKS
 | ----------------------------------------------------------
 |
 | BOOT_SCSI_DRVR_REFNUM -- 16-bit rotating-add checksum

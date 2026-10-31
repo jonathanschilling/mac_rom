@@ -103,13 +103,13 @@ CullPoints:
         MOVE.L  A1,D5                           | SAVE START FOR LATER
         MOVE.L  A1,A2                           | YES, MINH:=PT.H
         BRA.B   CULLPOINTS_WHILE1               | LOOP FOR MORE
-DELETE:
+CULLPOINTS_DELETE:
         ADDQ.W  #0x4,A1                         | SKIP OVER BOTH SRC POINTS
         BRA.B   CULLPOINTS_WHILE1               | GO TO LOOP START
 CULLPOINTS_MORE1:
         MOVE.L  (A1)+,D0                        | YES, MAXH:=PT.H
         CMP.L   (A1),D0                         | IS IT SAME AS NEXT ?
-        BEQ.B   DELETE                          | YES, DELETE BOTH
+        BEQ.B   CULLPOINTS_DELETE               | YES, DELETE BOTH
         MOVE.L  D0,(A2)+                        | NO, COPY TO DST
 CULLPOINTS_WHILE1:
         CMPA.L  A3,A1                           | IS SRCPTR < LASTPTR ?

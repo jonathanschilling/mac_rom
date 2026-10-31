@@ -46,7 +46,7 @@
 | Inside Macintosh: Memory, Ch 2: Memory Manager (pp 2-3 to 2-93)
 | Inside Macintosh Vol II, Ch 1: The Memory Manager (pp 7-52)
 
-| Apple source module: HEAP
+HEAP:                                           | Apple source module (MacSEROM.lst)
 SETAPPLBASE:
     MOVEM.L     D3/A2-A6,-(SP)                  | save regs
     MOVEA.L     (SysZone).W,A6                  | A6 = system zone
@@ -2152,7 +2152,8 @@ STDGZ_OK:
     MOVE.L      A1,-(SP)                        | push return address
     MOVE.L      D2,-(SP)                        | push user proc address
     RTS                                         | call user grow-zone proc via RTS
-| Apple source module: BLOCK2
+MEMMGREND:                                      | MacSEROM.lst: end marker of the module before
+BLOCK2:                                         | Apple source module (MacSEROM.lst)
 BLOCKMOVE:
     TST.L       D0                              | zero or negative count?
     BLE.B       BLOCKMOVE_EXIT                  | yes -> return noErr

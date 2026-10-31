@@ -180,10 +180,10 @@ CullPoints:
 
 | ----------------------------------------------------------
 |
-| DELETE
+| CULLPOINTS_DELETE -- the source pair was a duplicate: drop both points
 |
 | Called during boot.
-DELETE:
+CULLPOINTS_DELETE:
         ADDQ.W  #0x4,A1                         | SKIP OVER BOTH SRC POINTS
         BRA.B   CULLPOINTS_WHILE1               | GO TO LOOP START
 
@@ -195,7 +195,7 @@ DELETE:
 CULLPOINTS_MORE1:
         MOVE.L  (A1)+,D0                        | MORE1: GET CURRENT SRC POINT
         CMP.L   (A1),D0                         | IS IT SAME AS NEXT ?
-        BEQ.B   DELETE                          | YES, DELETE BOTH
+        BEQ.B   CULLPOINTS_DELETE               | YES, DELETE BOTH
         MOVE.L  D0,(A2)+                        | NO, COPY TO DST
 CULLPOINTS_WHILE1:
         CMP.L   A3,A1                           | WHILE1: IS SRCPTR < LASTPTR ?

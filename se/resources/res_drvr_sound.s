@@ -119,8 +119,7 @@
 | -------------------------------------------------------------------------
 Resource_DRVR_0003_DotSound:
 Resource_DRVR_0003_DotSound_Header:
-        .long   0xC0000398                      | ROM resource header: tag $C0, physical size $398 (8 + $390)
-        .long   0x00000078                      | relative handle: master pointer at ROM zone + $78
+    ROM_RESOURCE DRVR_3                         | 8-byte resource header (include/romrsrc.inc)
 
 | -------------------------------------------------------------------------
 | Driver header (IM II-188): flags, delay, event mask, menu, the offsets
@@ -644,3 +643,4 @@ SND_FREEFORM_WRAP:
         MOVEA.L (SoundBase).W,A2                | A2 = word 0 of the buffer
         MOVEQ.L #0x1F,D2                        | at most 32 samples
         BRA.B   SND_RESAMPLE_OUTER              | -> resample them
+    ROM_RESOURCE_END DRVR_3                     | end of the data: pads to even, sets the sizes

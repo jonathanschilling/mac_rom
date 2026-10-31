@@ -12,7 +12,7 @@
 |
 | References: Inside Macintosh Vol II, Ch 2 (The Segment Loader).
 
-| Apple source module: LOADER
+LOADER:                                         | Apple source module (MacSEROM.lst)
 LOADSEG:
     MOVEM.L     D0-D2/A0-A1,-(SP)               | save regs
     MOVE.W      0x18(SP),D0                     | D0 = segment number (from stack)

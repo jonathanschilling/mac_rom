@@ -11,8 +11,7 @@ Resource_bbmc_0000:
 Resource_bbmc_0_Header:
 | Bbmc 0 resource header.
 Resource_bbmc_0000_Header:
-    .long       0xC001428A                      | ROM resource header: tag $C0, physical size $1428A (8 + $14282)
-    .long       0x00000064                      | relative handle: master pointer at ROM zone + $64
+    ROM_RESOURCE bbmc_0                         | 8-byte resource header (include/romrsrc.inc)
 
 bbmc_team_photos:
 | Relative offsets of hidden PackBits frames.
@@ -20668,5 +20667,8 @@ BBMC_Frame_4_PackBits:
     .byte 0x00,0xB9,0x00,0xB9
     .byte 0x00,0xB9,0x00,0xB9
     .byte 0x00,0xB9,0x00,0xB9
-    .byte 0x00,0x00
+| The data end here: $14281 bytes (the 5th long of the frame table at
+| the start); ROM_RESOURCE_END pads the odd length with a zero byte.
+    .byte   0x00                                | last data byte
+    ROM_RESOURCE_END bbmc_0                     | end of the data: pads to even, sets the sizes
 

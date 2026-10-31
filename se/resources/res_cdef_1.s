@@ -93,8 +93,7 @@
 | -------------------------------------------------------------------------
 Resource_CDEF_0001:
 Resource_CDEF_0001_Header:
-        .long   0xC00004FA                      | ROM resource header: tag $C0, physical size $4FA (8 + $4F2)
-        .long   0x00000084                      | relative handle: master pointer at ROM zone + $84
+    ROM_RESOURCE CDEF_1                         | 8-byte resource header (include/romrsrc.inc)
 
 | -------------------------------------------------------------------------
 | Entry point and Apple's standard defproc header: a branch around it,
@@ -917,4 +916,5 @@ CDEF1_THUMBSBAR_SLOP:
         ADDQ.W  #0x1,D4                         | add increment
         MOVE.W  D4,CDEF1_TAXIS(A4)              | to derive axis parameter
         RTS                                     | return from ThumbSBar
+    ROM_RESOURCE_END CDEF_1                     | end of the data: pads to even, sets the sizes
 

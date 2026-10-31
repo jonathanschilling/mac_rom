@@ -47,8 +47,7 @@ Resource_tcsl_0000:
 | master pointer in the ROM zone (INITRESOURCES_CONT_2): 0x54 + 4 *
 | its index in the ROM map's reference lists.
 Resource_tcsl_0000_Header:
-    .long       0xC000008E                      | ROM resource header: tag $C0, physical size $8E (8 + $86)
-    .long       0x00000060                      | relative handle: master pointer at ROM zone + $60
+    ROM_RESOURCE tcsl_0                         | 8-byte resource header (include/romrsrc.inc)
 | ----------------------------------------------------------
 | _tcsl_0_ -- two words of unknown meaning (as an instruction:
 | ORI.B #1,D0), then the code
@@ -117,4 +116,5 @@ TCSL_ROWLOOP:
 | the next resource's header)
 TCSL_NOBBMC:
     _Debugger                                   | break into the debugger
+    ROM_RESOURCE_END tcsl_0                     | end of the data: pads to even, sets the sizes
 

@@ -19,7 +19,8 @@
 | Constants: $A8C0 = seconds/day, $5B5 = days*4/year (avg),
 |            $770 = 1904, $F4F = 4015 (mday-of-year mult).
 | ----------------------------------------------------------
-| Apple source module: SEXYDATE
+PACKMGREND:                                     | MacSEROM.lst: end marker of the module before
+SEXYDATE:                                       | Apple source module (MacSEROM.lst)
 SECS2DATE:
     MOVEM.L     D0-D4/A0,-(A7)                  | save scratch
     MOVEQ.L     #0x0,D1                         | clear D1

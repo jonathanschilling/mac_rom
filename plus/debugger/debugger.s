@@ -77,12 +77,15 @@ CLEAR_SEREGS:
 
 | ----------------------------------------------------------
 |
-| Debugger - ROM debugger entry point (called via _Debugger trap or NMI)
+| P_Debugger - ROM debugger entry point (called via _Debugger trap or NMI)
+| (MacSEROM.lst names this code DEBUGGER; MacPlusROM.lst lists Debugger at
+| the unimplemented-trap handler, where that name is a label, so this
+| routine is P_Debugger)
 |
 | Saves all registers to SERegs, checks if an external debugger is installed
 | via MacJmp, and dispatches to it. If no debugger, returns error code -8.
 | Stack frame on entry: return address, trap word, parameter size word.
-Debugger:
+P_Debugger:
         MOVEM.L D0-D7/A0-A7,(0x3FFC80).l        | save all registers to SERegs save area
 
         BSET    #0x7,(MacJmp).w                 | set bit 7: debugger-active flag

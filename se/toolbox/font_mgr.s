@@ -25,7 +25,7 @@
 | Then calls _FMSwapFont (1,1)/(0,0)(0) to install the System
 | (Chicago 12) font as ROMFont0 for cold boot use.
 |
-| Apple source module: FONTMANAGER
+FONTMANAGER:                                    | Apple source module (MacSEROM.lst)
 INITFONTS:
     CLR.W       (FOutError).W                   | clear out error
     CLR.L       (FOutFontHandle).W              | clear out font handle

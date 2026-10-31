@@ -19,7 +19,7 @@
 | event code through jump table SYSEVT_DISPATCH.
 | Returns TRUE (1) in result word if the system handled the event.
 | ----------------------------------------------------------
-| Apple source module: DESKMGR
+DESKMGR:                                        | Apple source module (MacSEROM.lst)
 SYSTEMEVENT:
     MOVE.L      A3,-(A7)                        | save A3
     MOVEA.L     0x8(A7),A3                      | A3 -> EventRecord parameter

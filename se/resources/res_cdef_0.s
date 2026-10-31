@@ -97,8 +97,7 @@
 | -------------------------------------------------------------------------
 Resource_CDEF_0000:
 Resource_CDEF_0000_Header:
-        .long   0xC000032A                      | ROM resource header: tag $C0, physical size $32A (8 + $322)
-        .long   0x00000080                      | relative handle: master pointer at ROM zone + $80
+    ROM_RESOURCE CDEF_0                         | 8-byte resource header (include/romrsrc.inc)
 
 | -------------------------------------------------------------------------
 | Entry point and Apple's standard defproc header: a branch around it,
@@ -573,4 +572,5 @@ CDEF0_DRAWRBUTTON:
 CDEF0_DONEPCHECK:
         ADDQ.W  #0x8,SP                         | pop off the rectangle
         BRA.W   CDEF0_DONEDRWBUT                | all done!
+    ROM_RESOURCE_END CDEF_0                     | end of the data: pads to even, sets the sizes
 

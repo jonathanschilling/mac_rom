@@ -18,7 +18,7 @@
 | VBLTask.qType must be 1 (vType). If vblCount and vblPhase are
 | both non-zero, computes the phase-aligned first-fire count.
 | Returns D0 = 0 (success) or D0 = -2 (bad qType).
-| Apple source module: VBLCORE
+VBLCORE:                                        | Apple source module (MacSEROM.lst)
 VINSTALL:
     CMPI.W      #0x1,0x4(A0)                    | qType == vType (1)?
     BEQ.B       VINSTALL_SYNC                   | yes: install task

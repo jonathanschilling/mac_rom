@@ -45,6 +45,7 @@
 | References:
 | Inside Macintosh Vol I, Ch 12: TextEdit
 
+GETMGREND:                                      | MacSEROM.lst: end marker of the module before
 TEXTEDIT:
     .long       0x14E41B28
     .long       0x1E181CD2
@@ -2296,11 +2297,11 @@ P_TERECAL_NEXT:
     MOVE.W      (A2)+,D6                        | D6 = next lineStart
     MOVE.W      D6,-0x4(A6)                     | save as change-point local
     CMP.W       (A2),D3                         | scan position < next lineStart ?
-    BCS.B       TECut                           | yes, found containing line
+    BCS.B       P_TERECAL_FOUND                 | yes, found containing line
     BEQ.B       P_TERECAL_BOUNDARY              | exactly at boundary, special case
     ADDQ.W      #0x1,0x5E(A3)                   | else inc nLines (skip this line)
     BRA.B       P_TERECAL_NEXT                  | next lineStart
-TECut:
+P_TERECAL_FOUND:
     BSR.W       P_TEWDBREAK_NEXT                | find next break boundary
     CMP.W       D0,D3                           | scan past break ?
     BCC.B       P_TERECAL_DONE                  | yes, no rewind needed

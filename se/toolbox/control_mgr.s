@@ -15,7 +15,7 @@
 |
 | References: Inside Macintosh Vol I, Ch 10 (The Control Manager).
 
-| Apple source module: CMGR
+CMGR:                                           | Apple source module (MacSEROM.lst)
 NEWCONTROL:
     LINK        A6,#0x0                         | set up frame
     MOVEM.L     A2-A4,-(A7)                     | save regs

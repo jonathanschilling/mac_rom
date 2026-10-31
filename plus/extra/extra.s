@@ -6,6 +6,12 @@
 | SCSI patch, easter egg, date string
 | Called during boot (v3 only; see ROM-variant notes below).
 |
+| The extra area has a fixed place: v3's InitIOMgr calls EXTRA_CONT by its
+| absolute address $41FFC0. The ROM resources fill the space up to here
+| exactly. If they grow, the .org stops the assembly ("attempt to move .org
+| backwards"); if they shrink, it pads with zeros.
+    .org    0x1FFC0                             | the extra area at ROM offset $1FFC0
+|
 | --- ROM-variant difference @ $1FFC0-$1FFCF (first 16 bytes of area) ---
 | v1/v2: these 16 bytes are the opening of a developer-initials easter
 | egg: "ALR ELR BA BMB E" (continuing below as "HB JTC SC DLD...").

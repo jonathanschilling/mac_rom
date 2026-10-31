@@ -890,10 +890,11 @@ MAXLOAD_RET:
 
 | ----------------------------------------------------------
 |
-| _UpdateResFile ($A999)
+| _UpdateResFile ($A999); the label is MacPlusROM.lst's spelling
+| UpdateResFIle
 |
 | Called during boot.
-UpdateResFile:
+UpdateResFIle:
         BSR     STDMAPENTRY                     | StdMapEntry: find map by refnum
         BSR     CHECKLOAD_OK_4                  | test if file is read-only
         BEQ.B   UPDRES_CHECK_CHG                | writable, proceed with update
@@ -1721,6 +1722,7 @@ GETRES_EXIT:
 | match is loaded via CheckLoad. Not found: NIL and ResErr = resNotFound.
 | The loop continues at RESMGR_SKIP.
 |
+Get1NamedResour:                                | MacPlusROM.lst spelling (15 characters) of Get1NamedResource
 Get1NamedResource:
         ST.B    (RMgrCurOnly).w                 | restrict search to current map only
 | GetNamedResource -- _GetNamedResource ($A9A1): FUNCTION GetNamedResource (theType: ResType; name: Str255): Handle;
@@ -3017,6 +3019,7 @@ ResError:
 | stub because MacWrite 2.2 still calls the trap (System 7.1
 | ResourceMgr.a change history, 17oct85).
 |
+Trap1_1AC:                                      | MacPlusROM.lst placeholder for trap $A9AC (AddReference)
 AddReference:
         MOVE.L  (SP)+,A0                        | pop return address
         ADDA    #0xA,SP                         | remove 10 bytes of parameters
@@ -3033,6 +3036,7 @@ AddReference:
 | (-197). Like AddReference, a working routine in the 64K ROM that this
 | ROM keeps only as a stub for MacWrite 2.2.
 |
+Trap1_1AE:                                      | MacPlusROM.lst placeholder for trap $A9AE (RmveReference)
 RmveReference:
         MOVE.L  (SP)+,(SP)                      | collapse stack: remove 4-byte handle param
         MOVE    #-0xC5,(ResErr).w               | rmvRefFailed (-197): always fails
@@ -3532,6 +3536,7 @@ MAXSIZERSRC_CONT:
 | ResourceMgr.a history, 21aug85: "added new trap called RsrcMapEntry").
 | Called via the trap by PRINT_CHK_DRVR (.Print driver resource).
 |
+Trap1_1C5:                                      | MacPlusROM.lst placeholder for trap $A9C5 (RsrcMapEntry)
 RsrcMapEntry:
         BSR     WRITERESOURCE_CONT              | prologue + find ref entry, preset result=-1
         MOVE.L  A2,D0                           | D0 = absolute ref entry address

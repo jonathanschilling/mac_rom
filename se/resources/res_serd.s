@@ -177,8 +177,7 @@
 | behaves like one to a heap block)
 Resource_SERD_0000:
 Resource_SERD_0000_Header:
-        .long   0xC00008FC                      | ROM resource header: tag $C0, physical size $8FC (8 + $8F4)
-        .long   0x00000068                      | relative handle: master pointer at ROM zone + $68
+    ROM_RESOURCE SERD_0                         | 8-byte resource header (include/romrsrc.inc)
 SERD_0:
 | ----------------------------------------------------------
 | _SERD_0_ -- resource entry: a BRA over the resource's own header
@@ -1598,4 +1597,5 @@ SERD_EXTINT_BRKRECD:
         TST.B   SV_RDPEND(A2)                   | read waiting?
         BNE.B   SERD_ABORTREAD                  | yes -> complete it with the error
         RTS                                     | return to the dispatcher
+    ROM_RESOURCE_END SERD_0                     | end of the data: pads to even, sets the sizes
 

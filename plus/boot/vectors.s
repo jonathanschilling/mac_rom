@@ -36,6 +36,9 @@
 | === 68000 Reset Vector Table ===
 | On power-on, the 68000 loads SSP from offset 0 and PC from offset 4.
 | ROM is at 0x400000, but overlay maps it to 0x000000 during reset.
+| BASEOFROM (the SE ROM's name, MacSEROM.lst): ROM offset 0, the base of
+| the offsets in the ROM resource map (resources/res_map.s).
+BASEOFROM:
 | --- ROM-variant difference @ $0000 ---
 | v1: checksum $4D1EEEE1 (1986-01)
 | v2: checksum $4D1EEAE1 (1986-03 -- branch-condition fixes)
@@ -371,6 +374,7 @@ ERASE_SCRN_LOOP:
 | byte to send in D1
 | byte returned in D2
 | Called during boot.
+Trap0_53:                                       | MacPlusROM.lst placeholder for trap $A053 (ClkNoMem)
 ClkNoMem:
         ORI     #0x300,SR                       | Disable interrupts during RTC access
         MOVE.L  #VIA_PortB,A1                   | VIA PortB: PB0=RTCdata, PB1=RTCclock, PB2=RTCenable
@@ -1198,8 +1202,51 @@ ICON_DRAW_DONE:
 | $A800-$A80C, $A814, $A83C-$A83E, $A860, $A88F, $A895, $A89F, $A8B5,
 | $A8D7, $A8F7, $A8FD and $A9C3 (as Trap1_xxx), plus Debugger ($A9FF),
 | ScrnAddress, ScrnSize and SetAppBase for further empty Toolbox slots.
-| The routines Debugger, ScrnAddress and ScrnSize themselves are not
-| reached through the trap table; SetAppBase is OS trap $A057.
+| All 38 names are labels here, in MacPlusROM.lst's order, so that the
+| ROM map has every line of Apple's map. The routines Debugger,
+| ScrnAddress and ScrnSize are in this ROM all the same, but not
+| reached through the trap table (labels P_Debugger, P_ScrnAddress,
+| P_ScrnSize). SetAppBase is also the name of the _SetApplBase routine
+| (OS trap $A057); its second entry here is the label SetAppBase__MAP,
+| which the map generator lists as SetAppBase.
+Trap0_6B:
+Trap0_56:
+Trap0_5F:
+Trap0_5B:
+Trap0_55:
+Trap0_5C:
+Trap0_5E:
+Trap0_5D:
+Trap1_95:
+Trap1_3C:
+Trap1_3D:
+Trap1_B5:
+Trap1_14:
+Trap1_9F:
+ScrnSize:
+SetAppBase__MAP:
+Trap1_60:
+Trap1_3E:
+Trap1_8F:
+ScrnAddress:
+Trap1_C:
+Trap1_3:
+Trap1_4:
+Trap1_5:
+Trap1_0:
+Trap1_1:
+Trap1_2:
+Trap1_9:
+Trap1_A:
+Trap1_B:
+Trap1_6:
+Trap1_7:
+Trap1_8:
+Trap1_D7:
+Trap1_1C3:
+Debugger:
+Trap1_F7:
+Trap1_FD:
 Unimplemented:
         MOVEQ.L #0xC,D0                         | D0 = 12 (unimplemented trap icon ID)
         BRA     SysError                        | Display error icon and halt

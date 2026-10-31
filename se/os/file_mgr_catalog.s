@@ -18,7 +18,7 @@
 | References:
 | Inside Macintosh: Files, Ch 2: File Manager, "Data Organization on Volumes"
 
-| Apple source module: CMSVCS
+CMSVCS:                                         | Apple source module (MacSEROM.lst)
 CMCREATECN:
     MOVE.L      (A7)+,-(A6)                     | save return address on A6 stack
     MOVEM.L     D3-D7/A0-A4,-(A6)               | save regs
@@ -602,7 +602,7 @@ UPD_VCNTS_DONE:
     RTS                                         | return from UpdVCnts
 | BuildKey: build a catalog key record
 | Called by: CMCREATECN, CC_BLD_THD, CC_CLR_THD_LOOP, CMDELETECN_DODELETE, CMRENAMECN (and 1 more)
-| Apple source module: CMMAINT
+CMMAINT:                                        | Apple source module (MacSEROM.lst)
 BUILDKEY:
     MOVEM.L     D0/A0-A1,-(A7)                  | save regs
     MOVE.B      #0x6,(A1)                       | ckrKeyLen = 6 (minimum: len+rsrvd+parID)

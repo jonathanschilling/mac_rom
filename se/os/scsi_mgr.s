@@ -67,7 +67,7 @@
 |   +0x00..+0x5F : 24 long absolute jump addresses (one per selector)
 |   +0x60       : host SCSI ID mask byte (1 << host_id)
 |   +0x61..    : runtime state (busy flag, last-reset tick, etc.)
-| Apple source module: SCSISTUFF
+SCSISTUFF:                                      | Apple source module (MacSEROM.lst)
 INITSCSIMGR:
     MOVEQ.L     #0x74,D0                        | request 0x74 bytes for SCSI globals
     _NewPtrSysClear                             | _NewPtr in system zone, cleared

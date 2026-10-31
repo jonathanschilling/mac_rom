@@ -17,7 +17,8 @@
 | resource, sets ROMMapInsert=$FF00 (mark in resource map),
 | stores handle into AppPacks/App2Packs[packID] slot.
 | ----------------------------------------------------------
-| Apple source module: PACKDISPATCHER
+FMGREND:                                        | MacSEROM.lst: end marker of the module before
+PACKDISPATCHER:                                 | Apple source module (MacSEROM.lst)
 INITPACK:
     SUBQ.L      #0x4,A7                         | room for handle result
     MOVE.L      #0x5041434B,-(A7)               | push 'PACK' type

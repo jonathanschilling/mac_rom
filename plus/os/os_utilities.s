@@ -21,6 +21,7 @@
 | Read Param
 |
 | _ReadParam: read PRAM into low-memory SysParam block
+Trap0_37:                                       | MacPlusROM.lst placeholder for trap $A037 (ReadParam)
 ReadParam:
         LEA.L   (SysParam_SPValid).w,A1         | A1 = dest (SysParam area)
         BSR.B   READPARAM_CONT                  | read 20 bytes from RTC PRAM
@@ -110,7 +111,7 @@ CmpString:
         MOVE    D0,D2                           | D2 = length2
         SWAP    D0                              | D0.lo = length1
         CMP     D0,D2                           | same length?
-        BNE.B   CMPSTRING                       | no, can't be equal ->
+        BNE.B   CMPSTRING_LENDIFF               | no, can't be equal ->
         SWAP    D0                              | restore D0
         BSR.B   RelString                       | compare chars
         BPL.B   CMPSTRING_CONT                  | str1 >= str2 ->
@@ -120,10 +121,10 @@ CMPSTRING_CONT:
 
 | ----------------------------------------------------------
 |
-| CMPSTRING
+| CMPSTRING_LENDIFF
 |
 | CmpString: lengths differ -> not equal
-CMPSTRING:
+CMPSTRING_LENDIFF:
         MOVEQ.L #0x1,D0                         | not equal (length mismatch)
         RTS                                     | return nonzero (strings differ)
 
@@ -240,6 +241,7 @@ RELSTRING_EXIT_4:
 |
 | Toolbox trap $A854, UprString's trap number in the 64K ROM, dispatches
 | here as well (MacPlusROM.lst: Trap1_54).
+Trap1_54:                                       | MacPlusROM.lst placeholder for trap $A854 (UprString)
 UprString:
         BSR.B   RELSTRING_CONT_4                | set up conversion tables
         BRA.B   UPRSTRING_LOOP_2                | -> convert loop

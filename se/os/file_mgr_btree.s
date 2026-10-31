@@ -24,7 +24,7 @@
 | References:
 | Inside Macintosh: Files, Ch 2: "Data Organization on Volumes"
 
-| Apple source module: BTSVCS
+BTSVCS:                                         | Apple source module (MacSEROM.lst)
 BTCLOSE:
     MOVE.L      (0x730).W,-(A7)                 | HFS vector: BTClose trampoline
     RTS                                         | dispatch via vector
@@ -841,7 +841,7 @@ GETBTVARSIZE:
     JSR         GETMAXKEY(PC)                   | D0 = max key length
     ADDI.W      #0x34,D0                        | add BTVRecord+TPR overhead
     RTS                                         | return size in D0
-| Apple source module: BTALLOC
+BTALLOC:                                        | Apple source module (MacSEROM.lst)
 ALLOCNODE:
     MOVE.L      (0x758).W,-(A7)                 | HFS vector: AllocNode trampoline
     RTS                                         | dispatch via vector
@@ -1004,7 +1004,7 @@ EXTBT_UPDFREE:
     CLR.B       D0                              | result = noErr
     BSR.W       REL_MAP                         | release map node if held
     ST.B        (SysCRefCnt).W                  | flag system cache modified
-    BSR.W       FlushMDB                        | update alternate MDB
+    BSR.W       UPDALTMDB                       | update alternate MDB
 | Called by: VEXTBTFILE, EXTBT_INITMAP, EXTBT_SCANMAP
 EXTBT_EXIT:
     MOVEM.L     (A6)+,D2-D6/A2                  | restore regs
@@ -1098,8 +1098,9 @@ REL_MAP:
     MOVE.L      (A6)+,-(A7)                     | restore return address to stack
     TST.W       D0                              | set condition codes
     RTS                                         | return from RelMapNode
-| UpdateAltMDB: update the alternate MDB on disk
-FlushMDB:
+| UPDALTMDB (Apple's UpdAltMDB, vector JUpdAltMDB of BTAlloc.a): update the
+| alternate MDB on disk
+UPDALTMDB:
     MOVE.L      (A7)+,-(A6)                     | save return address on A6 stack
     MOVEM.L     D0-D2/A0-A3/A5,-(A6)            | save regs
     MOVE.W      0x2(A4),D1                      | D1 = B-tree file refnum
@@ -1159,7 +1160,7 @@ FLUSHMDB_EXIT:
     TST.W       D0                              | set condition codes
     RTS                                         | return from UpdateAltMDB
 | RotateLT: rotate records from right node to left sibling
-| Apple source module: BTMAINT1
+BTMAINT1:                                       | Apple source module (MacSEROM.lst)
 ROTATELT:
     MOVEM.L     D2-D7/A2-A5,-(A7)               | save regs
     MOVEA.L     A0,A5                           | A5 = ptr to new record
@@ -1441,7 +1442,7 @@ ROTRECLT_EXIT:
     MOVEM.L     (A7)+,A2-A3                     | restore regs
     RTS                                         | return from RotRecLT
 | BuildIRec: build index record (key + child node ptr)
-| Apple source module: BTMAINT2
+BTMAINT2:                                       | Apple source module (MacSEROM.lst)
 BUILDIREC:
     MOVE.L      D2,-(A7)                        | save D2
     MOVE.L      D0,D2                           | D2 = child node number

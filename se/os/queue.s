@@ -25,7 +25,7 @@
 | Element at (A0): +0 = qLink (long, next pointer)
 | Runs with IPL raised to prevent interrupt corruption.
 | Called by: VINSTALL_ENQUEUE, ENQUEUE_IOREQ, ADDDRIVE, POSTEVENT_FILL, FSQUEUE_ENQUEUE (and 2 more)
-| Apple source module: QSTUFF
+QSTUFF:                                         | Apple source module (MacSEROM.lst)
 ENQUEUE:
     MOVE.W      SR,-(A7)                        | save status register
     ADDQ.W      #0x2,A1                         | A1 = skip flags word, point to qHead

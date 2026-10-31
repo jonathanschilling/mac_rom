@@ -23,7 +23,8 @@
 | Searches for ptr1[len1] starting at offset in handle,
 | replaces match with ptr2[len2]. Returns offset past match.
 | ----------------------------------------------------------
-| Apple source module: BYTES
+DMGREND:                                        | MacSEROM.lst: end marker of the module before
+BYTES:                                          | Apple source module (MacSEROM.lst)
 MUNGER:
     LINK        A6,#-0x8                        | locals: -8(A6)=origSize, -4(A6)=sizeDelta
     MOVEM.L     D2-D7/A2-A4,-(A7)               | save all working registers

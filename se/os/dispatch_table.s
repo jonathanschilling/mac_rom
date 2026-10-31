@@ -9,9 +9,10 @@
 |
 | References: Inside Macintosh Vol II, Ch 13 (The Trap Dispatcher)
 
+RESTOP:                                         | Apple source module (MacSEROM.lst)
+DSPTABLE:                                       | Apple source module (MacSEROM.lst)
 Compressed_ALine_Dispatch_Table:
 | Data table decoded by InitDispatcher.
-| Apple source module: RESTOP, DSPTABLE
 DISPTABLE:
     .byte 0x80,0x80,0x80,0x80
     .byte 0x80,0x80,0x80,0x80
@@ -301,10 +302,3 @@ DISPTABLE:
     .byte 0x88,0x7E,0x19,0x05
     .byte 0x97,0x15,0x09,0x02
     .byte 0x76,0xF4,0x00,0x00
-| Resource area header: the long at +0x1A of the ROM header points here.
-| InitResources reads the number of ROM resources (one master pointer each
-| in the ROM zone) and the size of the map that follows (resources/res_map.s).
-ROM_Resource_Area_Header:
-    .short      0x001C                          | 28 ROM resources
-    .short      0x01FA                          | resource map size: $1FA bytes
-
