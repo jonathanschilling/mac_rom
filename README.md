@@ -81,7 +81,7 @@ Per-target builds:
 
 The resource forks of the Plus and SE ROMs (drivers, packages, definition
 procedures, cursors, fonts, ...) are described in Rez, the resource
-language of Apple's MPW: rez/plus/RomResources.r and rez/se/RomResources.r
+language of Apple's MPW: `rez/plus/RomResources.r` and rez/se/RomResources.r
 list the resources in ROM order with their names and attributes, and the
 fields of the resource map. tools/rez/rezc.py, an independent Rez compiler
 (Python 3), turns each into include/<tree>_rsrc.inc: the resource map with
